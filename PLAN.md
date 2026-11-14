@@ -165,4 +165,4 @@ constraints, effort and its dependencies (`pdl find --kind task --tags proposed`
 | Phase | Expected | Actual |
 |---|---|---|
 | 0 Foundation | Docs, report, proposed roadmap, handoff | delivered 2026-11-14 in pull request 2; awaiting the owner's sign-off |
-| Stage 0 | Leftovers removed; pull request 1 reviewed and fixed; both pull requests signed off; handoff | in progress. 0.1 and 0.2 done 2026-11-14; the 0.3 review is running |
+| Stage 0 | Leftovers removed; pull request 1 reviewed and fixed; both pull requests signed off; handoff | 0.1 to 0.3 done 2026-11-14. Pull request 1 was reviewed by three independent reviewers (45 findings, with overlaps) and fixed in commit `3fa3928`: typecheck and lint clean, full suite 5,405 of 5,412 with 4 skipped and 3 load timeouts in `headless-helper-lifecycle` that pass alone. Different from expected: three fix agents, not one; nine findings are left as owner decisions and two were declined. Not done: the owner's sign-offs (0.4), and hands-on checks of microphone dictation, read-each-reply-aloud and the desktop window |
