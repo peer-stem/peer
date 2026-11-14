@@ -64,7 +64,7 @@ Nothing skips a step: a view never fetches, and a store never touches the DOM.
 | `src/{agent,core,server,store}` | upstream's, merged from `upstream/main` | the engine |
 | `src/host/` | new | the Node server |
 | `src/client/` | new | the CloudCanvas client |
-| `extern/cloudcanvas` | new, submodule | pinned at `c5e6e07` to begin with |
+| `extern/cloudcanvas` | submodule, added 2026-11-14 | `CloudsEcosys/cloudcanvas` pinned at `c5e6e07` (v0.6.0) |
 | `app/`, `components/` | upstream's, kept until the removal phase | the React and Next.js interface |
 | `tests/` | flat, as upstream keeps it | new files prefixed `host-` and `client-` |
 | `tools/` | ours | `twm-speech-bridge` |
@@ -94,9 +94,16 @@ New directories are ones upstream does not have, so merges into the engine do no
 | Rewrite the logic too | It is already framework-free and sits on TypeScript agent libraries; nothing is gained |
 | Vendor CloudCanvas into the repository | Fixes would drift from the framework's own repository; the owner chose a submodule |
 
+### Moving the CloudCanvas pin (proposed)
+
+The pin moves only in a commit of its own, on its own branch, never as a side effect of other work. That commit
+states the CloudCanvas range it moves across (`old..new`), and it merges only with the client tests green on the
+new pin and a line in `CHANGELOG.md`. A fix peer needs in CloudCanvas is made in CloudCanvas first, then the pin
+moves to it; peer does not patch the submodule in place. After cloning: `git submodule update --init`.
+
 ## 7. Foundation the first phases build
 
-1. The submodule and the rule for moving its pin.
+1. The submodule (done, 2026-11-14) and the rule for moving its pin (above).
 2. Type definitions for the CloudCanvas surface peer uses.
 3. The host skeleton, with the route table and a parity test against the Next routes.
 4. A non-blocking, configurable logger and pluggable configuration for host and client.
