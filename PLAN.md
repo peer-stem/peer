@@ -138,4 +138,4 @@ constraints, effort and its dependencies (`pdl find --kind task --tags proposed`
 
 | Phase | Expected | Actual |
 |---|---|---|
-| 0 Foundation | Docs, report, proposed roadmap, handoff | in progress, 2026-11-14 |
+| 0 Foundation | Docs, report, proposed roadmap, handoff | delivered 2026-11-14 in pull request 2; awaiting the owner's sign-off |
