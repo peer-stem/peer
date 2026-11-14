@@ -1,3 +1,8 @@
+> **peer** is a fork of [LearnHarness](https://github.com/amosblomqvist/learnharness) whose interface is moving
+> to [CloudCanvas](https://github.com/CloudsEcosys/cloudcanvas). The fork's design, architecture, specification
+> and plan are in [DESIGN.md](DESIGN.md), [ARCHITECTURE.md](ARCHITECTURE.md), [SPEC.md](SPEC.md) and
+> [PLAN.md](PLAN.md). Everything below is upstream's README.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/lh_banner_dark.png">
