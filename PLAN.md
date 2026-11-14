@@ -17,7 +17,7 @@ the owner's sign-off on the quality gates.
 | 4 Cutover | The desktop app ships the API server and the new client | 3 |
 | 5 Removal | React, Next.js, Tailwind and the old render tests are gone | 4 |
 | 6 Canvases | Model-built graphs, SVG, dashboards, richer knowledge graphs | 5 |
-| 7 Learner features | Onboarding, a knowledge base about the learner, visual assessment, topic linking, skills dashboard, thinking, masterclass mode, seams between domains, mastery and mystery, chained learning | 5; some items need 6 |
+| 7 Learner features | Onboarding, a knowledge base about the learner, visual assessment, topic linking, skills dashboard, thinking, masterclass mode, seams between domains, mastery and mystery, chained learning, learning style and confidence | 5; some items need 6 |
 
 ## Stage 0: cleanup and close-out
 
@@ -150,6 +150,7 @@ Discovery sprint that states what exists, what it changes in the engine, and wha
 | Seams between domains: learned topics that are connected group and connect in the graph; gaps between related or cross-domain topics are identified, tested and taught. Placed last by the owner, after everything else | open |
 | Mastery and mystery: identify areas of mastery and areas of mystery, and the topics in the map that bridge from what is held into a target area | open |
 | Chained learning across subjects: relate the areas the learner is working through, teach a missing foundation inside the subject that needs it, and credit progress in both | open |
+| Learning style and confidence: learn the individual's learning style, how they grade their own confidence, and their styles of communication | open |
 
 Items that touch `src/{agent,core,store}` change upstream's engine, so each is designed to stay separable from
 it (SPEC §5.5).
