@@ -1,8 +1,10 @@
 # peer: specification
 
 Status: foundation draft, 2026-11-14; §2, §6 and §7 corrected the same day to the owner's model (DESIGN §3: the
-client is the host, and the Node process is only the engine's API). This states what must be true of the rewrite.
-Points marked **open** are not decided, and points marked **proposed** await the owner.
+client is the host, and the Node process is only the engine's API), and again the same day to the owner's decisions
+(DESIGN §3, §3.1): the API process also hands out the client's files unchanged, and the view contract is superseded.
+This states what must be true of the rewrite. Points marked **open** are not decided, points marked **proposed**
+await the owner, and points marked **decided** were decided by the owner on 2026-11-14.
 
 ## 1. Parity
 
@@ -24,9 +26,11 @@ the current behaviour and the existing render tests, and is approved before deve
 
 ## 2. Engine API server
 
-Status: **proposed** contract (sprint 1.1, item 1.4), awaiting the owner's approval. The directory name `src/api` is
-**proposed**. The interface runs in the window (DESIGN §3); this server only answers the engine's API. It does not
-serve, render or hand out the interface. Sources: **R** = `.context/logs/reports/2026-11-14-host-route-inventory.md`,
+Status: the contract sprint A1 builds against, as named in the execution plan the owner approved on 2026-11-14.
+The points marked **decided** are in DESIGN §3.1; §2.10 lists what a test still has to settle. The directory name `src/api` is **decided**. The interface runs in the window (DESIGN §3);
+this server answers the engine's API and hands out the client's files unchanged, same origin (§2.11). It renders
+nothing. Handing out the client's files was "a Phase 2 decision" until the owner decided it on 2026-11-14.
+Sources: **R** = `.context/logs/reports/2026-11-14-host-route-inventory.md`,
 **St** = `.context/logs/reports/2026-11-14-host-static-surface.md`, **N** = Next 16.4.3's compiled source, read and
 not run, at `/usr/lib/persist/peer/work/pr1/node_modules/next/dist/`.
 
@@ -34,7 +38,8 @@ not run, at `/usr/lib/persist/peer/work/pr1/node_modules/next/dist/`.
 
 | In | Out |
 |---|---|
-| The 50 route files, 73 exported methods and 5 streams under `/api` (R §1.4), plugin assets included (row 33) | Pages, `public/`, `/_next/**`, the client's own files: not Phase 1. How the client's files reach the window is a Phase 2 decision (**open**, ARCHITECTURE §8) |
+| The 50 route files, 73 exported methods and 5 streams under `/api` (R §1.4), plugin assets included (row 33) | Pages, `/_next/**`, rendering anything |
+| The client's files, handed out unchanged (§2.11) | Changing those files in any way |
 | Calling the existing handlers in `app/api/**/route.ts` as they are | Editing anything under `app/`, `src/{agent,core,server,store}`, `proxy.ts` or `instrumentation.ts` |
 | Running beside Next | Replacing Next for the old interface: it stays on Next, untouched, until Phase 5 |
 
@@ -55,7 +60,8 @@ type Dispatch = (request: Request) => Promise<Response>;
 - The handler is the module's exported function, called unwrapped with a web `Request`. Handlers use only `Request`
   members (R §1.1 item 2).
 - `Dispatch` is the router's single entry: gate, match and call (§2.4). It knows nothing about `node:http`, so the
-  same table can sit behind another transport (**open** point on Electron's channel, ARCHITECTURE §8).
+  same table can sit behind another transport. **Decided**: the client reaches the engine over HTTP; Electron's own
+  channel stays possible later (DESIGN §3.1).
 
 ### 2.3 Adapter
 
@@ -94,7 +100,7 @@ its one sibling pair (`app/api/settings/[section]/route.ts:28-30`; R §2.4). Par
 
 | Step | Condition | Answer |
 |---|---|---|
-| 1 | Path is neither `/api` nor under `/api/` | 404, no gate (**proposed**: Next serves pages there; this server serves none) |
+| 1 | Path is neither `/api` nor under `/api/` | Handed to `src/api/static.ts` (§2.11). Not gated, as today |
 | 2 | `apiRequestRefusal(request)` returns text (`src/server/desktop-access.ts:59-62`) | 403, `Cache-Control: no-store`, body `{"error":"<text>"}`, as `proxy.ts:9-14`. Every method, every `/api` path, known or not, before any 404 or 405 (R §2.1, §2.5) |
 | 3 | No pattern matches | 404; headers and body settled by test (§2.10) |
 | 4 | Pattern matches, method not exported | OPTIONS: 204 with `Allow` = the exported methods plus `OPTIONS`, plus `HEAD` when `GET` is exported, sorted and comma-joined (N `server/route-modules/app-route/helpers/auto-implement-methods.js:49-73`). HEAD: the route's `GET` handler, body not sent (same file, :39-46). Any other method: 405 with no body and no `Allow` (same file, :16-20). Wire details settled by test |
@@ -117,14 +123,14 @@ an `http:` URL (§2.3).
 | Routes | Today under Next | This server |
 |---|---|---|
 | Row 35 | Not behind Proxy, never truncated; bounds itself at 27,262,976 bytes (R §1.3 row 35) | Body handed through unread, no cap |
-| Every other `/api` route | Behind Proxy: beyond 27,262,976 bytes (`proxyClientMaxBodySize`, `next.config.ts:13`, `lib/notes-import-limits.ts:3`) the handler gets the first 27,262,976 bytes, a warning is logged and the client gets no error (R §2.2) | **Proposed**: the same cap, applied the same way. The body stream ends at byte 27,262,976 and a warning is logged |
+| Every other `/api` route | Behind Proxy: beyond 27,262,976 bytes (`proxyClientMaxBodySize`, `next.config.ts:13`, `lib/notes-import-limits.ts:3`) the handler gets the first 27,262,976 bytes, a warning is logged and the client gets no error (R §2.2) | **Decided**: the same cap, applied the same way, kept for parity. The body stream ends at byte 27,262,976 and a warning is logged |
 
 Why the cap is kept: Phase 1 is accepted on parity, and the 20 routes that read `json()` have no byte bound of their
 own (R §2.2), so dropping the cap would let them buffer bodies of any size. The six other raw-stream routes (17, 22,
 27, 44, 46, 49) bound themselves below or at the cap (R §2.2). Replacing the silent cut with a 413 would be better
-behaviour but is a change. **Open** for the owner. The cut point is decided by `bodyLimit(pathname): number | null`
-in `src/api/router.ts`, the one place that knows the exemption. Settled by test: whether `content-length`
-survives, what happens to the bytes past the cap, and whether a bodiless request gives `null` or an empty stream
+behaviour but is a change. **Decided**: Next's silent cut is kept for parity and tuned later (DESIGN §3.1).
+The cut point is decided by `bodyLimit(pathname): number | null` in `src/api/router.ts`, the one place that knows
+the exemption. Settled by test: whether `content-length` survives, what happens to the bytes past the cap, and whether a bodiless request gives `null` or an empty stream
 (R Not verified 9).
 
 ### 2.7 Streams
@@ -147,7 +153,7 @@ answers (row 3, row 14 with no turn running) and anything else that returns a st
 | 1 | Read `PORT` and `HOSTNAME` (the only variables the server itself reads) | Next's `server.js` reads them today, not repo code (R §2.11) |
 | 2 | Import the route modules. This runs their import-time effects: `initAuthEnv()`, `configureWorkerRequestAdmission`, `syncCustomProvider()`, `setTurnRunner`/`setJobRespawn`/`setFileAccessPolicy` | R §2.3 |
 | 3 | `await initializePlugins()` from `src/server/plugins.ts`, called directly. A failure logs `[plugins] Initialization failed; plugin management will report the error:` and start-up continues | `instrumentation.ts:3-7`. Its `NEXT_RUNTIME` guard is false outside Next, so it cannot be reused (R §2.3) |
-| 4 | Listen on `HOSTNAME`:`PORT`. **Proposed**: `HOSTNAME` defaults to `127.0.0.1`; `PORT` has no default, and the server refuses to start without it, so it never takes Next's 3000 while both exist | `next start -H localhost` and the shell's `HOSTNAME=127.0.0.1` (R §2.11) |
+| 4 | Listen on `HOSTNAME`:`PORT`. **Proposed**: `HOSTNAME` defaults to `127.0.0.1`. **Decided**: `PORT` is required and has no default; the server refuses to start without it, so it never takes Next's 3000 while both exist | `next start -H localhost` and the shell's `HOSTNAME=127.0.0.1` (R §2.11) |
 | 5 | Stop on `SIGTERM`: close the listener, end open streams, exit within 3 s | The shell sends `SIGKILL` 3 s after `SIGTERM` (`electron/main.cjs:279-292`) |
 
 - **Working directory**: the directory holding `scripts/plugin-loader.cjs` and `core-plugins/`
@@ -158,15 +164,16 @@ answers (row 3, row 14 with no turn running) and anything else that returns a st
   (R §2.11). The server does not set `NODE_ENV`; its caller does, as the shell does today (`electron/main.cjs:225-238`).
 - **Desktop app (Phase 4)**: the server must be the shell's direct child with the `ipc` channel, since the ChatGPT and
   subscription bridges use `process.send` (R §2.11).
-- How the TypeScript sources and the `@/` alias run outside Next (a bundle or a loader) is **open** (R Not verified
-  14). The test runner already imports route modules under `tsx` (`package.json:19`,
-  `tests/file-access-settings.test.ts:27`).
+- How the TypeScript sources and the `@/` alias run outside Next (R Not verified 14): **decided**, `tsx` for
+  development and tests; the production build tool is chosen in the cutover sprint (esbuild **proposed**). The test
+  runner already imports route modules under `tsx` (`package.json:19`, `tests/file-access-settings.test.ts:27`).
+  The case `routes-import` (§2.10) settles whether every module loads under it.
 
 ### 2.9 Not done by this server (proposed)
 
 No `x-powered-by`, no gzip, no ETag of its own, no trailing-slash redirect unless §2.10 shows Next applies one to
 `/api`, no caching, no CORS headers. Logging is non-blocking and configured explicitly; its variable names are
-**open**.
+**open** (sprint A1, track O).
 
 ### 2.10 To be settled by a test
 
@@ -190,10 +197,24 @@ Each line is a named case in `tests/api-parity.test.ts`. The method is in
 | `matcher-encoded-paths` | Encoded forms of the exempt path (13) |
 | `routes-import` (in `tests/api-routes.test.ts`) | Every route module loads under the chosen runtime (14) |
 
+### 2.11 The client's files
+
+**Decided** by the owner, 2026-11-14 (DESIGN §3): until then "a Phase 2 decision".
+
+1. The process that answers the API hands the client's files out unchanged, on the same origin. Nothing is
+   rendered server-side.
+2. Requests outside `/api` reach `src/api/static.ts` (§2.4 step 1) and are not gated, as today.
+3. In development the files sit under Next's `public/`; the path `/client/` is **proposed**, not decided.
+4. `src/api/static.ts` is part of sprint A1's track T and is tested in `tests/api-server.test.ts` (PLAN, Stream A).
+5. Which files, under which paths, with which response headers and which answer for a missing file: frozen with
+   the client build and delivery paths in sprint B1 (**open**).
+
 ## 3. Client
 
 1. Contains no React, no Next.js and no Tailwind.
-2. Every view follows `create(host, callbacks) => { update(model), destroy() }` and keeps no application state.
+2. Every view follows the one view contract and keeps no application state. **Superseded:** the contract stated
+   here, `create(host, callbacks) => { update(model), destroy() }`, came from the v0.6.0 `ui/` kit; it is
+   re-derived from `cloudcanvas-lib`'s `widget()` model in sprint B1.
 3. Only `src/client/state` calls the engine API.
 4. Markdown renders everything `streamdown` renders for the tutor today, including code with highlighting, LaTeX
    math, Mermaid diagrams and text that is still streaming.
@@ -202,6 +223,7 @@ Each line is a named case in `tests/api-parity.test.ts`. The method is in
 6. Interactive demos stay in a sandboxed frame with an opaque origin.
 7. Keyboard behaviour matches the current shortcuts (`docs/keyboard.md`).
 8. The plugin frontend contract in `src/core/plugins.ts` is met without changing any plugin.
+9. The client's files are static: the API server hands them out unchanged, same origin (§2.11).
 
 ## 4. Data
 
@@ -221,9 +243,9 @@ Each line is a named case in `tests/api-parity.test.ts`. The method is in
 
 | Layer | What it covers | Tooling |
 |---|---|---|
-| Unit | stores, views, blocks; the API router and adapter (`tests/api-*.test.ts`) | `node:test`, linkedom, the kit's `ui/testing` |
-| Integration | every `/api` route and method answers the same under Next and under the API server: status, headers, body, streams, gate (`.context/logs/reports/2026-11-14-api-parity-method.md`) | `node:test` against both servers on scratch data; run on request, because it needs a Next build (**proposed**) |
-| End to end | each screen's parity checklist in the real desktop window, on a copy of real state | browser driver **open** (ARCHITECTURE §5) |
+| Unit | stores, views, blocks; the API router and adapter (`tests/api-*.test.ts`) | `node:test`, linkedom. The kit's `ui/testing` is from the superseded v0.6.0 discovery; how `cloudcanvas-lib` runs in tests is re-checked in sprint B0 and the harness frozen in B1 |
+| Integration | every `/api` route and method answers the same under Next's standalone `server.js` (**decided**, DESIGN §3.1) and under the API server: status, headers, body, streams, gate (`.context/logs/reports/2026-11-14-api-parity-method.md`) | `node:test` against both servers on scratch data; run on request, because it needs a Next build (**proposed**) |
+| End to end | each screen's parity checklist in the real desktop window, on a copy of real state | `puppeteer-core` (**proposed**; confirmed in sprint B1; ARCHITECTURE §5) |
 | Regression | the existing logic suite (`tests/*.test.ts`) stays green throughout | `npm test` |
 
 ## 7. Acceptance by phase
@@ -239,9 +261,17 @@ Each line is a named case in `tests/api-parity.test.ts`. The method is in
 
 ## 8. Open
 
-- The parity checklists themselves (§1).
-- Whether the session stream protocol needs any change for the new client. Proposed: none.
-- Accessibility targets beyond matching current behaviour.
-- §2: the name `src/api`; the body cap (keep Next's silent cut, or answer 413); `PORT` with no default; the
-  logging variables; how the TypeScript runs outside Next; where the handlers live after Phase 5.
-- How the client reaches the engine: HTTP (assumed, not confirmed) or Electron's own channel (ARCHITECTURE §8).
+Decided on 2026-11-14 and moved out of this list (DESIGN §3.1): the name `src/api`; the body cap (Next's silent cut,
+kept for parity); `PORT` required with no default; `tsx` for TypeScript outside Next in development and tests; how
+the client reaches the engine (HTTP); how the client's files reach the window (§2.11).
+
+| Open point | Falls due |
+|---|---|
+| The parity checklists themselves (§1) | Sprint B3: each track opens with its checklist, approved by the owner |
+| The view contract (§3, item 2) | Sprint B1; the owner approves the contracts |
+| Whether the session stream protocol needs any change for the new client. Proposed: none | Sprint B1 (the store interfaces) |
+| The client's file paths, headers and missing-file answer (§2.11) | Sprint B1 |
+| §2.9: the logging variable names | Sprint A1, track O |
+| The production build tool (§2.8); esbuild proposed | Cutover sprint (C) |
+| Where the handlers live after Phase 5 (§2.4) | Removal (D) |
+| Accessibility targets beyond matching current behaviour | Not scheduled in the plan |

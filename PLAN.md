@@ -1,23 +1,32 @@
 # peer: plan
 
-Status: the owner approved the execution plan in session on 2026-11-14: Stage 0 first, then sprint by sprint
-behind sign-offs. The pdl records stay `idea` until the owner moves them.
-Phases follow the PDL steps (Discovery, Definition, Design, Development, Testing, Launch, Growth) as sprints.
-Each sprint is a feature branch, each phase ends in one consolidated QA, and nothing reaches `master` without
-the owner's sign-off on the quality gates.
+Status: the owner approved the execution plan for peer on CloudCanvas on 2026-11-14; this file records it. Two
+streams run in parallel (A Engine API, B Client) with a third for CloudCanvas contributions (L), then Cutover,
+Removal and the later features. The decisions the approval carries are in DESIGN §3.1. The pdl records stay `idea`
+until the owner moves them. Each sprint is a feature branch, each phase ends in one consolidated QA, and nothing
+reaches `master` without the owner's sign-off on the quality gates.
 
 ## Roadmap
 
-| Phase | Outcome | Depends on |
-|---|---|---|
-| 0 Foundation | Supporting docs, the investigation report, this roadmap in pdl, handoff | — |
-| 1 Engine API | A plain Node server (`src/api`, name proposed) answers every `/api` route and stream the Next layer answers, without Next. The old interface stays on Next | 0 |
-| 2 Client base | Shell, router, theme tokens, stores, Markdown pipeline, test harness | 1 |
-| 3 Screens | Every screen at parity in the CloudCanvas client | 2 |
-| 4 Cutover | The desktop app ships the API server and the new client | 3 |
-| 5 Removal | React, Next.js, Tailwind and the old render tests are gone | 4 |
-| 6 Canvases | Model-built graphs, SVG, dashboards, richer knowledge graphs | 5 |
-| 7 Learner features | Onboarding, a knowledge base about the learner, visual assessment, topic linking, skills dashboard, thinking, masterclass mode, seams between domains, mastery and mystery, chained learning, learning style and confidence | 5; some items need 6 |
+| Phase | Stream and sprints | Outcome | Depends on |
+|---|---|---|---|
+| 0 Foundation | — | Supporting docs, the investigation report, this roadmap in pdl, handoff | — |
+| 1 Engine API | A: A1, A2, A3 | `src/api` answers every `/api` route and stream the Next layer answers, without Next, and hands out the client's files unchanged. The old interface stays on Next | 0; A3 on B1 |
+| 2 Client base, 3 Screens | B: B0 to B4 | The CloudCanvas client: re-baseline, definition, base, every screen at parity | 0; B0 on the owner naming the CloudCanvas commits |
+| — CloudCanvas contributions | L | Pull requests to `cloudcanvas-lib` and `cloudcanvas`, as B1 lists them | B1 |
+| 4 Cutover | C | The desktop app ships the API server and the new client without Next | A3, B4, L |
+| 5 Removal | D | React, Next.js, Tailwind and the old render tests are gone | C |
+| 6 Canvases, 7 Learner features | E | Model-built canvases, then the design points in DESIGN §6 | D |
+
+```
+A  Engine API     A1 build ─ A2 QA ─────────────── A3 API additions ─┐
+B  Client         B0 re-baseline ─ B1 definition ─ B2 base ─ B3 screens (3 waves) ─ B4 parity QA ─┤
+L  CloudCanvas    pull requests to cloudcanvas-lib / cloudcanvas, as B1 lists them ───────────────┤
+                                                                       C cutover ─ D removal ─ E later features
+```
+
+The client only needs `/api`, and Next already answers the same 50 routes, so the API work and the client work do
+not depend on each other until cutover.
 
 ## Stage 0: cleanup and close-out
 
@@ -36,35 +45,42 @@ Runs before any rebuild work.
 - **The running app is not touched.** `/usr/lib/persist/peer/{state,releases,current}`, the `peer` launcher and
   `~/.config/LearnHarness` change only on the owner's word. Every server or test run uses a scratch data
   directory and a spare port. A packaged build is started only with `XDG_CONFIG_HOME` pointed at scratch.
-- **One sprint, one branch, one worktree.** Each sprint's branch is cut from `master` into
+- **One sprint, one branch from `master`, one worktree.** Each sprint's branch is cut from `master` into
   `/usr/lib/persist/peer/work/<branch>`, where installs, builds and tests run. Nothing is built on an unmerged
-  branch. While a sign-off is pending, only the next sprint's read-only Discovery may run.
-- **Review is independent.** One consolidated QA per phase, by reviewers that did not write the code; each finding
-  is checked against the code before it is acted on.
+  branch, in peer or in a CloudCanvas repo. Streams A, B and L run in parallel, each on its own branches
+  from `master`. Within a stream, a sprint's development starts only after the previous sprint is merged;
+  read-only Discovery may run ahead.
+- **CloudCanvas.** Changes go as pull requests to the public repos from this project's own clones under
+  `/usr/lib/persist/peer/work/`; the owner merges; peer then moves its pin in a commit of its own. The owner's
+  `~/cloudcanvas` workspace is never touched (DESIGN §3).
+- **Delegation.** Every agent gets a brief with role, line items, the files it owns, limits and quality gates. At
+  most three development agents at once, plus up to two read-only researchers or reviewers. Models per DESIGN §3.1.
+- **Review is independent.** One consolidated QA per phase (code quality, security, efficiency), by reviewers that
+  did not write the code; each finding is checked against the code before it is acted on.
+- **The owner's only.** Merges into `master`, contract approvals, the cutover, the removal, pdl approval states.
+- **Records.** pdl notes and evidence, this file's expected and actual after each sprint, a handoff note each
+  session.
+- **Guard, every sprint.** The running app's pid, `current`, both installed AppImages and the launcher unchanged.
 
-## Phase 1: Engine API
+## Stream A: Engine API (Phase 1). Contract: SPEC §2
 
-The pdl record is still titled "Phase 1 Host"; renaming it is the owner's call. Corrected 2026-11-14 to the owner's
-model (DESIGN §3): no server serves the interface, and this phase moves only the engine's API off Next.
+The pdl record is still titled "Phase 1 Host"; renaming it is the owner's call.
 
-Goal: `src/api` (name **proposed**) answers every `/api` route and method the Next layer answers, with the same
-status, headers, body and streams, without Next (SPEC §2). The old interface stays on Next, untouched; Next stays
-installed and buildable. No pages, `public/` files or client files are served by this phase (a Phase 2 decision).
-Plugin assets are an API route (row 33) and are included.
-
-| Track | Owns | Delivers | Tests |
+| Sprint | Work | Who | Gate |
 |---|---|---|---|
-| A Routes and gate | `src/api/routes.ts`, `src/api/router.ts` | The list of route modules; records derived from their exports; matching and parameters; gate and order of checks; automatic OPTIONS, HEAD and 405; `bodyLimit` (SPEC §2.2, §2.4, §2.6) | `tests/api-routes.test.ts`: list against `app/api/**/route.ts`, every module imports. `tests/api-router.test.ts`: matching, parameters, check order, OPTIONS/HEAD/405 on fake handlers |
-| B Transport | `src/api/adapter.ts`, `src/api/server.ts` | `serveHttp`: `IncomingMessage` to `Request`, `Response` to `ServerResponse`; body cap; streams flushed, back-pressured, cancelled on close; `request.signal` aborted; start-up, binding, stop (SPEC §2.3, §2.6 to §2.8) | `tests/api-adapter.test.ts`: fake streams for headers before the first byte, back-pressure, cancel, abort, cap. `tests/api-server.test.ts`: start on a spare port with scratch data, plugins started once, loopback only, SIGTERM |
-| C Operations | `src/api/log.ts`, `src/api/config.ts` | Non-blocking logger; explicit configuration of `PORT`, `HOSTNAME` and logging; nothing else copied from the environment (SPEC §2.5, §2.8) | `tests/api-log.test.ts`, `tests/api-config.test.ts` |
-| D Parity | `tests/api-parity*.test.ts`, `tests/helpers/api-parity-*.ts` | Every route and method on both servers, compared by the method in `.context/logs/reports/2026-11-14-api-parity-method.md`; the cases of SPEC §2.10 | itself |
+| A1 Build | Track R: `src/api/routes.ts`, `router.ts` (route list by static import, gate order, methods) with `tests/api-routes.test.ts`, `api-router.test.ts`. Track T: `src/api/server.ts` (the `node:http` adapter: streams, disconnects, body cap) and `src/api/static.ts` (hands out the client's files) with `tests/api-server.test.ts`. Track O: `src/api/config.ts`, `log.ts` (non-blocking), the entry file, with `tests/api-config.test.ts`. Then Track P: `tests/api-parity.test.ts` per the parity method report, every route on both servers | Three Opus agents in parallel, then one for P | All tracks green; parity passes for all 50 routes |
+| A2 QA | Three Sonnet reviewers; confirmed findings fixed; full suite | Sonnet, then Opus | Owner's sign-off, merge |
+| A3 API additions | Routes for data the pages hand the client today that have no endpoint (the table below, from pull request 3), as defined by B1 | One Opus agent | Owner's sign-off, merge |
+
+Track T's `src/api/static.ts` hands out the client's files unchanged, same origin; paths outside `/api` are not
+gated, as today (SPEC §2.11). This was "a Phase 2 decision" until the owner decided it on 2026-11-14.
 
 Contract frozen before development: `RouteRecord`, `RouteHandler`, `Dispatch` and `serveHttp` (SPEC §2.2, §2.3),
-`bodyLimit(pathname)` (SPEC §2.6), the configuration shape and the logger interface (Track C, frozen in its first
-commit). B depends on A only through `Dispatch` and `bodyLimit`. QA gate: SPEC §7, Phase 1. Packaging scripts are
-**not** changed in this phase.
+`bodyLimit(pathname)` (SPEC §2.6), the configuration shape and the logger interface (track O, frozen in its first
+commit). T depends on R only through `Dispatch` and `bodyLimit`. Packaging scripts are **not** changed in this
+stream; the old interface stays on Next, untouched; Next stays installed and buildable.
 
-### First sprint: Discovery and Definition
+### Sprint 1.1: Discovery and Definition (pull request 3)
 
 | Item | Acceptance | Depends on | Effort |
 |---|---|---|---|
@@ -75,30 +91,13 @@ commit). B depends on A only through `Dispatch` and `bodyLimit`. QA gate: SPEC �
 | 1.5 Parity method | The comparison rules for `tests/api-parity.test.ts`: which headers are compared, how streams are compared, which fixtures are used | 1.2 | medium |
 | 1.6 Submodule | `extern/cloudcanvas` added at `c5e6e07`; the rule for moving the pin written into `ARCHITECTURE.md` | — | low |
 
-Models follow DESIGN §7.3: Sonnet for items 1.1 to 1.3, Opus for 1.4 and 1.5.
+Item 1.3's "Phase 1 serves no static files" was superseded on 2026-11-14: the API server hands out the client's
+files (track T). Item 1.6's pin, `c5e6e07` (v0.6.0), is to be moved in sprint B0.
 
-## Phase 2: Client base
-
-| Track | Delivers |
-|---|---|
-| A Shell and router | The window frame and the five pages as empty views; navigation without Next |
-| B State | API client and stores in TypeScript; `session-core.ts` consumed as is |
-| C Markdown | The pipeline on the kit's renderer, the block extension point, and the math, Mermaid and code blocks |
-| D Theming and types | App themes mapped to `--cc-*` tokens; type definitions for the CloudCanvas surface in use |
-| E Test harness | linkedom and `ui/testing` wired into `node:test`; the end-to-end driver chosen |
-
-Contract frozen first: the view contract, the store interfaces, the block registration.
-
-### First sprint: Discovery
-
-Open for this phase, decided by the owner: how the client's own files and the `public/` files it needs reach the
-window, and how the client reaches the engine (ARCHITECTURE §8).
-
-| Item | Acceptance |
-|---|---|
-| 2.1 Data the pages embed server-side that the client must fetch | The table below confirmed against `master`, with a decision for each gap |
+### Data the pages hand the client today (input to B1 and A3)
 
 Starting table, 2026-11-14. Embedded data from the static-surface report §1; routes from the route inventory §1.2.
+B1 confirms it against `master` and defines the endpoints A3 must add.
 
 | Page | Embeds at request time | API route that returns it |
 |---|---|---|
@@ -111,29 +110,63 @@ Starting table, 2026-11-14. Embedded data from the static-surface report §1; ro
 | `/settings` | Nothing; redirects to `/chat/new` (`app/settings/page.tsx:10`) | none needed |
 | Build-time values | `LH_VERSION`, `LH_HOMEPAGE`, inlined by `next.config.ts:9`, read by `components/settings/update-settings.tsx:15-16` and `plugins-section.tsx:30` | **none found**: no `src/`, `lib/` or `app/api` file reads them (route inventory §2.2) |
 
-## Phase 3: Screens
+## Stream B: Client (Phases 2 and 3)
 
-One track per row of SPEC §1, in parallel after the contracts between screens are frozen: session and chat;
-questions, plan and practice; knowledge graph; settings and setup; home, sidebar and navigation; plugin host;
-artifacts; dictation and read-aloud. Each track starts with a Definition sprint that writes its parity checklist.
+| Sprint | Work | Who | Gate |
+|---|---|---|---|
+| B0 Re-baseline | When the owner says the CloudCanvas push is finished: move `extern/cloudcanvas` to the 0.7.x commit the owner names and add `extern/cloudcanvas-lib`, each in its own commit. Redo the kit discovery on that pair: the engine's concepts, every lib widget and component, the `widget()` contract, tokens, how it runs in tests, and a gap table against the client inventory (Markdown, dialogs, menus, tabs, graph, voice) | Two Sonnet researchers | Report read and checked |
+| B1 Definition | Freeze: the view contract re-derived from the lib; the store interfaces (from inventory §2.4); the Markdown pipeline and block registration; theme token mapping; the test harness; client build and delivery paths; the gap list sorted by the owner's placement rule (Stream L's backlog); the endpoints A3 must add. Correct `DESIGN.md`, `SPEC.md`, `ARCHITECTURE.md` | Two Opus designers | **The owner approves the contracts** |
+| B2 Client base | Four tracks: shell and router (frame, the five pages as views); state (API client, stores, `session-core.ts` used as is); Markdown pipeline; theming and the test harness. Accepted when a saved session opens read-only in the new client from live data | Three Opus agents, then one | Owner's sign-off, merge |
+| B3 Screens | Three waves of three tracks (table below). Each track opens with a parity checklist written from that group's render tests, which the owner approves, then builds `src/client/views/<group>/` with its own tests | Three Opus agents per wave | Per track: checklist passes |
+| B4 Parity QA | Every checklist end to end in the desktop window on a copy of the owner's state; consolidated QA | Sonnet reviewers | Owner's sign-off, merge |
 
-## Phase 4: Cutover
+Screen tracks, sized from the inventory (lines today / reusable as they are):
 
-Packaging (`electron-builder.yml`, `electron/main.cjs` `serverEntry`), the build and smoke scripts that assume
-Next's output, and a data-compatibility check on a copy of real state. The installed app switches release
-directories under `/usr/lib/persist/peer/releases`; the state directory does not move.
+| Wave | Track | Size | Depends on |
+|---|---|---|---|
+| 1 | Session: transcript, composer, steering | part of 11,165 / 2,256 | B2 |
+| 1 | Settings and setup | 7,081 / 54 | B2 |
+| 1 | Knowledge graph | 5,666 / 1,862 | B2 |
+| 2 | Session: side thread, activity, stats | rest of Session | wave 1 Session |
+| 2 | Questions, plan, practice | 3,385 / 55 | wave 1 Session |
+| 2 | Home and session list | 2,302 / 93 | B2 |
+| 3 | Plugin views (12 `mount*` widgets, 3 `open*` calls) | 3,493 / 1,029 | waves 1 and 2 controls |
+| 3 | Artifacts | 1,471 / 32 | Session |
+| 3 | Dictation and read-aloud (incl. pull request 1's features) | 1,552 / 111 | composer, Settings |
 
-## Phase 5: Removal
+The knowledge graph track reuses `components/graph-canvas.ts` unchanged (DESIGN §3.1).
 
-Delete `app/`, the React files in `components/`, the Next configuration, Tailwind and the React render tests.
-Move the shared modules into `src/client`. Rehearse one upstream merge and write the procedure down.
+## Stream L: CloudCanvas contributions
 
-## Phase 6: Canvases
+B1 produces the list. For each item placed in `cloudcanvas-lib` or the engine: a clone under
+`/usr/lib/persist/peer/work/`, a feature branch, tests in that repo's own harness, a pull request to the public
+repo. The owner merges it; peer then moves its pin in a commit of its own. Items are scheduled in B1 so they merge
+before the screens that need them. Candidates from the superseded discovery, to be re-checked in B0: Markdown
+tables, images, a block extension point and repair of half-streamed text; type definitions.
+
+## C Cutover (Phase 4)
+
+Package the API server and the client without Next (`electron-builder.yml`, `electron/main.cjs` `serverEntry`, and
+the build and smoke scripts that assume Next's output); choose the production build tool; end to end on a copy of
+the owner's state; install as a new release directory under `/usr/lib/persist/peer/releases`. `current` moves only
+on the owner's word, after a state backup. The state directory does not move.
+
+## D Removal (Phase 5)
+
+Delete `app/`, the React components, Next, Tailwind and the React render tests. Move the shared modules into
+`src/client`. Rehearse one upstream merge and write the procedure down.
+
+## E Later features (Phases 6 and 7)
+
+Model-built canvases, then the design points in DESIGN §6 (eleven so far). Each opens with its own Discovery; none
+is designed here.
+
+### Phase 6: Canvases
 
 Defined after parity. Starting points already known: the board document format, how the model is told what it may
-build, how a document is validated, and whether panels and board save/load come from CloudCanvas (DESIGN §7.2).
+build, how a document is validated, and whether panels and board save/load come from CloudCanvas (DESIGN §7).
 
-## Phase 7: Learner features
+### Phase 7: Learner features
 
 The owner's list of 2026-11-14, recorded in DESIGN §6. Not designed and not sequenced. Each item opens with a
 Discovery sprint that states what exists, what it changes in the engine, and what it needs from the interface.
@@ -163,13 +196,40 @@ it (SPEC §5.5).
 4. Docs and this plan updated with what was expected and what was actually built.
 5. The owner's sign-off.
 
+Verification, per stream:
+
+- **A:** `tests/api-parity.test.ts` passes for all 50 routes and 5 streams against Next's standalone server on
+  scratch data; the logic suite is green; typecheck and lint clean; three QA reports with every confirmed
+  finding fixed or declined with a reason.
+- **B2:** a saved session opens read-only in the new client from live data; the unit layer passes.
+- **B3 and B4:** every screen's checklist passes end to end in the desktop window on a copy of the owner's state.
+- **L:** each CloudCanvas pull request passes that repo's own tests before the owner is asked to merge it.
+- **Guard, every sprint:** the running app's pid, `current`, both installed AppImages and the launcher unchanged.
+
+## Needed from the owner, and when
+
+| When | What |
+|---|---|
+| Now | Approval of this plan (given 2026-11-14) |
+| When the CloudCanvas push settles | The engine and lib commits to pin |
+| End of B1 | Approval of the client contracts and the Stream L list |
+| Each sprint's end | Sign-off to merge |
+| Any time | Whether `current` moves to `v0.6.1-local.2`; the pdl status fields and the records still titled "Host" |
+
+## Not known yet
+
+- Whether the lib's `widget()` model fits document-style screens (transcript, settings) as it stands. B0 and B1
+  establish it; B2's read-only session is the first proof.
+- Whether engine 0.7.x and `cloudcanvas-lib` at their pushed commits work together. B0 checks.
+- The client inventory was read, not run, and `chat.tsx` only in part; each screen's Definition sprint closes that.
+
 ## Risks
 
 | Risk | Handling |
 |---|---|
 | Upstream changes a screen while we rebuild it | Parity is fixed to the upstream commit named in each checklist; later upstream interface changes are re-decided, not merged |
-| A kit control lacks behaviour a screen needs | Found in that screen's Definition sprint; resolved by the rule in DESIGN §3 (agnostic goes to CloudCanvas, application stays in peer) |
-| The engine at the pinned commit lacks something the newer `cc-main` has | Recorded as it is found; DESIGN §7.2 |
+| A CloudCanvas widget lacks behaviour a screen needs | Found in B0's gap table or in that screen's track; placed by the owner's rule in DESIGN §3 (engine, `cloudcanvas-lib`, or peer); CloudCanvas items go through Stream L |
+| The engine at the pinned commit lacks something the newer `cc-main` has | Recorded before the split; re-checked in B0 against 0.7.x and `cloudcanvas-lib` (DESIGN §7) |
 | The machine's home disk is slow for builds | Builds and installs for this project run from `/usr/lib/persist/peer` or `/tmp/peer`, not the home disk |
 
 ## Records in pdl
@@ -188,9 +248,10 @@ Project `peer`. Everything except phase 0 is in the `idea` state: proposed, and 
 | Phase 6 Canvases | `a2568e7b53fd` | idea |
 | Phase 7 Learner features | `f9e5019c03f3` | idea |
 | Sprint 1.1, titled "Host discovery and definition" in pdl | `90a6ffc9748d` | idea |
-
-The pdl titles predate the owner's correction of 2026-11-14 (DESIGN §3); renaming them is the owner's.
 | Evidence: the investigation report | `54fd2ef38b26` | linked to the roadmap |
+
+The pdl titles predate the owner's correction of 2026-11-14 (DESIGN §3); renaming them is the owner's. The streams
+and sprints of the approved plan (A1 to A3, B0 to B4, L, C, D, E) are not yet recorded in pdl.
 
 The sprint's six work items are tasks tagged `proposed` and `skill:foundation`, each with acceptance,
 constraints, effort and its dependencies (`pdl find --kind task --tags proposed`).
@@ -199,6 +260,8 @@ constraints, effort and its dependencies (`pdl find --kind task --tags proposed`
 
 | Phase | Expected | Actual |
 |---|---|---|
-| 0 Foundation | Docs, report, proposed roadmap, handoff | delivered 2026-11-14 in pull request 2; awaiting the owner's sign-off |
-| Stage 0 | Leftovers removed; pull request 1 reviewed and fixed; both pull requests signed off; handoff | 0.1 to 0.3 done 2026-11-14. Pull request 1 was reviewed by three independent reviewers (45 findings, with overlaps) and fixed in commit `3fa3928`: typecheck and lint clean, full suite 5,405 of 5,412 with 4 skipped and 3 load timeouts in `headless-helper-lifecycle` that pass alone. Different from expected: three fix agents, not one; nine findings are left as owner decisions and two were declined. Not done: the owner's sign-offs (0.4), and hands-on checks of microphone dictation, read-each-reply-aloud and the desktop window |
-| Sprint 1.1 | Inventory, Next behaviours, static surface, contract, parity method, submodule | 1.1 to 1.3: two discovery reports, 2026-11-14. 1.6: submodule and pin rule. 1.4 and 1.5 drafted 2026-11-14 (SPEC §2, `.context/logs/reports/2026-11-14-api-parity-method.md`), awaiting approval. Different from expected: the owner corrected the model the same day (the client is the host; the Node server is only the engine's API), so Phase 1 no longer serves static files or runs the old interface |
+| 0 Foundation | Docs, report, proposed roadmap, handoff | delivered 2026-11-14 in pull request 2, merged |
+| Stage 0 | Leftovers removed; pull request 1 reviewed and fixed; both pull requests signed off; handoff | 0.1 to 0.3 done 2026-11-14. Pull request 1 was reviewed by three independent reviewers (45 findings, with overlaps) and fixed in commit `3fa3928`: typecheck and lint clean, full suite 5,405 of 5,412 with 4 skipped and 3 load timeouts in `headless-helper-lifecycle` that pass alone. Different from expected: three fix agents, not one; nine findings are left as owner decisions and two were declined. 0.4: pull requests 1 and 2 merged (`master` `5d5b6e2`); the fixed build packaged as `releases/v0.6.1-local.2`, not switched to; the pdl records are still `idea`. Not done: hands-on checks of microphone dictation, read-each-reply-aloud and the desktop window |
+| Sprint 1.1 | Inventory, Next behaviours, static surface, contract, parity method, submodule | Delivered in pull request 3, 2026-11-14. 1.1 to 1.3: two discovery reports. 1.6: submodule and pin rule. 1.4 and 1.5 drafted (SPEC §2, `.context/logs/reports/2026-11-14-api-parity-method.md`). Different from expected: the owner corrected the model the same day (the client is the host; the Node server is only the engine's API), so Phase 1 no longer runs the old interface; then decided the API process hands out the client's files (track T); CloudCanvas was split, which superseded the v0.6.0 pin, the view contract and the kit discovery; the execution plan's decisions were recorded (DESIGN §3.1). Merge: on the owner's word given by plan approval, after this correction |
+| A1 Build | Tracks R, T, O, then P; all tracks green; parity passes for all 50 routes | not started |
+| B0 Re-baseline | Both submodules pinned at the owner's commits; kit discovery redone with a gap table | not started; waits for the owner to name the commits |

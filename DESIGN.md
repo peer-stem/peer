@@ -1,7 +1,8 @@
 # peer: design
 
-Status: foundation draft, 2026-11-14; the owner's correction on where the interface runs added to §3 the same day.
-Points marked **open** are not decided.
+Status: foundation draft, 2026-11-14; the owner's correction on where the interface runs added to §3 the same day;
+the owner's decisions of 2026-11-14 on the client's files, the CloudCanvas split, placement and contributions, and
+the execution plan's decisions (§3.1), recorded the same day. Points marked **open** are not decided.
 
 ## 1. Purpose
 
@@ -30,22 +31,45 @@ One learner on their own machine, running the desktop app with their own model a
 | Desktop shell | Electron stays |
 | Order | Parity first. Model-built graphs and dashboards come after it |
 | Old interface | Keeps building and shipping from the fork until parity, then is deleted. The new client never contains React |
-| CloudCanvas source | `CloudsEcosys/cloudcanvas`, `main`, as a git submodule in `extern/cloudcanvas` |
+| CloudCanvas source | Superseded 2026-11-14 by the split (next row). Was: `CloudsEcosys/cloudcanvas`, `main`, as a git submodule in `extern/cloudcanvas`, pinned at `c5e6e07` (v0.6.0) |
+| CloudCanvas baseline | peer builds on the current split: the engine `CloudsEcosys/cloudcanvas` (0.7.x) plus `CloudsEcosys/cloudcanvas-lib`, both pinned as submodules. CloudCanvas was split on 2026-11-14: the engine's `main` no longer contains the `ui/` kit; the widget kit, board components, archetypes and the board are in `cloudcanvas-lib` as `widget()` types created on a board. The commits to pin are not named yet (the owner is still pushing). Until sprint B0 pins them, `extern/cloudcanvas` stays at `c5e6e07` (v0.6.0) and is **to be moved** |
 | Client languages | Plain JavaScript for view code that talks to CloudCanvas; TypeScript for what shares types with `src/` |
-| Where new capability lives | CloudCanvas stays slim and agnostic. A piece that belongs to CloudCanvas is a library on its side; application shapes and structures stay in peer |
+| Where new capability lives | The owner's placement rule: "if they are agnostic to our project they go in the cloudcanvas-lib unless they are core/fundamental to cloudcanvas as an 'engine' -- but if they are application specific they go in our abstraction/implementation". So: fundamental to the engine → `cloudcanvas`; agnostic to peer → `cloudcanvas-lib`; application-specific → peer. Replaces the earlier two-way split (CloudCanvas side or peer) |
+| CloudCanvas changes | Pull requests to the public repos (`CloudsEcosys/cloudcanvas-lib`, `CloudsEcosys/cloudcanvas`) from this project's own clones under `/usr/lib/persist/peer/work/`. The owner merges; peer then moves its pin in a commit of its own. The owner's `~/cloudcanvas` workspace is never touched |
 | Deadline | None |
-| Where the interface runs | The owner's words: "CloudCanvas is designed where the Client is the Host", and "cloudcanvas runs client side because it treats the DOM as the runtime engine". No server serves or renders the interface. The client is static native modules that run in the window, draw everything there and fetch all data. In CloudCanvas, "host" means the client side (a control's host element), so the Node server is never called host |
-| The Node server | Only the engine's API: the routes and streams the Next layer serves today, without Next. Its directory name, `src/api`, is **proposed** (§7) |
+| Where the interface runs | The owner's words: "CloudCanvas is designed where the Client is the Host", and "cloudcanvas runs client side because it treats the DOM as the runtime engine". No server renders the interface; its files are handed out unchanged (row "The new client's own files"). The client is static native modules that run in the window, draw everything there and fetch all data. In CloudCanvas, "host" means the client side (a control's host element), so the Node server is never called host |
+| The Node server | The engine's API: the routes and streams the Next layer serves today, without Next, in `src/api` (§3.1). It also hands out the client's files unchanged (next row) |
 | Old interface during the migration | Stays on Next, untouched, until the removal phase. Phase 1 is accepted on route parity and the logic suite, not on the old interface running elsewhere |
-| The new client's own files | Not part of Phase 1. How they and the `public/` files the client needs reach the window is decided in Phase 2 (§7) |
+| The new client's own files | The process that answers the API hands the client's files out unchanged, same origin. Nothing is rendered server-side. In development they sit under Next's `public/`; the path `/client/` is **proposed**, not decided. This was "a Phase 2 decision" until the owner decided it on 2026-11-14 |
+
+### 3.1 Decided through the execution plan's approval (owner, 2026-11-14)
+
+The owner approved the execution plan on 2026-11-14; approving it decided these. `PLAN.md` carries the plan.
+
+| Point | Choice |
+|---|---|
+| Name of the API directory | `src/api` |
+| How the client reaches the engine | HTTP. The router's entry is a plain `Request → Response` function, so Electron's own channel stays possible later |
+| How the client's files reach the window | The process that answers the API hands them out unchanged, same origin. In development they sit under Next's `public/`, proposed path `/client/` |
+| Request bodies over about 27 MB | Keep Next's silent cut at 27,262,976 bytes for parity; tune later |
+| What the API server is compared against | Next's standalone `server.js`, which the app ships |
+| `PORT` | Required, no default |
+| Running TypeScript outside Next | `tsx` for development and tests; the production build tool is chosen in the cutover sprint (esbuild **proposed**, already in the lockfile) |
+| End-to-end driver | `puppeteer-core`, already a dependency (**proposed**; confirmed in sprint B1) |
+| Knowledge graph at parity | Reuse `components/graph-canvas.ts` (plain TypeScript, 1,753 lines) unchanged |
+| Old interface | Stays on Next, untouched, until Removal |
+| Agent models | Sonnet for research and review, Opus for design and development, Fable for coordination and the hardest items |
+| Pull request 3 | Approving the plan is the owner's word to merge it, after the plan's step 1 corrects its docs |
 
 ## 4. Principles
 
 1. **The DOM is the runtime.** No client framework state tree and no virtual tree. The server's records are
    authoritative, client stores hold the working copy, and a view is a control that receives a plain model and
    reports through callbacks.
-2. **One contract for every view.** `create(host, callbacks)` returns `{ update(model), destroy() }`, the same
-   shape as the CloudCanvas kit. A view never owns application state.
+2. **One contract for every view.** A view never owns application state. **Superseded:** the contract stated
+   here, `create(host, callbacks)` returning `{ update(model), destroy() }`, came from the v0.6.0 `ui/` kit, which
+   the split removed from the engine. The contract is re-derived from `cloudcanvas-lib`'s `widget()` model in
+   sprint B1.
 3. **Additive until cutover.** New code goes in new directories. Nothing upstream owns is edited unless a phase
    says so, so upstream merges stay cheap.
 4. **Nothing is written twice.** Modules that are already free of React are shared by both interfaces while both
@@ -82,25 +106,25 @@ starts with its own Discovery. "Today" is what was found in the code on `master`
 | **Learning style, self-graded confidence and communication style**. The model learns the individual's learning style, how they grade themselves in terms of confidence, and different styles of communication, if possible | Within one session the teacher chooses "Socratic or expository for each stretch, given the topic and his energy" (`src/agent/prompts/teacher/10-planning.md`), and a question can be answered "don't know" (`dontKnow` in `src/core/plugin-view-context.ts`). Nothing was found that keeps a learner's style or confidence across sessions; not verified beyond these two files |
 
 The third and fifth depend on model-built canvases (Phase 6). The others do not depend on the interface and
-could be scheduled earlier; that ordering is **open**. Proposed, not decided: masterclass mode builds on
+could be scheduled earlier; that ordering is **open** (§7). Proposed, not decided: masterclass mode builds on
 onboarding's assessment, the learner knowledge base and topic linking; whether its roadmap view needs Phase 6 is
 **open**.
 
 ## 7. Open decisions
 
-1. **Each capability the kit lacks, by the rule above.** Proposed: type definitions, rendering of half-streamed
-   text and a Markdown block extension point are agnostic (CloudCanvas side); math, Mermaid and code highlighting
-   are application blocks (peer).
-2. **Panels and board save/load** exist only in `CloudsEcosys/cc-main`. Dashboards after parity probably need
-   them. Either they land in `CloudsEcosys/cloudcanvas`, or that phase is built without them.
-3. **Model and effort for each work item.** Decided by the owner, 2026-11-14: delegated agents run on tiered
-   Claude models. Sonnet for research, inventories and review; Opus for design and development; Fable only for
-   the hardest items. Effort is proposed in pdl.
-4. **The fork's default branch** on GitHub is still `main`; pull requests name `master` explicitly.
-5. **How far the knowledge graph changes at parity.** Proposed: none; the existing canvas engine is kept as is.
-6. **When the items in §6 are scheduled**, and which of them may start before parity.
-7. **How the client reaches the engine.** Assumed, not confirmed: HTTP to the API server. Alternative: Electron's own
-   channel, with no HTTP server in the desktop app (ARCHITECTURE §8).
-8. **How the client's own files reach the window** (Phase 2): the API server hands them out, or the Electron window
-   loads them from disk.
-9. **The name of the API server's directory.** Proposed: `src/api`.
+Decided on 2026-11-14 and moved to §3: the placement rule (was open point 1's rule), model tiers (was 3), the
+knowledge graph at parity (was 5), how the client reaches the engine (was 7), how the client's files reach the
+window (was 8), the name `src/api` (was 9).
+
+| Open point | Falls due |
+|---|---|
+| **The commits to pin** for `extern/cloudcanvas` (0.7.x) and `extern/cloudcanvas-lib` | When the owner says the CloudCanvas push is finished; pinned in sprint B0 |
+| **The view contract**, re-derived from `cloudcanvas-lib`'s `widget()` model (§4, principle 2) | Sprint B1; the owner approves the contracts |
+| **Each capability CloudCanvas lacks, placed by the rule in §3.** From the superseded v0.6.0 kit discovery, to be re-checked in sprint B0: type definitions, rendering of half-streamed text and a Markdown block extension point were proposed for the CloudCanvas side; math, Mermaid and code highlighting as application blocks (peer) | B0 redoes the gap table; B1 sorts it by the rule into Stream L's list; the owner approves it at the end of B1 |
+| **The client's development path**: `/client/` under Next's `public/` is proposed | Sprint B1 (client build and delivery paths) |
+| **The end-to-end driver**: `puppeteer-core` proposed | Confirmed in sprint B1 |
+| **The production build tool**: esbuild proposed | The cutover sprint (C) |
+| **Panels and board save/load.** Before the split they existed only in `CloudsEcosys/cc-main`; the board is now in `cloudcanvas-lib`, and whether save/load came with it is to be re-checked in sprint B0. Dashboards after parity probably need them | Re-checked in B0; decided before Phase 6 (E) |
+| **Effort for each work item**: proposed in pdl | Not scheduled in the plan |
+| **The fork's default branch** on GitHub is still `main`; pull requests name `master` explicitly | Not scheduled in the plan |
+| **When the items in §6 are scheduled**, and which of them may start before parity. The plan's stream E lists model-built canvases, then the §6 points, each opening with its own Discovery | Not scheduled in the plan |
