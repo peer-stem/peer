@@ -1,6 +1,7 @@
 # peer: plan
 
-Status: foundation draft, 2026-11-14. Everything below is **proposed** until the owner approves it in pdl.
+Status: the owner approved the execution plan in session on 2026-11-14: Stage 0 first, then sprint by sprint
+behind sign-offs. The pdl records stay `idea` until the owner moves them.
 Phases follow the PDL steps (Discovery, Definition, Design, Development, Testing, Launch, Growth) as sprints.
 Each sprint is a feature branch, each phase ends in one consolidated QA, and nothing reaches `master` without
 the owner's sign-off on the quality gates.
@@ -16,7 +17,30 @@ the owner's sign-off on the quality gates.
 | 4 Cutover | The desktop app ships the new host and client | 3 |
 | 5 Removal | React, Next.js, Tailwind and the old render tests are gone | 4 |
 | 6 Canvases | Model-built graphs, SVG, dashboards, richer knowledge graphs | 5 |
-| 7 Learner features | Onboarding, a knowledge base about the learner, visual assessment, topic linking, skills dashboard, thinking | 5; some items need 6 |
+| 7 Learner features | Onboarding, a knowledge base about the learner, visual assessment, topic linking, skills dashboard, thinking, masterclass mode | 5; some items need 6 |
+
+## Stage 0: cleanup and close-out
+
+Runs before any rebuild work.
+
+| Step | Work |
+|---|---|
+| 0.1 | These docs record the decisions of 2026-11-14 |
+| 0.2 | The earlier session's leftovers removed: the `feature/1.1-host-definition` worktree and branch (a local merge of both unmerged pull requests, never pushed), its scratch files, and the build output in the home-disk checkout |
+| 0.3 | Pull request 1 reviewed for code quality, security and efficiency; confirmed findings fixed |
+| 0.4 | The owner signs off pull requests 2 and 1, and moves the pdl records out of `idea` |
+| 0.5 | Handoff |
+
+## Rules for every stage
+
+- **The running app is not touched.** `/usr/lib/persist/peer/{state,releases,current}`, the `peer` launcher and
+  `~/.config/LearnHarness` change only on the owner's word. Every server or test run uses a scratch data
+  directory and a spare port. A packaged build is started only with `XDG_CONFIG_HOME` pointed at scratch.
+- **One sprint, one branch, one worktree.** Each sprint's branch is cut from `master` into
+  `/usr/lib/persist/peer/work/<branch>`, where installs, builds and tests run. Nothing is built on an unmerged
+  branch. While a sign-off is pending, only the next sprint's read-only Discovery may run.
+- **Review is independent.** One consolidated QA per phase, by reviewers that did not write the code; each finding
+  is checked against the code before it is acted on.
 
 ## Phase 1: Host
 
@@ -43,7 +67,7 @@ QA gate: SPEC §7, Phase 1. Packaging scripts are **not** changed in this phase.
 | 1.5 Parity method | The comparison rules for `tests/host-parity.test.ts`: which headers are compared, how streams are compared, which fixtures are used | 1.2 | medium |
 | 1.6 Submodule | `extern/cloudcanvas` added at `c5e6e07`; the rule for moving the pin written into `ARCHITECTURE.md` | — | low |
 
-The model for each item is **open** (DESIGN §7.3).
+Models follow DESIGN §7.3: Sonnet for items 1.1 to 1.3, Opus for 1.4 and 1.5.
 
 ## Phase 2: Client base
 
@@ -92,6 +116,7 @@ Discovery sprint that states what exists, what it changes in the engine, and wha
 | Linking similar and overlapping topics by keyword and metadata | no |
 | Ongoing skills assessment and ranking, with a progression dashboard | yes, for the dashboard |
 | Thinking: show what the model is thinking, in every binding | no |
+| Masterclass mode beside single lessons: refinement rounds that draft a roadmap to complete knowledge of a domain, place the learner in each sub-domain, and sew successions of lessons together. Single lessons stay and cluster | open |
 
 Items that touch `src/{agent,core,store}` change upstream's engine, so each is designed to stay separable from
 it (SPEC §5.5).
@@ -139,3 +164,4 @@ constraints, effort and its dependencies (`pdl find --kind task --tags proposed`
 | Phase | Expected | Actual |
 |---|---|---|
 | 0 Foundation | Docs, report, proposed roadmap, handoff | delivered 2026-11-14 in pull request 2; awaiting the owner's sign-off |
+| Stage 0 | Leftovers removed; pull request 1 reviewed and fixed; both pull requests signed off; handoff | in progress. 0.1 and 0.2 done 2026-11-14; the 0.3 review is running |

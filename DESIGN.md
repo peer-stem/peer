@@ -70,9 +70,12 @@ starts with its own Discovery. "Today" is what was found in the code on `master`
 | **Linking similar and overlapping topics** by keyword and metadata, so that mathematics and computer science share what they share | Some similarity handling exists in the graph code (`src/core/proposition-candidates.ts`, `src/core/graph.ts`); its extent is not verified |
 | **Ongoing skills assessment and ranking**, with a metrics dashboard of progression and skill level by area | None, and it departs from upstream's stated position quoted above. The dashboard builds on Phase 6 |
 | **Thinking**: show what the model is thinking | The session view renders reasoning when a provider returns it (`components/chat.tsx`, the `reasoning` part). The Codex and Antigravity bindings in pull request 1 do not pass reasoning through |
+| **Masterclass mode**, beside single lessons. Single lessons stay as they work now, and cluster. Masterclass runs extended refinement rounds, not a single planning pass, and drafts an extended roadmap toward complete knowledge of a domain. Its assessment finds everything the learner wants to learn and where they sit in each sub-domain or niche of a school of thought, or across domains; it maps the pieces and sews together successions of lessons | A session's plan is written once: one `plan_init` call, "author-once" (`src/agent/tools/plan.ts`), as the minimal tree to one goal (`src/agent/prompts/teacher/10-planning.md`). Whether anything plans across sessions or groups them is not verified |
 
 The third and fifth depend on model-built canvases (Phase 6). The others do not depend on the interface and
-could be scheduled earlier; that ordering is **open**.
+could be scheduled earlier; that ordering is **open**. Proposed, not decided: masterclass mode builds on
+onboarding's assessment, the learner knowledge base and topic linking; whether its roadmap view needs Phase 6 is
+**open**.
 
 ## 7. Open decisions
 
@@ -81,8 +84,9 @@ could be scheduled earlier; that ordering is **open**.
    are application blocks (peer).
 2. **Panels and board save/load** exist only in `CloudsEcosys/cc-main`. Dashboards after parity probably need
    them. Either they land in `CloudsEcosys/cloudcanvas`, or that phase is built without them.
-3. **Model and effort for each work item.** Effort is proposed in pdl; the model is left open until the
-   provider and model mapping is settled.
+3. **Model and effort for each work item.** Decided by the owner, 2026-11-14: delegated agents run on tiered
+   Claude models. Sonnet for research, inventories and review; Opus for design and development; Fable only for
+   the hardest items. Effort is proposed in pdl.
 4. **The fork's default branch** on GitHub is still `main`; pull requests name `master` explicitly.
 5. **How far the knowledge graph changes at parity.** Proposed: none; the existing canvas engine is kept as is.
 6. **When the items in §6 are scheduled**, and which of them may start before parity.
