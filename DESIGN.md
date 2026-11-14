@@ -1,6 +1,7 @@
 # peer: design
 
-Status: foundation draft, 2026-11-14. Points marked **open** are not decided.
+Status: foundation draft, 2026-11-14; the owner's correction on where the interface runs added to §3 the same day.
+Points marked **open** are not decided.
 
 ## 1. Purpose
 
@@ -33,6 +34,10 @@ One learner on their own machine, running the desktop app with their own model a
 | Client languages | Plain JavaScript for view code that talks to CloudCanvas; TypeScript for what shares types with `src/` |
 | Where new capability lives | CloudCanvas stays slim and agnostic. A piece that belongs to CloudCanvas is a library on its side; application shapes and structures stay in peer |
 | Deadline | None |
+| Where the interface runs | The owner's words: "CloudCanvas is designed where the Client is the Host", and "cloudcanvas runs client side because it treats the DOM as the runtime engine". No server serves or renders the interface. The client is static native modules that run in the window, draw everything there and fetch all data. In CloudCanvas, "host" means the client side (a control's host element), so the Node server is never called host |
+| The Node server | Only the engine's API: the routes and streams the Next layer serves today, without Next. Its directory name, `src/api`, is **proposed** (§7) |
+| Old interface during the migration | Stays on Next, untouched, until the removal phase. Phase 1 is accepted on route parity and the logic suite, not on the old interface running elsewhere |
+| The new client's own files | Not part of Phase 1. How they and the `public/` files the client needs reach the window is decided in Phase 2 (§7) |
 
 ## 4. Principles
 
@@ -72,6 +77,8 @@ starts with its own Discovery. "Today" is what was found in the code on `master`
 | **Thinking**: show what the model is thinking | The session view renders reasoning when a provider returns it (`components/chat.tsx`, the `reasoning` part). The Codex and Antigravity bindings in pull request 1 do not pass reasoning through |
 | **Masterclass mode**, beside single lessons. Single lessons stay as they work now, and cluster. Masterclass runs extended refinement rounds, not a single planning pass, and drafts an extended roadmap toward complete knowledge of a domain. Its assessment finds everything the learner wants to learn and where they sit in each sub-domain or niche of a school of thought, or across domains; it maps the pieces and sews together successions of lessons | A session's plan is written once: one `plan_init` call, "author-once" (`src/agent/tools/plan.ts`), as the minimal tree to one goal (`src/agent/prompts/teacher/10-planning.md`). Whether anything plans across sessions or groups them is not verified |
 | **Seams between domains**, alongside masterclass mode. Sets of connected topics that have been learned connect and group together in the graph. Where topics are related, even across domains, the system identifies the gaps and can test and teach the seam between the domains or teachings already created. The owner placed this last, after everything else | Not verified. The topic-linking row above names the similarity code that exists; nothing was found that detects gaps between domains |
+| **Mastery and mystery**. The system identifies strengths (areas of mastery) and gaps (areas of mystery), and how to build on existing topics to extend into target areas: the areas in the map that help bridge the gaps. It reinforces the strengths and eliminates the weaknesses | Not verified. The graph stores ideas and their connections; upstream's README says it does not rate ability. See the skills-assessment row |
+| **Chained learning across subjects**. The model looks at the other areas, topics and content the learner is working through and sees how they relate. The owner's example: working on machine learning while missing fundamental math, it uses the math teaching inside the machine learning and teaches both, placing what is learned in machine learning within what is missing in math, so the learner gains in both areas | Not verified. A session plans toward one goal (the masterclass row); nothing was found that relates sessions to each other |
 
 The third and fifth depend on model-built canvases (Phase 6). The others do not depend on the interface and
 could be scheduled earlier; that ordering is **open**. Proposed, not decided: masterclass mode builds on
@@ -91,3 +98,8 @@ onboarding's assessment, the learner knowledge base and topic linking; whether i
 4. **The fork's default branch** on GitHub is still `main`; pull requests name `master` explicitly.
 5. **How far the knowledge graph changes at parity.** Proposed: none; the existing canvas engine is kept as is.
 6. **When the items in §6 are scheduled**, and which of them may start before parity.
+7. **How the client reaches the engine.** Assumed, not confirmed: HTTP to the API server. Alternative: Electron's own
+   channel, with no HTTP server in the desktop app (ARCHITECTURE §8).
+8. **How the client's own files reach the window** (Phase 2): the API server hands them out, or the Electron window
+   loads them from disk.
+9. **The name of the API server's directory.** Proposed: `src/api`.
