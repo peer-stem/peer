@@ -51,6 +51,8 @@ import type {
 import type { EffectiveModelSpec, EffectiveSlot } from "../core/settings-resolution.ts";
 import { AUTH_PROVIDER_KEYS, CUSTOM_PROVIDER } from "../core/auth-keys.ts";
 import { claudeCodeAvailable } from "./claude-code-config.ts";
+import { externalCliAvailable } from "./external-cli-config.ts";
+import { ADDED_CLI_IDS, isClaudeCliProvider, isExternalCliProvider } from "../core/contracts/external-cli.ts";
 import { CLAUDE_CODE_PROVIDER } from "../agent/claude-code/constants.ts";
 import {
 	BACKGROUND_MODEL_ROLES,
@@ -155,6 +157,7 @@ export function catalogProviders(): CatalogProvider[] {
 	})).concat([
 		{ id: "chatgpt", envVar: "", keyPresent: chatGPTConnected() },
 		{ id: CLAUDE_CODE_PROVIDER, envVar: "", keyPresent: claudeCodeAvailable() },
+		...ADDED_CLI_IDS.map((id) => ({ id, envVar: "", keyPresent: externalCliAvailable(id) })),
 		...NATIVE_SUBSCRIPTIONS.map((p) => ({ id: p.logicalId, envVar: "", keyPresent: nativeSubscriptionConnected(p.providerId) })),
 		// The custom endpoint: a row only when usable (base URL set). keyPresent
 		// reflects usability, not key presence (keyless local servers are allowed).
@@ -180,14 +183,14 @@ export function toModelDto(model: Model<Api>): ModelDto {
 		reasoning: model.reasoning,
 		input: [...model.input],
 		supportedLevels: getSupportedThinkingLevels(model),
-		cost: model.provider === CLAUDE_CODE_PROVIDER || model.provider === CUSTOM_PROVIDER.id ? null : {
+		cost: isExternalCliProvider(model.provider) || model.provider === CUSTOM_PROVIDER.id ? null : {
 			input: model.cost.input,
 			output: model.cost.output,
 			cacheRead: model.cost.cacheRead,
 			cacheWrite: model.cost.cacheWrite,
 		},
-		contextWindow: model.provider === CLAUDE_CODE_PROVIDER ? null : model.contextWindow,
-		maxTokens: model.provider === CLAUDE_CODE_PROVIDER ? null : model.maxTokens,
+		contextWindow: isClaudeCliProvider(model.provider) ? null : model.contextWindow,
+		maxTokens: isClaudeCliProvider(model.provider) ? null : model.maxTokens,
 	};
 }
 
@@ -203,7 +206,7 @@ export function catalogContextLimits(): Map<string, number> {
 	const keyed = keyedProviderIds();
 	const index = new Map<string, number>();
 	for (const provider of piModels().getProviders()) {
-		if (!keyed.has(provider.id) || provider.id === CLAUDE_CODE_PROVIDER) continue;
+		if (!keyed.has(provider.id) || isClaudeCliProvider(provider.id)) continue;
 		for (const model of piModels().getModels(provider.id)) {
 			index.set(`${provider.id}:${model.id}`, model.contextWindow);
 		}

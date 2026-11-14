@@ -26,8 +26,14 @@ type BridgeCallbacks = { onCall(): void; onError(error: Error): void; onCancel?(
 
 export const MCP_IDENTITY_ERROR = "claude CLI compatibility error: MCP calls must include a unique claudecode/toolUseId";
 
+/** `claude` requires the CLI's own tool-use identity; `minted` serves CLIs
+ * whose MCP requests carry none, so the bridge names each admitted call. */
+export type BridgeIdentity = "claude" | "minted";
+
 export type ToolBridge = {
 	mcpConfig: string;
+	/** The same loopback route for CLIs that take a URL and header, not Claude's JSON. */
+	endpoint: { url: string; authorization: string };
 	allowedTools: string[];
 	waitForToolCalls(count: number): Promise<PendingToolCall[]>;
 	resolveToolCall(call: PendingToolCall, result: ToolResultMessage): void;
@@ -125,14 +131,14 @@ class ToolCallQueue {
 
 // Low-level Server on purpose: McpServer.registerTool only takes zod schemas, and pi tools carry
 // JSON Schema that must reach the CLI unchanged.
-function createMcpServer(tools: Tool[], queue: ToolCallQueue, callbacks?: BridgeCallbacks): Server {
+function createMcpServer(tools: Tool[], queue: ToolCallQueue, callbacks?: BridgeCallbacks, identity: BridgeIdentity = "claude"): Server {
 	const server = new Server({ name: BRIDGE_SERVER_NAME, version: "1.0.0" }, { capabilities: { tools: {} } });
 
 	server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: tools.map(toMcpTool) }));
 
 	const seenIds = new Set<string>();
 	server.setRequestHandler(CallToolRequestSchema, (request, extra) => {
-		const id = request.params._meta?.["claudecode/toolUseId"];
+		const id = identity === "minted" ? randomUUID() : request.params._meta?.["claudecode/toolUseId"];
 		if (typeof id !== "string" || !id.trim() || seenIds.has(id)) {
 			const error = new McpError(ErrorCode.InvalidParams, MCP_IDENTITY_ERROR);
 			callbacks?.onError(error);
@@ -196,17 +202,21 @@ function closeHttpServer(server: http.Server): Promise<void> {
 	});
 }
 
+function bridgeUrl(port: number): string {
+	return `http://${LOOPBACK_HOST}:${port}/mcp`;
+}
+
 function toMcpConfig(port: number, authorization: string): string {
-	const server = { type: "http", url: `http://${LOOPBACK_HOST}:${port}/mcp`, headers: { Authorization: authorization } };
+	const server = { type: "http", url: bridgeUrl(port), headers: { Authorization: authorization } };
 
 	return JSON.stringify({ mcpServers: { [BRIDGE_SERVER_NAME]: server } });
 }
 
-export async function createToolBridge(tools: Tool[], callbacks?: BridgeCallbacks): Promise<ToolBridge> {
+export async function createToolBridge(tools: Tool[], callbacks?: BridgeCallbacks, identity: BridgeIdentity = "claude"): Promise<ToolBridge> {
 	const authorization = `Bearer ${randomBytes(TOKEN_BYTES).toString("hex")}`;
 
 	const queue = new ToolCallQueue();
-	const mcpServer = createMcpServer(tools, queue, callbacks);
+	const mcpServer = createMcpServer(tools, queue, callbacks, identity);
 	const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() });
 	await mcpServer.connect(transport);
 
@@ -221,6 +231,7 @@ export async function createToolBridge(tools: Tool[], callbacks?: BridgeCallback
 
 	return {
 		mcpConfig: toMcpConfig(port, authorization),
+		endpoint: { url: bridgeUrl(port), authorization },
 		allowedTools: tools.map((tool) => `${MCP_TOOL_PREFIX}${tool.name}`),
 		waitForToolCalls: (count) => queue.waitFor(count),
 		resolveToolCall: (call, result) => queue.resolve(call, result),

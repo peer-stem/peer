@@ -23,12 +23,23 @@ export const CLAUDE_CODE_MODELS: readonly Model<Api>[] = [
 	{ ...SHARED_MODEL_FIELDS, id: "haiku", name: "Claude Haiku" },
 ];
 
-export function createClaudeCodeProvider(streamSimple: StreamFunction<Api, SimpleStreamOptions>): Provider {
+const ALIAS_NAMES: Record<string, string> = { fable: "Claude Fable", opus: "Claude Opus", sonnet: "Claude Sonnet", haiku: "Claude Haiku" };
+
+/** The CLI accepts aliases and full model names alike; an ID it does not
+ * know fails in the CLI, not here. */
+export function claudeCodeModels(ids: readonly string[], provider: string = CLAUDE_CODE_PROVIDER): Model<Api>[] {
+	return ids.map((id) => ({ ...SHARED_MODEL_FIELDS, provider, id, name: ALIAS_NAMES[id] ?? id }));
+}
+
+export type ClaudeCodeProfile = { id: string; name: string; models: readonly Model<Api>[] };
+
+/** `profile` names a second binding of the same CLI, e.g. another login. */
+export function createClaudeCodeProvider(streamSimple: StreamFunction<Api, SimpleStreamOptions>, profile?: ClaudeCodeProfile): Provider {
 	return createProvider({
-		id: CLAUDE_CODE_PROVIDER,
-		name: "Claude Code",
+		id: profile?.id ?? CLAUDE_CODE_PROVIDER,
+		name: profile?.name ?? "Claude Code",
 		auth: { apiKey: { name: "Claude Code CLI", resolve: async () => ({ auth: {}, source: "claude CLI" }) } },
-		models: CLAUDE_CODE_MODELS,
+		models: profile?.models ?? CLAUDE_CODE_MODELS,
 		api: { stream: streamSimple, streamSimple },
 	});
 }
