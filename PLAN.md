@@ -158,7 +158,7 @@ Delete `app/`, the React components, Next, Tailwind and the React render tests. 
 
 ## E Later features (Phases 6 and 7)
 
-Model-built canvases, then the design points in DESIGN §6 (eleven so far). Each opens with its own Discovery; none
+Model-built canvases, then the design points in DESIGN §6 (fifteen so far). Each opens with its own Discovery; none
 is designed here.
 
 ### Phase 6: Canvases
@@ -184,6 +184,10 @@ Discovery sprint that states what exists, what it changes in the engine, and wha
 | Mastery and mystery: identify areas of mastery and areas of mystery, and the topics in the map that bridge from what is held into a target area | open |
 | Chained learning across subjects: relate the areas the learner is working through, teach a missing foundation inside the subject that needs it, and credit progress in both | open |
 | Learning style and confidence: learn the individual's learning style, how they grade their own confidence, and their styles of communication | open |
+| Learn more (+) on a section: the learner says where to expound and the model adds learning to the graph | open |
+| Quizzes graded on ability, so later quizzes can be set at higher orders or degrees | open |
+| Expand a set of topics in conversation, from what was learned and struggled with, toward more learning around a topic and its relation to other interests, motivations and goals | open |
+| Skill tree: successes and failures mapped visually to what is known and what is being learned | yes |
 
 Items that touch `src/{agent,core,store}` change upstream's engine, so each is designed to stay separable from
 it (SPEC §5.5).
