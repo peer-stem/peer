@@ -25,6 +25,7 @@ import {
 	ConversationScrollButton,
 } from "@/components/ai-elements/conversation";
 import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
+import { replyToSpeak, SpeakButton, speechIdOf, useAutoSpeak } from "@/components/speak-button";
 import { PathText } from "@/components/file-path-chip";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
 import { Shimmer } from "@/components/ai-elements/shimmer";
@@ -581,6 +582,8 @@ export function Chat({
 	activeProblemRef.current = activeProblem;
 
 	const localStream = status === "submitted" || status === "streaming";
+	const lastReply = useMemo(() => replyToSpeak(messages.at(-1)), [messages]);
+	useAutoSpeak(chatId, status, lastReply);
 	const busy = localStream || turnInFlight || reconciliation !== "ready";
 	const busyRef = useRef(busy);
 	busyRef.current = busy;
@@ -1912,6 +1915,7 @@ export function Chat({
 														return (
 															<div key={part.id || pi} id={anchor} data-source-message-id={sourceId ?? undefined} className="lh-source-passage">
 																<MessageResponse>{part.text}</MessageResponse>
+																{!(status === "streaming" && isLastPart) && <SpeakButton id={speechIdOf(m.id, part.id, pi)} text={part.text ?? ""} />}
 															</div>
 														);
 													}

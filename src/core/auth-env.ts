@@ -13,6 +13,10 @@ export function authEnvRecord(): AuthBoot {
 	return g[BOOT_KEY];
 }
 
+/** The app server's own access and data location (as browserServiceSpawnEnv
+ * scrubs them): with these a CLI child could call the app API as the user. */
+const SERVER_ONLY_ENV = ["LH_DESKTOP_API_SECRET", "LH_DESKTOP_SERVER", "LH_AUTH_FILE", "LH_DATA_DIR", "PORT"];
+
 /** External CLIs own their authentication. Never pass LearnHarness-only injections. */
 export function externalCliEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
 	const result = { ...env };
@@ -20,5 +24,6 @@ export function externalCliEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.Pro
 	for (const name of fillGap) {
 		if (!realEnv.has(name)) delete result[name];
 	}
+	for (const name of SERVER_ONLY_ENV) delete result[name];
 	return result;
 }

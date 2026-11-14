@@ -5,6 +5,9 @@ import { Loader2Icon, MicIcon } from "lucide-react";
 import { useSettingsDialog } from "@/components/settings/settings-dialog";
 import { Hint } from "@/components/ui/hint";
 import { deepgramListenUrl, type DictationLanguage } from "@/src/core";
+import { LocalTranscriber } from "@/components/dictation-local";
+import { usesLocalDictation, whenHostedDictation } from "@/components/speech-settings";
+import { stopSpeaking } from "@/components/speech-playback";
 import { useDictationLanguage } from "@/components/dictation-preference";
 import { setDictationActive } from "@/components/dictation-state";
 import { dispatchFocusedPluginShortcut } from "@/components/plugin-input-focus";
@@ -375,6 +378,8 @@ export function useDictation({ append, destination = "primary", disabled = false
 	// the per-run nodes disconnect on teardown; the socket is recreated per
 	// run; the AudioContext is app-lifetime (mitigation C).
 	const wsRef = useRef<WebSocket | null>(null);
+	/** Set for a run on the local engine: audio goes here, never to a socket. */
+	const localRef = useRef<LocalTranscriber | null>(null);
 	const streamRef = useRef<MediaStream | null>(null);
 	/** Per-run graph nodes — the CONTEXT outlives runs (mitigation C). */
 	const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
@@ -424,6 +429,8 @@ export function useDictation({ append, destination = "primary", disabled = false
 			safetyRef.current = null;
 		}
 		pendingRef.current = [];
+		localRef.current?.discard();
+		localRef.current = null;
 		for (const track of streamRef.current?.getTracks() ?? []) track.stop();
 		streamRef.current = null;
 		sourceRef.current?.disconnect();
@@ -455,7 +462,7 @@ export function useDictation({ append, destination = "primary", disabled = false
 				if (failed) waiter.reject(failed.error);
 				else waiter.resolve();
 			}
-			if (warmNext) warmTokens.refresh();
+			if (warmNext) whenHostedDictation(warmTokens.refresh);
 		};
 		if (appended && typeof (appended as PromiseLike<unknown>).then === "function") {
 			appendPendingRef.current = true;
@@ -542,6 +549,8 @@ export function useDictation({ append, destination = "primary", disabled = false
 		recordingOwner = owner;
 		recordingTarget = target.append;
 		setDictationActive(true);
+		// A reply being read aloud would be picked up by the microphone.
+		stopSpeaking();
 		setError(null);
 		appendFailureRef.current = null;
 		setPhase("connecting");
@@ -550,8 +559,12 @@ export function useDictation({ append, destination = "primary", disabled = false
 		pendingRef.current = []; // fresh run, fresh queue (mitigation A)
 		const gen = ++genRef.current;
 		let language: DictationLanguage;
+		let local: boolean;
 		try {
 			language = await getLanguage();
+			// The local engine needs no token and no socket. An unreadable speech
+			// setting stops the run: audio goes only to the engine chosen.
+			local = await usesLocalDictation();
 		} catch (e) {
 			if (gen !== genRef.current) return;
 			setError(e instanceof Error ? e.message : "Dictation language unavailable");
@@ -559,6 +572,7 @@ export function useDictation({ append, destination = "primary", disabled = false
 			return;
 		}
 		if (gen !== genRef.current) return;
+		localRef.current = local ? new LocalTranscriber(language) : null;
 
 		// Mitigation D: the warm token (pre-minted at mount / after the last
 		// run) resolves ~instantly; a cold/keyless mint surfaces below. The
@@ -566,8 +580,8 @@ export function useDictation({ append, destination = "primary", disabled = false
 		// the token runs concurrently with it. 127.0.0.1 is a secure
 		// context, so getUserMedia works without TLS; macOS TCC prompts on
 		// first use.
-		const tokenPromise = warmTokens.mint();
-		tokenPromise.catch(() => {}); // surfaced below; no unhandled rejection
+		const tokenPromise = local ? undefined : warmTokens.mint();
+		tokenPromise?.catch(() => {}); // surfaced below; no unhandled rejection
 		const micPromise = navigator.mediaDevices.getUserMedia({
 			audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
 		});
@@ -595,6 +609,11 @@ export function useDictation({ append, destination = "primary", disabled = false
 				if (msg.type === "level") {
 					levelRef.current = msg.rms ?? 0; // never reset to zero (dictate pattern)
 				} else if (msg.type === "audio") {
+					const localRun = localRef.current;
+					if (localRun) {
+						localRun.push(msg.buffer!);
+						return;
+					}
 					const ws = wsRef.current;
 					if (ws && ws.readyState === WebSocket.OPEN) ws.send(msg.buffer!);
 					// Mitigation A: not OPEN yet (handshake or reconnect gap) —
@@ -624,6 +643,10 @@ export function useDictation({ append, destination = "primary", disabled = false
 			return;
 		}
 		if (gen !== genRef.current) return;
+		if (!tokenPromise) {
+			setPhase("recording");
+			return;
+		}
 		let token: string;
 		try {
 			token = await tokenPromise;
@@ -652,6 +675,19 @@ export function useDictation({ append, destination = "primary", disabled = false
 		sourceRef.current = null;
 		workletRef.current?.disconnect();
 		workletRef.current = null;
+
+		const localRun = localRef.current;
+		if (localRun) {
+			// The last piece is still being transcribed: the run ends when it lands.
+			// The run stays in localRef until then, so Esc can cancel its requests.
+			void localRun.finish().then(({ texts, error: failed }) => {
+				if (gen !== genRef.current) return;
+				bufferRef.current.push(...texts);
+				if (failed) setError(failed);
+				cleanup();
+			});
+			return;
+		}
 
 		const ws = wsRef.current;
 		if (ws && ws.readyState === WebSocket.OPEN) {
@@ -718,7 +754,7 @@ export function useDictation({ append, destination = "primary", disabled = false
 	// focused plugin control first, otherwise core fallback; Esc always
 	// cancels the actual recording owner rather than the focused widget.
 	useEffect(() => {
-		warmTokens.refresh(); // pre-mint at mount (mitigation D) — silent if keyless
+		whenHostedDictation(warmTokens.refresh); // pre-mint at mount (mitigation D) — silent if keyless
 		return () => {
 			// Navigation cancels capture: invalidate every pending await before
 			// releasing resources, and never append into a different page's input.

@@ -12,6 +12,9 @@
  */
 
 import path from "node:path";
+import { asRecord, type SettingsBodyResult } from "./settings-body-result.ts";
+import { parseExternalCliSettingsBody } from "./settings-body-external-cli.ts";
+import { parseSpeechSettingsBody } from "./settings-body-speech.ts";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { isHexColor, type ChatSettings } from "../core";
 import { COLOR_OVERRIDE_KEYS, isThemeId, type AppearanceColorOverrides, type ColorOverrideKey } from "../core/themes.ts";
@@ -34,10 +37,8 @@ import { isSearchEngineId, SEARCH_ENGINES } from "../core/search.ts";
 import { isDictationLanguage } from "../core/dictation.ts";
 import { parseFileAccessSettings } from "../core/file-access.ts";
 
-/** Parsed-or-rejected — `ok: false` carries the 400's error message. */
-export type SettingsBodyResult<T> =
-	| { ok: true; settings: T }
-	| { ok: false; error: string };
+export type { SettingsBodyResult };
+export { parseExternalCliSettingsBody, parseSpeechSettingsBody };
 
 export function parseSettingsBody(body: unknown): SettingsBodyResult<ChatSettings> {
 	if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -77,11 +78,6 @@ export function parseSettingsBody(body: unknown): SettingsBodyResult<ChatSetting
 // its parser via SETTINGS_SECTIONS below. Same discipline as
 // parseSettingsBody: strict on every known field (a bad type/shape is a
 // 400, never a silent clamp/drop), unknown keys dropped.
-
-function asRecord(body: unknown): Record<string, unknown> | null {
-	if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-	return body as Record<string, unknown>;
-}
 
 /** general: { autoUpdate?: boolean } */
 export function parseGeneralSettingsBody(body: unknown): SettingsBodyResult<GeneralSettings> {
@@ -499,6 +495,8 @@ export const SETTINGS_SECTIONS = {
 	models: parseModelsSettingsBody,
 	dictation: parseDictationSettingsBody,
 	claudeCode: parseClaudeCodeSettingsBody,
+	externalCli: parseExternalCliSettingsBody,
+	speech: parseSpeechSettingsBody,
 } as const;
 
 export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;

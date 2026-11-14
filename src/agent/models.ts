@@ -59,6 +59,12 @@ interface ProviderSource {
 	isCustom(id: string): boolean;
 }
 let providerSource: ProviderSource | undefined;
+let cliSource: Pick<ProviderSource, "sync"> | undefined;
+
+/** External CLI bindings follow settings; the server owns that read. */
+export function configureCliSource(source: Pick<ProviderSource, "sync">): void {
+	cliSource = source;
+}
 
 /** Configuration IO is injected by the server; the agent never imports stores. */
 export function configureProviderSource(source: ProviderSource): void {
@@ -94,6 +100,7 @@ export function piModels() {
 		collection.setProvider(createClaudeCodeProvider(streamClaudeCode));
 	}
 	providerSource?.sync(collection);
+	cliSource?.sync(collection);
 	return collection;
 }
 
