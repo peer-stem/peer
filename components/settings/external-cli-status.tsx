@@ -1,20 +1,12 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-	ADDED_CLI_IDS, CLAUDE_CODE_PROVIDER, EXTERNAL_CLI_MODEL_ID, externalCli,
-	type ExternalCliId, type ExternalCliSettings, type ExternalCliSettingsMap, type ExternalCliStatus, type UserSettings,
+	ADDED_CLI_IDS, CLAUDE_CODE_PROVIDER, EXTERNAL_CLI_DEFAULT_HOMES, EXTERNAL_CLI_MODEL_ID, externalCli, parseModelIds,
+	type AddedCliId, type ExternalCliId, type ExternalCliSettings, type ExternalCliSettingsMap, type ExternalCliStatus, type UserSettings,
 } from "@/src/core";
 import { notifySettingsSaved } from "@/components/settings-signal";
 import { Button } from "@/components/ui/button";
 import { CommitInput, Toggle } from "./controls";
-
-/** Where each CLI keeps its own login when no directory is named. */
-const HOME_PLACEHOLDERS: Record<ExternalCliId, string> = {
-	[CLAUDE_CODE_PROVIDER]: "",
-	claudex: "~/.claudeex",
-	"codex-cli": "~/.codex",
-	"agy-cli": "~",
-};
 
 type Save = (id: ExternalCliId, entry: ExternalCliSettings) => Promise<boolean>;
 
@@ -26,9 +18,9 @@ export function externalCliStatusLabel(status: ExternalCliStatus | null): string
 }
 
 /** Commas or whitespace separate IDs; anything else is refused, not trimmed away. */
-export function parseModelIds(text: string): string[] | null {
-	const ids = text.split(/[\s,]+/).filter(Boolean);
-	return ids.every((id) => EXTERNAL_CLI_MODEL_ID.test(id)) ? [...new Set(ids)] : null;
+export function parseCliModelIds(text: string): string[] | null {
+	const ids = parseModelIds(text);
+	return ids.every((id) => EXTERNAL_CLI_MODEL_ID.test(id)) ? ids : null;
 }
 
 function useCliStatus(id: ExternalCliId, enabled: boolean) {
@@ -66,12 +58,12 @@ function ModelIdsInput({ id, entry, save, disabled }: { id: ExternalCliId; entry
 	return <CommitInput value={(entry.models ?? []).join(", ")} placeholder="Extra model IDs, comma separated" ariaLabel={label}
 		testid={`external-cli-models-${id}`} disabled={disabled}
 		onCommit={(next) => {
-			const models = parseModelIds(next);
+			const models = parseCliModelIds(next);
 			return models === null ? false : save(id, { ...entry, models });
 		}} />;
 }
 
-function CliRow({ id, entry, save, disabled }: { id: ExternalCliId; entry: ExternalCliSettings; save: Save; disabled: boolean }) {
+function CliRow({ id, entry, save, disabled }: { id: AddedCliId; entry: ExternalCliSettings; save: Save; disabled: boolean }) {
 	const { label } = externalCli(id)!;
 	const enabled = entry.enabled === true;
 	const { status, busy, refresh } = useCliStatus(id, enabled);
@@ -85,7 +77,7 @@ function CliRow({ id, entry, save, disabled }: { id: ExternalCliId; entry: Exter
 				<span role="status" className="text-xs text-muted-foreground">{busy ? "Checking…" : externalCliStatusLabel(status)}</span>
 				<Button type="button" size="xs" variant="outline" className="cursor-pointer disabled:cursor-not-allowed" disabled={busy} onClick={() => void refresh()}>Check again</Button>
 			</div>
-			<CommitInput value={entry.home ?? ""} placeholder={`Configuration directory (default ${HOME_PLACEHOLDERS[id]})`} ariaLabel={`${label} configuration directory`}
+			<CommitInput value={entry.home ?? ""} placeholder={`Configuration directory (default ${EXTERNAL_CLI_DEFAULT_HOMES[id]})`} ariaLabel={`${label} configuration directory`}
 				testid={`external-cli-home-${id}`} disabled={disabled}
 				onCommit={(next) => save(id, { ...entry, home: next.trim() || undefined })} />
 			<ModelIdsInput id={id} entry={entry} save={save} disabled={disabled} />

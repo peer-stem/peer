@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import {
 	createAssistantMessageEventStream,
@@ -37,6 +37,7 @@ function continueLiveProcess(turn: CliTurn, owner: symbol, configuration: unknow
 	const ids = assistant.content.flatMap((block) => block.type === "toolCall" ? [block.id] : []);
 	const live = getLiveProcess(ids, owner, options?.sessionId);
 	if (!(live instanceof LineCliProcess)) return false;
+	if (live.consumeFailure(turn)) return true;
 	const trailing = messages.slice(assistantIndex + 1);
 	const results = trailing.filter((message) => message.role === "toolResult");
 	if (trailing.length !== results.length || !live.canContinue(options?.sessionId, configuration, messages, results)) {
@@ -59,7 +60,7 @@ async function startProcess(input: StartInput, turn: CliTurn): Promise<void> {
 	const bridge = await createToolBridge(request.tools, {
 		onCall: () => cli?.scheduleAdmission(),
 		onError: (error) => cli?.fail(error.message),
-	}, "minted");
+	}, "minted", dialect.label);
 	let launch: CliLaunch;
 	try {
 		launch = await dialect.prepare({
@@ -80,7 +81,13 @@ async function startProcess(input: StartInput, turn: CliTurn): Promise<void> {
 		await closeUnused(bridge, launch);
 		return;
 	}
-	const child = input.spawnProcess(launch.binary, launch.args, { cwd: launch.cwd, env: launch.env, stdio: "pipe" });
+	let child: ChildProcessWithoutNullStreams;
+	try {
+		child = input.spawnProcess(launch.binary, launch.args, { cwd: launch.cwd, env: launch.env, stdio: "pipe" });
+	} catch (error) {
+		await closeUnused(bridge, launch);
+		throw error;
+	}
 	const parts = { child, bridge, launch, dialect, owner: input.owner, sessionId: options?.sessionId, configuration: input.configuration };
 	cli = new LineCliProcess(parts, turn, structuredClone(conversationForReuse(input.context.messages)));
 	cli.start(options?.signal);

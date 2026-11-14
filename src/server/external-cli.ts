@@ -10,16 +10,18 @@ import { createLineCliStreamFunction } from "../agent/external-cli/stream.ts";
 import { configureCliSource } from "../agent/models.ts";
 import { CLAUDE_CODE_PROVIDER } from "../core/contracts/claude-code.ts";
 import { EXTERNAL_CLIS, externalCli, type AddedCliId, type ExternalCliId, type ExternalCliStatus } from "../core/contracts/external-cli.ts";
-import { cliBinary, externalCliAvailable, externalCliEnabled, externalCliHome, externalCliSettings, forgetCliBinary } from "./external-cli-config.ts";
-import { discoveredCliModels, mergeCliModels, refreshAgyModels, toCliModels } from "./external-cli-models.ts";
+import {
+	cliBinary, externalCliAvailable, externalCliEnabled, externalCliHome, externalCliSettings, forgetCliBinary, readCliSettings, type CliSettingsSnapshot,
+} from "./external-cli-config.ts";
+import { discoveredCliModels, mergeCliModels, refreshAgyModels, toCliModels, type CliModelEntry } from "./external-cli-models.ts";
 import { subscriptionRequestOrigin } from "./web-subscription-http.ts";
 
 type CliStream = StreamFunction<Api, SimpleStreamOptions>;
 
 const STATUS_HEADER = "x-learnharness-external-cli";
 
-function cliModels(id: ExternalCliId) {
-	return mergeCliModels(discoveredCliModels(id, externalCliHome(id)), externalCliSettings(id).models);
+function cliModels(id: ExternalCliId, settings: CliSettingsSnapshot = readCliSettings()) {
+	return mergeCliModels(discoveredCliModels(id, externalCliHome(id, settings)), externalCliSettings(id, settings).models);
 }
 
 const STREAMS: Record<AddedCliId, CliStream> = {
@@ -28,9 +30,9 @@ const STREAMS: Record<AddedCliId, CliStream> = {
 	"agy-cli": createLineCliStreamFunction(agyDialect, { home: () => externalCliHome("agy-cli") }),
 };
 
-function buildProvider(id: ExternalCliId): Provider {
+function buildProvider(id: ExternalCliId, entries: CliModelEntry[]): Provider {
 	const { label, family } = externalCli(id)!;
-	const models = toCliModels(id, cliModels(id));
+	const models = toCliModels(id, entries);
 	if (id === CLAUDE_CODE_PROVIDER) return createClaudeCodeProvider(streamClaudeCode, { id, name: label, models });
 	const stream = STREAMS[id];
 	if (family === "claude") return createClaudeCodeProvider(stream, { id, name: label, models });
@@ -45,30 +47,35 @@ function buildProvider(id: ExternalCliId): Provider {
 
 /** Claude Code stays registered while off (its saved selections resolve to an
  * honest "unavailable"); the added bindings exist only while usable. */
-function syncProvider(models: MutableModels, id: ExternalCliId, fingerprints: Map<string, string>): void {
-	const present = id === CLAUDE_CODE_PROVIDER || externalCliAvailable(id);
-	const next = present ? JSON.stringify(cliModels(id)) : "absent";
+function syncProvider(models: MutableModels, id: ExternalCliId, fingerprints: Map<string, string>, settings: CliSettingsSnapshot): void {
+	const present = id === CLAUDE_CODE_PROVIDER || externalCliAvailable(id, settings);
+	const entries = present ? cliModels(id, settings) : undefined;
+	const next = entries ? JSON.stringify(entries) : "absent";
 	if (fingerprints.get(id) === next) return;
 	fingerprints.set(id, next);
-	if (present) models.setProvider(buildProvider(id));
+	if (entries) models.setProvider(buildProvider(id, entries));
 	else if (models.getProvider(id)) models.deleteProvider(id);
 }
 
-/** An enabled Antigravity binding lists its models once, in the background. */
-function discoverInBackground(started: Set<string>): void {
-	const binary = externalCliEnabled("agy-cli") ? cliBinary("agy-cli") : null;
-	if (!binary || started.has(binary)) return;
-	started.add(binary);
-	void refreshAgyModels(binary);
+/** An enabled Antigravity binding lists its models once per binary and home, in the background. */
+function discoverInBackground(started: Set<string>, settings: CliSettingsSnapshot): void {
+	const binary = externalCliEnabled("agy-cli", settings) ? cliBinary("agy-cli") : null;
+	const home = externalCliHome("agy-cli", settings);
+	const key = `${binary}\n${home ?? ""}`;
+	if (!binary || started.has(key)) return;
+	started.add(key);
+	void refreshAgyModels(binary, home);
 }
 
+/** One settings read per sync, shared by every check in it. */
 export function installExternalCliSource(): void {
 	const fingerprints = new Map<string, string>();
 	const started = new Set<string>();
 	configureCliSource({
 		sync(models) {
-			discoverInBackground(started);
-			for (const cli of EXTERNAL_CLIS) syncProvider(models, cli.id, fingerprints);
+			const settings = readCliSettings();
+			discoverInBackground(started, settings);
+			for (const cli of EXTERNAL_CLIS) syncProvider(models, cli.id, fingerprints, settings);
 		},
 	});
 }
@@ -79,8 +86,10 @@ export async function externalCliStatus(id: ExternalCliId): Promise<ExternalCliS
 	forgetCliBinary(id);
 	const binary = cliBinary(id);
 	if (!binary) return { id, state: "not-found", version: null, models: [] };
-	if (id === "agy-cli") await refreshAgyModels(binary);
-	return { id, state: "found", version: await readCliVersion(binary), models: cliModels(id).map((model) => model.id) };
+	// The probe and the listing run side by side; the listing is single-flight.
+	const listing = id === "agy-cli" ? refreshAgyModels(binary, externalCliHome(id)) : undefined;
+	const [version] = await Promise.all([readCliVersion(binary), listing]);
+	return { id, state: "found", version, models: cliModels(id).map((model) => model.id) };
 }
 
 /** Same-origin browser intent, not user authentication. No CORS grants. */

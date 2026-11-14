@@ -1,8 +1,8 @@
 import type { ThinkingLevel, Tool } from "@earendil-works/pi-ai";
 
+import type { CliUsage } from "../claude-code/cli-events.ts";
 import { BRIDGE_SERVER_NAME } from "../claude-code/tool-bridge.ts";
 import type { ClaudeContentBlock } from "../claude-code/transcript.ts";
-import type { CliUsage } from "./turn.ts";
 
 export { BRIDGE_SERVER_NAME };
 

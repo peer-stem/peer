@@ -32,7 +32,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { CacheRetention } from "@earendil-works/pi-ai";
 import { AUTH_PROVIDER_KEYS } from "./auth-keys.ts";
 import { CLAUDE_CODE_PROVIDER } from "./contracts/claude-code.ts";
-import { externalCli, sanitizeExternalCliSettings, type ExternalCliSettingsMap } from "./contracts/external-cli.ts";
+import { externalCliUnavailable, sanitizeExternalCliSettings, type ExternalCliSettingsMap } from "./contracts/external-cli.ts";
 import { sanitizeSpeechSettings, type SpeechSettings } from "./contracts/speech.ts";
 import type { ModelRole } from "../../config.ts";
 import type { ChatSettings } from "./contracts/chat.ts";
@@ -168,14 +168,10 @@ export interface ProviderKeyMissing {
  * (the label prefix varies by provider). */
 const PROVIDER_KEY_MISSING_TAIL = "key is set — add one in Settings → Keys";
 const CLAUDE_CODE_UNAVAILABLE = "Claude Code is unavailable. Enable and set it up in Settings → Providers.";
-function cliUnavailable(provider: string): string | undefined {
-	const cli = externalCli(provider);
-	return cli ? `${cli.label} is unavailable. Enable and set it up in Settings → Providers.` : undefined;
-}
 export function providerKeyMissing(provider: string, slots: ModelSlotName[]): ProviderKeyMissing {
 	const label = AUTH_PROVIDER_KEYS.find((p) => p.id === provider)?.label ?? provider;
 	return {
-		error: provider === CLAUDE_CODE_PROVIDER ? CLAUDE_CODE_UNAVAILABLE : cliUnavailable(provider) ?? `No ${label} ${PROVIDER_KEY_MISSING_TAIL}`,
+		error: provider === CLAUDE_CODE_PROVIDER ? CLAUDE_CODE_UNAVAILABLE : externalCliUnavailable(provider) ?? `No ${label} ${PROVIDER_KEY_MISSING_TAIL}`,
 		code: PROVIDER_KEY_MISSING_CODE,
 		provider,
 		slots,

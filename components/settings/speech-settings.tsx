@@ -8,7 +8,7 @@ import { CommitInput, ThinSelect } from "./controls";
 const ENGINE_LABELS: Record<(typeof DICTATION_ENGINES)[number], string> = { deepgram: "Deepgram (hosted)", local: "Local speech endpoint" };
 const SPEAK_LABELS: Record<(typeof SPEAK_MODES)[number], string> = { off: "Off", button: "Play button on replies", auto: "Read each reply aloud" };
 
-/** Only explicit choices are stored; a field at its default is left out. */
+/** Every resolved field is stored, defaults included; only an empty value is left out. */
 function toStored(speech: ResolvedSpeech, patch: SpeechSettings): SpeechSettings {
 	const next = { ...speech, ...patch };
 	return Object.fromEntries(Object.entries(next).filter(([, value]) => value !== "")) as SpeechSettings;

@@ -131,7 +131,7 @@ class ToolCallQueue {
 
 // Low-level Server on purpose: McpServer.registerTool only takes zod schemas, and pi tools carry
 // JSON Schema that must reach the CLI unchanged.
-function createMcpServer(tools: Tool[], queue: ToolCallQueue, callbacks?: BridgeCallbacks, identity: BridgeIdentity = "claude"): Server {
+function createMcpServer(tools: Tool[], queue: ToolCallQueue, callbacks: BridgeCallbacks | undefined, identity: BridgeIdentity, cli: string): Server {
 	const server = new Server({ name: BRIDGE_SERVER_NAME, version: "1.0.0" }, { capabilities: { tools: {} } });
 
 	server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: tools.map(toMcpTool) }));
@@ -145,7 +145,7 @@ function createMcpServer(tools: Tool[], queue: ToolCallQueue, callbacks?: Bridge
 			throw error;
 		}
 		if (!tools.some((tool) => tool.name === request.params.name)) {
-			const error = new McpError(ErrorCode.InvalidParams, "claude CLI requested an undeclared harness tool");
+			const error = new McpError(ErrorCode.InvalidParams, `${cli} CLI requested an undeclared harness tool`);
 			callbacks?.onError(error);
 			throw error;
 		}
@@ -212,11 +212,12 @@ function toMcpConfig(port: number, authorization: string): string {
 	return JSON.stringify({ mcpServers: { [BRIDGE_SERVER_NAME]: server } });
 }
 
-export async function createToolBridge(tools: Tool[], callbacks?: BridgeCallbacks, identity: BridgeIdentity = "claude"): Promise<ToolBridge> {
+/** `cli` names the CLI being driven in the errors its requests can cause. */
+export async function createToolBridge(tools: Tool[], callbacks?: BridgeCallbacks, identity: BridgeIdentity = "claude", cli = "claude"): Promise<ToolBridge> {
 	const authorization = `Bearer ${randomBytes(TOKEN_BYTES).toString("hex")}`;
 
 	const queue = new ToolCallQueue();
-	const mcpServer = createMcpServer(tools, queue, callbacks, identity);
+	const mcpServer = createMcpServer(tools, queue, callbacks, identity, cli);
 	const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() });
 	await mcpServer.connect(transport);
 

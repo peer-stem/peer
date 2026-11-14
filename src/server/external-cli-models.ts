@@ -6,17 +6,16 @@ import * as path from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 
 import { PATHS } from "../../config.ts";
-import { claudeCodeModels } from "../agent/claude-code/provider.ts";
+import { CLAUDE_ALIASES, claudeCodeModels } from "../agent/claude-code/provider.ts";
+import { expandHome } from "../agent/external-cli/binary.ts";
 import { externalCliEnv } from "../core/auth-env.ts";
-import { EXTERNAL_CLI_MODEL_ID, externalCli, type ExternalCliId } from "../core/contracts/external-cli.ts";
+import { EXTERNAL_CLI_DEFAULT_HOMES, EXTERNAL_CLI_MODEL_ID, externalCli, type ExternalCliId } from "../core/contracts/external-cli.ts";
 import { writeFileAtomicSync } from "../store/atomic-write.ts";
 
 export type CliModelEntry = { id: string; name?: string; contextWindow?: number };
 
 export const EXTERNAL_CLI_API = "external-cli";
 
-/** Aliases the installed CLI resolves itself; full model names can be added in settings. */
-const CLAUDE_ALIASES: CliModelEntry[] = [{ id: "fable" }, { id: "opus" }, { id: "sonnet" }, { id: "haiku" }];
 /** The listing is a network call that can take half a minute. */
 const DISCOVERY_TIMEOUT_MS = 120_000;
 /** Used only when the CLI reports no window; compaction needs some bound. */
@@ -39,7 +38,7 @@ function asEntries(value: unknown): Record<string, unknown>[] {
 
 /** Codex keeps the account's model list beside its login; hidden entries are
  * its internal routes, not user choices. */
-export function readCodexModels(home: string = path.join(os.homedir(), ".codex")): CliModelEntry[] {
+export function readCodexModels(home: string = expandHome(EXTERNAL_CLI_DEFAULT_HOMES["codex-cli"])): CliModelEntry[] {
 	try {
 		const cache = JSON.parse(fs.readFileSync(path.join(home, "models_cache.json"), "utf8")) as { models?: unknown };
 		return asEntries(cache.models)
@@ -90,26 +89,32 @@ function saveListing(models: CliModelEntry[]): void {
 let agyModels: CliModelEntry[] | undefined;
 let agyRefresh: Promise<void> | undefined;
 
-/** One listing at a time; a failure keeps the last known list. */
-export function refreshAgyModels(binary: string): Promise<void> {
-	agyRefresh ??= new Promise<void>((resolve) => {
-		execFile(binary, ["models"], { cwd: os.tmpdir(), env: externalCliEnv(), timeout: DISCOVERY_TIMEOUT_MS, maxBuffer: 262_144 }, (error, stdout) => {
-			const found = error ? [] : parseAgyModels(stdout);
-			if (found.length > 0) {
-				agyModels = found;
-				saveListing(found);
-			}
-			agyRefresh = undefined;
-			resolve();
+/** `home` is the configured home whose `.gemini` holds the sign-in, as for turns. */
+function listAgyModels(binary: string, home: string | undefined): Promise<CliModelEntry[]> {
+	const env = home ? { ...externalCliEnv(), HOME: home } : externalCliEnv();
+	return new Promise((resolve) => {
+		execFile(binary, ["models"], { cwd: os.tmpdir(), env, timeout: DISCOVERY_TIMEOUT_MS, killSignal: "SIGKILL", maxBuffer: 262_144 }, (error, stdout) => {
+			resolve(error ? [] : parseAgyModels(stdout));
 		});
 	});
+}
+
+function keepAgyModels(found: CliModelEntry[]): void {
+	if (found.length === 0) return;
+	agyModels = found;
+	saveListing(found);
+}
+
+/** One listing at a time; a failure keeps the last known list. */
+export function refreshAgyModels(binary: string, home: string | undefined): Promise<void> {
+	agyRefresh ??= listAgyModels(binary, home).then(keepAgyModels).finally(() => { agyRefresh = undefined; });
 	return agyRefresh;
 }
 
 /** What the CLI itself offers, without the user's extra IDs. */
 export function discoveredCliModels(id: ExternalCliId, home: string | undefined): CliModelEntry[] {
 	switch (externalCli(id)?.family) {
-		case "claude": return CLAUDE_ALIASES;
+		case "claude": return [...CLAUDE_ALIASES];
 		case "codex": return readCodexModels(home);
 		case "agy": return agyModels ??= readListing();
 		default: return [];

@@ -79,6 +79,7 @@ test("reading aloud sends the chosen voice and streams the endpoint's audio back
 	const request = new Request("http://localhost/api/tts/speak", { method: "POST", body: JSON.stringify({ text: " Hello. " }) });
 	const response = await speakResponse(request, () => LOCAL, send);
 	assert.equal(response.headers.get("content-type"), "audio/wav");
+	assert.equal(response.headers.get("x-content-type-options"), "nosniff");
 	assert.equal((await response.arrayBuffer()).byteLength, 3);
 	assert.deepEqual(JSON.parse(calls[0]!.init.body as string), { model: "tts-1", input: "Hello.", response_format: "wav", voice: "piper/lessac-medium" });
 });
@@ -87,7 +88,8 @@ test("voices: the three list shapes servers use all become id/name pairs", async
 	const shapes = [{ voices: [{ voice_id: "alloy", name: "Alloy" }] }, { data: [{ id: "alloy", name: "Alloy" }] }, [{ id: "alloy", name: "Alloy" }]];
 	for (const shape of shapes) {
 		const { send } = recordingFetch(() => Response.json(shape));
-		assert.deepEqual(await (await voicesResponse(() => LOCAL, send)).json(), { voices: [{ id: "alloy", name: "Alloy" }] });
+		const request = new Request("http://localhost/api/tts/voices");
+		assert.deepEqual(await (await voicesResponse(request, () => LOCAL, send)).json(), { voices: [{ id: "alloy", name: "Alloy" }] });
 	}
 });
 

@@ -1,4 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
 /**
  * The shared settings-PUT body parsers — one seam per settings surface.
  * Extracted verbatim from the per-chat route (default-settings wave,
@@ -13,8 +12,9 @@ import { isDeepStrictEqual } from "node:util";
  */
 
 import path from "node:path";
-import { sanitizeExternalCliSettings, type ExternalCliSettingsMap } from "../core/contracts/external-cli.ts";
-import { sanitizeSpeechSettings, type SpeechSettings } from "../core/contracts/speech.ts";
+import { asRecord, type SettingsBodyResult } from "./settings-body-result.ts";
+import { parseExternalCliSettingsBody } from "./settings-body-external-cli.ts";
+import { parseSpeechSettingsBody } from "./settings-body-speech.ts";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { isHexColor, type ChatSettings } from "../core";
 import { COLOR_OVERRIDE_KEYS, isThemeId, type AppearanceColorOverrides, type ColorOverrideKey } from "../core/themes.ts";
@@ -37,10 +37,8 @@ import { isSearchEngineId, SEARCH_ENGINES } from "../core/search.ts";
 import { isDictationLanguage } from "../core/dictation.ts";
 import { parseFileAccessSettings } from "../core/file-access.ts";
 
-/** Parsed-or-rejected — `ok: false` carries the 400's error message. */
-export type SettingsBodyResult<T> =
-	| { ok: true; settings: T }
-	| { ok: false; error: string };
+export type { SettingsBodyResult };
+export { parseExternalCliSettingsBody, parseSpeechSettingsBody };
 
 export function parseSettingsBody(body: unknown): SettingsBodyResult<ChatSettings> {
 	if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -81,11 +79,6 @@ export function parseSettingsBody(body: unknown): SettingsBodyResult<ChatSetting
 // parseSettingsBody: strict on every known field (a bad type/shape is a
 // 400, never a silent clamp/drop), unknown keys dropped.
 
-function asRecord(body: unknown): Record<string, unknown> | null {
-	if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-	return body as Record<string, unknown>;
-}
-
 /** general: { autoUpdate?: boolean } */
 export function parseGeneralSettingsBody(body: unknown): SettingsBodyResult<GeneralSettings> {
 	const raw = asRecord(body);
@@ -107,31 +100,6 @@ export function parseClaudeCodeSettingsBody(body: unknown): SettingsBodyResult<{
 	if (raw.enabled === undefined) return { ok: true, settings: {} };
 	if (typeof raw.enabled !== "boolean") return { ok: false, error: "enabled must be a boolean" };
 	return { ok: true, settings: { enabled: raw.enabled } };
-}
-
-/** speech: the whole section is replaced. A field that would not survive
- *  sanitizing is refused, so an unusable endpoint cannot read as "saved". */
-export function parseSpeechSettingsBody(body: unknown): SettingsBodyResult<SpeechSettings> {
-	const raw = asRecord(body);
-	if (!raw) return { ok: false, error: "Invalid JSON body" };
-	const settings = sanitizeSpeechSettings(raw);
-	const provided = Object.entries(raw).filter(([, value]) => value !== undefined && value !== "");
-	const kept = settings as Record<string, unknown>;
-	if (provided.some(([key, value]) => key === "endpoint" ? kept.endpoint === undefined : kept[key] !== value)) {
-		return { ok: false, error: "speech has an unknown field, an unusable endpoint URL or an invalid name" };
-	}
-	return { ok: true, settings };
-}
-
-/** externalCli: the whole map is replaced; unknown CLIs and malformed fields
- *  are refused, not silently dropped, so a typo cannot read as "saved". */
-export function parseExternalCliSettingsBody(body: unknown): SettingsBodyResult<ExternalCliSettingsMap> {
-	const raw = asRecord(body);
-	if (!raw) return { ok: false, error: "Invalid JSON body" };
-	const settings = sanitizeExternalCliSettings(raw);
-	const intact = Object.entries(raw).every(([id, entry]) => isDeepStrictEqual(entry, (settings as Record<string, unknown>)[id]));
-	if (!intact) return { ok: false, error: "externalCli has an unknown CLI or an invalid enabled, home or models value" };
-	return { ok: true, settings };
 }
 
 /** agent.models: only the six known background roles; each override's

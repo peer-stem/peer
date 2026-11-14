@@ -16,7 +16,8 @@ import { toPromptText } from "../src/agent/external-cli/dialect.ts";
 import {
 	isClaudeCliModel, isClaudeCliProvider, isExternalCliModel, isExternalCliProvider, sanitizeExternalCliSettings,
 } from "../src/core/contracts/external-cli.ts";
-import { mergeCliModels, parseAgyModels, readCodexModels, toCliModels } from "../src/server/external-cli-models.ts";
+import { CLAUDE_CODE_MODELS } from "../src/agent/claude-code/provider.ts";
+import { discoveredCliModels, mergeCliModels, parseAgyModels, readCodexModels, toCliModels } from "../src/server/external-cli-models.ts";
 
 const CODEX_INPUT = { model: "gpt-6-luna", effort: "high" as const, cwd: "/tmp/work", instructionsFile: "/tmp/private/instructions.md", bridgeUrl: "http://127.0.0.1:4000/mcp" };
 const TOOLS = [{ name: "ask_question" }, { name: "plan" }] as Tool[];
@@ -148,4 +149,12 @@ test("provider checks: every binding is CLI-billed; only Claude bindings report 
 	assert.ok(!isClaudeCliProvider("codex-cli") && !isClaudeCliProvider("agy-cli"));
 	assert.ok(isExternalCliModel("agy-cli:gemini-4-carbon-high") && !isExternalCliModel("gemini-4-carbon-high"));
 	assert.ok(isClaudeCliModel("claudex:fable") && !isClaudeCliModel("codex-cli:gpt-6-luna"));
+});
+
+test("every Claude binding offers the one alias list, and an ID is never looked up on Object's prototype", () => {
+	const ids = CLAUDE_CODE_MODELS.map((model) => model.id);
+	assert.deepEqual(discoveredCliModels("claudex", undefined).map((model) => model.id), ids);
+	assert.deepEqual(discoveredCliModels("claude-code", undefined).map((model) => model.id), ids);
+	const names = toCliModels("claudex", [{ id: "constructor" }, { id: "toString" }, { id: "__proto__" }, { id: "fable" }]).map((model) => model.name);
+	assert.deepEqual(names, ["constructor", "toString", "__proto__", "Claude Fable"]);
 });

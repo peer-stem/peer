@@ -6,12 +6,12 @@ import { useSyncExternalStore } from "react";
  * few seconds, so the first words start early and the rest is fetched ahead. */
 const PIECE_CHARS = 280;
 
-export type PlaybackState = { speakingId: string | null; loading: boolean; error: string | null };
+/** `errorId` names the item whose playback failed; only it shows the error. */
+export type PlaybackState = { speakingId: string | null; loading: boolean; error: string | null; errorId: string | null };
 
-let state: PlaybackState = { speakingId: null, loading: false, error: null };
+let state: PlaybackState = { speakingId: null, loading: false, error: null, errorId: null };
 let generation = 0;
 let abort: AbortController | null = null;
-let audio: HTMLAudioElement | null = null;
 const listeners = new Set<() => void>();
 
 function publish(patch: Partial<PlaybackState>): void {
@@ -24,6 +24,8 @@ export function toSpeakable(markdown: string): string {
 	return markdown
 		.replace(/```[\s\S]*?(```|$)/g, " ")
 		.replace(/\$\$[\s\S]*?\$\$/g, " formula ")
+		// Inline math: `$` hugs its content on both sides, so "$5 and $10" stays prose.
+		.replace(/\$(?=\S)[^$\n]*?\S\$(?!\d)/g, " formula ")
 		.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
 		.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
 		.replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+\.)\s+/gm, "")
@@ -62,28 +64,41 @@ async function fetchAudio(text: string, signal: AbortSignal): Promise<string> {
 	return URL.createObjectURL(await response.blob());
 }
 
+/** Settles when the piece ends or is stopped; the element and its URL are
+ * released either way, so a stopped or failed piece holds no audio. */
 function playUrl(url: string, signal: AbortSignal): Promise<void> {
-	return new Promise((resolve, reject) => {
-		const element = new Audio(url);
-		audio = element;
-		const done = () => { URL.revokeObjectURL(url); resolve(); };
-		element.addEventListener("ended", done, { once: true });
-		element.addEventListener("error", () => { URL.revokeObjectURL(url); reject(new Error("The audio could not be played")); }, { once: true });
-		signal.addEventListener("abort", () => { element.pause(); done(); }, { once: true });
+	const element = new Audio(url);
+	let onAbort = () => {};
+	const playing = new Promise<void>((resolve, reject) => {
+		onAbort = () => { element.pause(); resolve(); };
+		element.addEventListener("ended", () => resolve(), { once: true });
+		element.addEventListener("error", () => reject(new Error("The audio could not be played")), { once: true });
+		signal.addEventListener("abort", onAbort, { once: true });
 		element.play().catch(reject);
+	});
+	return playing.finally(() => {
+		signal.removeEventListener("abort", onAbort);
+		element.removeAttribute("src");
+		element.load();
+		URL.revokeObjectURL(url);
 	});
 }
 
 async function playPieces(pieces: string[], current: number, signal: AbortSignal): Promise<void> {
 	let next: Promise<string> | undefined = fetchAudio(pieces[0]!, signal);
-	for (let index = 0; index < pieces.length && current === generation; index++) {
-		const url = await next!;
-		// Fetch the following piece while this one plays.
-		next = index + 1 < pieces.length ? fetchAudio(pieces[index + 1]!, signal) : undefined;
-		next?.catch(() => {});
-		if (current !== generation) { URL.revokeObjectURL(url); return; }
-		publish({ loading: false });
-		await playUrl(url, signal);
+	try {
+		for (let index = 0; index < pieces.length && current === generation; index++) {
+			const url = await next!;
+			// Fetch the following piece while this one plays.
+			next = index + 1 < pieces.length ? fetchAudio(pieces[index + 1]!, signal) : undefined;
+			next?.catch(() => {});
+			if (current !== generation) return URL.revokeObjectURL(url);
+			publish({ loading: false });
+			await playUrl(url, signal);
+		}
+	} finally {
+		// A piece fetched ahead but never played is released too.
+		next?.then(URL.revokeObjectURL, () => {});
 	}
 }
 
@@ -91,7 +106,6 @@ export function stopSpeaking(): void {
 	generation++;
 	abort?.abort();
 	abort = null;
-	audio = null;
 	if (state.speakingId !== null || state.loading) publish({ speakingId: null, loading: false });
 }
 
@@ -101,13 +115,17 @@ export function speak(id: string, markdown: string): void {
 	const pieces = splitForSpeech(toSpeakable(markdown));
 	if (pieces.length === 0) return;
 	const current = ++generation;
-	abort = new AbortController();
-	publish({ speakingId: id, loading: true, error: null });
-	playPieces(pieces, current, abort.signal)
+	const controller = new AbortController();
+	abort = controller;
+	publish({ speakingId: id, loading: true, error: null, errorId: null });
+	playPieces(pieces, current, controller.signal)
 		.catch((error: unknown) => {
-			if (current === generation) publish({ error: error instanceof Error ? error.message : "Reading aloud failed" });
+			if (current === generation) publish({ error: error instanceof Error ? error.message : "Reading aloud failed", errorId: id });
 		})
 		.finally(() => {
+			// A failed piece may leave the next one still being fetched.
+			controller.abort();
+			if (abort === controller) abort = null;
 			if (current === generation) publish({ speakingId: null, loading: false });
 		});
 }
@@ -117,7 +135,7 @@ function subscribe(listener: () => void): () => void {
 	return () => { listeners.delete(listener); };
 }
 
-const SERVER_STATE: PlaybackState = { speakingId: null, loading: false, error: null };
+const SERVER_STATE: PlaybackState = { speakingId: null, loading: false, error: null, errorId: null };
 
 export function useSpeechPlayback(): PlaybackState {
 	return useSyncExternalStore(subscribe, () => state, () => SERVER_STATE);

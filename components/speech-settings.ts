@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useSyncExternalStore } from "react";
-import { resolveSpeech, type SpeechSettings, type UserSettings } from "@/src/core";
+import { resolveSpeech, speechEndpointReady, type SpeechSettings, type UserSettings } from "@/src/core";
 import { notifySettingsSaved, onSettingsSaved } from "@/components/settings-signal";
 
 export type ResolvedSpeech = Required<SpeechSettings>;
@@ -11,6 +11,8 @@ export type ResolvedSpeech = Required<SpeechSettings>;
 let cache: ResolvedSpeech | undefined;
 let reading: Promise<ResolvedSpeech> | undefined;
 let stopSignals: (() => void) | undefined;
+/** True while this module announces its own save: its readers already hold the PUT response. */
+let announcingSave = false;
 const listeners = new Set<() => void>();
 
 function publish(next: ResolvedSpeech): ResolvedSpeech {
@@ -38,13 +40,29 @@ export async function saveSpeech(next: SpeechSettings): Promise<boolean> {
 	if (!response.ok) return false;
 	const body = await response.json() as { settings: UserSettings };
 	publish(resolveSpeech(body.settings.speech));
-	notifySettingsSaved("speech");
+	announcingSave = true;
+	try { notifySettingsSaved("speech"); } finally { announcingSave = false; }
 	return true;
+}
+
+/** Fails closed: true only for a usable local endpoint, false only when the
+ * hosted engine is the one selected. An unreadable setting, or local with no
+ * endpoint, throws, so microphone audio never reaches an engine not chosen. */
+export async function usesLocalDictation(): Promise<boolean> {
+	const speech = await loadSpeech();
+	if (speech.dictation === "deepgram") return false;
+	if (!speechEndpointReady(speech)) throw new Error("Local dictation needs a speech endpoint URL.");
+	return true;
+}
+
+/** Runs `warm` only when the hosted engine is selected; never on doubt. */
+export function whenHostedDictation(warm: () => void): void {
+	usesLocalDictation().then((local) => { if (!local) warm(); }, () => {});
 }
 
 function subscribe(listener: () => void): () => void {
 	listeners.add(listener);
-	stopSignals ??= onSettingsSaved((section) => { if (section === "speech") void loadSpeech(true).catch(() => {}); });
+	stopSignals ??= onSettingsSaved((section) => { if (section === "speech" && !announcingSave) void loadSpeech(true).catch(() => {}); });
 	return () => {
 		listeners.delete(listener);
 		if (listeners.size === 0) { stopSignals?.(); stopSignals = undefined; }

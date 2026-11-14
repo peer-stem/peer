@@ -17,6 +17,9 @@ export type ExternalCliFamily = (typeof EXTERNAL_CLIS)[number]["family"];
 export type AddedCliId = Exclude<ExternalCliId, typeof CLAUDE_CODE_PROVIDER>;
 export const ADDED_CLI_IDS: readonly AddedCliId[] = ["claudex", "codex-cli", "agy-cli"];
 
+/** Where each added CLI keeps its own login when no directory is named. */
+export const EXTERNAL_CLI_DEFAULT_HOMES: Record<AddedCliId, string> = { claudex: "~/.claudeex", "codex-cli": "~/.codex", "agy-cli": "~" };
+
 /** `home` is the CLI's own configuration directory (CLAUDE_CONFIG_DIR,
  * CODEX_HOME, or the home whose `.gemini` holds the Antigravity login). */
 export interface ExternalCliSettings {
@@ -57,6 +60,12 @@ export function isClaudeCliProvider(provider: string): boolean {
 export function isExternalCliModel(model: string): boolean {
 	const colon = model.indexOf(":");
 	return colon > 0 && isExternalCliProvider(model.slice(0, colon));
+}
+
+/** The refusal for a selected CLI that is switched off or not installed. */
+export function externalCliUnavailable(provider: string): string | undefined {
+	const cli = externalCli(provider);
+	return cli ? `${cli.label} is unavailable. Enable and set it up in Settings → Providers.` : undefined;
 }
 
 export function isClaudeCliModel(model: string): boolean {

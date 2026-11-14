@@ -41,6 +41,7 @@ import {
 	promptOverrides,
 	readSettingsRecord,
 	refreshWorkerRequestAdmission,
+	sameOriginWriteAllowed,
 	themeStore,
 	validateChatSettings,
 	validateModelsSettings,
@@ -61,6 +62,10 @@ export async function PUT(request: Request, ctx: { params: Promise<{ section: st
 			{ error: `unknown settings section "${section}"`, supported: Object.keys(SETTINGS_SECTIONS) },
 			{ status: 404 },
 		);
+	}
+	// The speech section names a URL the server will call: same-origin proof, as for the custom endpoint.
+	if (section === "speech" && !sameOriginWriteAllowed(request)) {
+		return Response.json({ error: "Speech settings require a same-origin LearnHarness request." }, { status: 403 });
 	}
 	const body = await request.json().catch(() => null);
 	const parsed = parser(body);

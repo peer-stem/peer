@@ -17,19 +17,24 @@ const SHARED_MODEL_FIELDS = {
 	maxTokens: 128_000,
 } satisfies Omit<Model<Api>, "id" | "name">;
 
-export const CLAUDE_CODE_MODELS: readonly Model<Api>[] = [
-	{ ...SHARED_MODEL_FIELDS, id: "opus", name: "Claude Opus" },
-	{ ...SHARED_MODEL_FIELDS, id: "sonnet", name: "Claude Sonnet" },
-	{ ...SHARED_MODEL_FIELDS, id: "haiku", name: "Claude Haiku" },
+/** The one list of aliases the installed CLI resolves itself; full model
+ * names can be added in settings. */
+export const CLAUDE_ALIASES: readonly { id: string; name: string }[] = [
+	{ id: "opus", name: "Claude Opus" },
+	{ id: "sonnet", name: "Claude Sonnet" },
+	{ id: "haiku", name: "Claude Haiku" },
+	{ id: "fable", name: "Claude Fable" },
 ];
 
-const ALIAS_NAMES: Record<string, string> = { fable: "Claude Fable", opus: "Claude Opus", sonnet: "Claude Sonnet", haiku: "Claude Haiku" };
+const ALIAS_NAMES = new Map(CLAUDE_ALIASES.map(({ id, name }) => [id, name]));
 
 /** The CLI accepts aliases and full model names alike; an ID it does not
  * know fails in the CLI, not here. */
 export function claudeCodeModels(ids: readonly string[], provider: string = CLAUDE_CODE_PROVIDER): Model<Api>[] {
-	return ids.map((id) => ({ ...SHARED_MODEL_FIELDS, provider, id, name: ALIAS_NAMES[id] ?? id }));
+	return ids.map((id) => ({ ...SHARED_MODEL_FIELDS, provider, id, name: ALIAS_NAMES.get(id) ?? id }));
 }
+
+export const CLAUDE_CODE_MODELS: readonly Model<Api>[] = claudeCodeModels(CLAUDE_ALIASES.map(({ id }) => id));
 
 export type ClaudeCodeProfile = { id: string; name: string; models: readonly Model<Api>[] };
 

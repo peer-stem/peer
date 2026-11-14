@@ -33,8 +33,9 @@ function fakeChild(): FakeChild {
 	return child;
 }
 
-/** One JSON object per stdout line, already in the engine's event form. */
-function harness(prepareError?: Error) {
+/** One JSON object per stdout line, already in the engine's event form.
+ * `launchChild` replaces the scripted child, e.g. to fail the spawn. */
+function harness(prepareError?: Error, launchChild: () => FakeChild = fakeChild) {
 	const children: FakeChild[] = [];
 	const prepared: CliPrepareInput[] = [];
 	let cleaned = 0;
@@ -49,7 +50,7 @@ function harness(prepareError?: Error) {
 		parse: (line) => JSON.parse(line) as CliLineEvent[],
 	};
 	const spawnProcess = (() => {
-		const child = fakeChild();
+		const child = launchChild();
 		children.push(child);
 		return child;
 	}) as unknown as typeof spawn;
@@ -163,4 +164,107 @@ test("abort kills the child; a launch refusal reaches the learner as written", a
 	const message = await collect(refused.stream(MODEL, normalizeContext({ messages: [HI] }), { sessionId: "s" }));
 	assert.deepEqual([message.stopReason, message.errorMessage], ["error", "Antigravity is not signed in."]);
 	assert.equal(refused.children.length, 0);
+});
+
+const CONTEXT = { systemPrompt: "p", tools: [READ_TOOL] };
+
+/** Runs a turn until its one read call has been handed to Pi. */
+async function handOver(run: ReturnType<typeof harness>, t: { after(fn: () => unknown): void }, sessionId: string | undefined) {
+	const asked = collect(run.stream(MODEL, normalizeContext({ ...CONTEXT, messages: [HI] }), { sessionId }));
+	const child = await waitFor(() => run.children[0]);
+	const client = await bridgeClient(run.prepared[0]!);
+	t.after(() => client.close());
+	const call = client.callTool({ name: "read", arguments: { path: "notes.md" } }).catch((error: unknown) => error);
+	const message = await asked;
+	const toolCall = message.content.find((block) => block.type === "toolCall");
+	assert.ok(toolCall && toolCall.type === "toolCall");
+	const result: Message = { role: "toolResult", toolCallId: toolCall.id, toolName: "read", content: [{ type: "text", text: "the notes" }], isError: false, timestamp: 0 };
+	return { child, client, call, message, result };
+}
+
+test("a line the engine cannot read fails the turn instead of escaping the reader", async () => {
+	const { stream, children } = harness();
+	const pending = collect(stream(MODEL, normalizeContext({ messages: [HI] }), { sessionId: "s" }));
+	const child = await waitFor(() => children[0]);
+	child.stdout.write("not json\n");
+	const message = await pending;
+	assert.deepEqual([message.stopReason, message.errorMessage], ["error", "Fake CLI emitted malformed output"]);
+	assert.equal(child.killed, true);
+});
+
+test("a failure after the hand-over reaches the learner on the continuation, naming the CLI", async (t) => {
+	const run = harness();
+	const { child, client, message, result } = await handOver(run, t, "s");
+	await assert.rejects(client.callTool({ name: "write", arguments: {} }), /Fake CLI requested an undeclared harness tool/);
+	await waitFor(() => child.killed || undefined);
+	const next = await collect(run.stream(MODEL, normalizeContext({ ...CONTEXT, messages: [HI, message, result] }), { sessionId: "s" }));
+	assert.equal(next.stopReason, "error");
+	assert.match(next.errorMessage ?? "", /Fake CLI requested an undeclared harness tool/);
+	assert.equal(run.children.length, 1, "the failure was reported, not replayed in a new child");
+});
+
+test("a request the CLI cancels before admission never reaches Pi", async (t) => {
+	const { stream, children, prepared, say } = harness();
+	const pending = collect(stream(MODEL, normalizeContext({ ...CONTEXT, messages: [HI] }), { sessionId: "s" }));
+	const child = await waitFor(() => children[0]);
+	const client = await bridgeClient(prepared[0]!);
+	t.after(() => client.close());
+	const controller = new AbortController();
+	const call = client.callTool({ name: "read", arguments: { path: "notes.md" } }, undefined, { signal: controller.signal }).catch((error: unknown) => error);
+	controller.abort();
+	await call;
+	await new Promise((resolve) => setTimeout(resolve, 150));
+	say(child, [{ type: "text", delta: "No tool after all." }, { type: "done" }]);
+	const message = await pending;
+	assert.equal(message.stopReason, "stop");
+	assert.equal(message.content.some((block) => block.type === "toolCall"), false);
+});
+
+test("a synchronous spawn failure closes the bridge and removes the prepared launch", async () => {
+	const run = harness(undefined, () => { throw new Error("spawn E2BIG"); });
+	const message = await collect(run.stream(MODEL, normalizeContext({ ...CONTEXT, messages: [HI] }), { sessionId: "s" }));
+	assert.deepEqual([message.stopReason, message.errorMessage], ["error", "Fake CLI failed to start"]);
+	assert.equal(run.cleaned(), 1);
+	await assert.rejects(bridgeClient(run.prepared[0]!), "the turn's bridge no longer answers");
+});
+
+test("a spawn error event fails the turn and releases the launch", async () => {
+	const run = harness(undefined, () => {
+		const child = fakeChild();
+		setImmediate(() => child.emit("error", Object.assign(new Error("spawn fake ENOENT"), { code: "ENOENT" })));
+		return child;
+	});
+	const message = await collect(run.stream(MODEL, normalizeContext({ messages: [HI] }), { sessionId: "s" }));
+	assert.deepEqual([message.stopReason, message.errorMessage], ["error", "Fake CLI failed to start"]);
+	await waitFor(() => run.cleaned() === 1 || undefined);
+});
+
+test("aborting a continuation kills the child that was waiting for its results", async (t) => {
+	const run = harness();
+	const { child, message, result } = await handOver(run, t, "s");
+	const controller = new AbortController();
+	const next = collect(run.stream(MODEL, normalizeContext({ ...CONTEXT, messages: [HI, message, result] }), { sessionId: "s", signal: controller.signal }));
+	controller.abort();
+	assert.equal((await next).stopReason, "aborted");
+	assert.equal(child.killed, true);
+	await waitFor(() => run.cleaned() === 1 || undefined);
+});
+
+test("results that do not answer the batch end the waiting child and replay in a new one", async (t) => {
+	const run = harness();
+	const { child, message, result } = await handOver(run, t, "s");
+	const wrong = { ...result, toolCallId: "another-call" } as Message;
+	const next = collect(run.stream(MODEL, normalizeContext({ ...CONTEXT, messages: [HI, message, wrong] }), { sessionId: "s" }));
+	assert.equal(child.killed, true);
+	const replay = await waitFor(() => run.children[1]);
+	run.say(replay, [{ type: "text", delta: "Fresh." }, { type: "done" }]);
+	assert.equal((await next).stopReason, "stop");
+	assert.equal(run.prepared.length, 2);
+});
+
+test("without a session the child ends once its batch is handed over", async (t) => {
+	const run = harness();
+	const { child, message } = await handOver(run, t, undefined);
+	assert.equal(message.stopReason, "toolUse");
+	assert.equal(child.killed, true);
 });

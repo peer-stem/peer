@@ -6,7 +6,7 @@ import { useSettingsDialog } from "@/components/settings/settings-dialog";
 import { Hint } from "@/components/ui/hint";
 import { deepgramListenUrl, type DictationLanguage } from "@/src/core";
 import { LocalTranscriber } from "@/components/dictation-local";
-import { loadSpeech } from "@/components/speech-settings";
+import { usesLocalDictation, whenHostedDictation } from "@/components/speech-settings";
 import { stopSpeaking } from "@/components/speech-playback";
 import { useDictationLanguage } from "@/components/dictation-preference";
 import { setDictationActive } from "@/components/dictation-state";
@@ -462,7 +462,7 @@ export function useDictation({ append, destination = "primary", disabled = false
 				if (failed) waiter.reject(failed.error);
 				else waiter.resolve();
 			}
-			if (warmNext) warmTokens.refresh();
+			if (warmNext) whenHostedDictation(warmTokens.refresh);
 		};
 		if (appended && typeof (appended as PromiseLike<unknown>).then === "function") {
 			appendPendingRef.current = true;
@@ -559,18 +559,18 @@ export function useDictation({ append, destination = "primary", disabled = false
 		pendingRef.current = []; // fresh run, fresh queue (mitigation A)
 		const gen = ++genRef.current;
 		let language: DictationLanguage;
+		let local: boolean;
 		try {
 			language = await getLanguage();
+			// The local engine needs no token and no socket. An unreadable speech
+			// setting stops the run: audio goes only to the engine chosen.
+			local = await usesLocalDictation();
 		} catch (e) {
 			if (gen !== genRef.current) return;
 			setError(e instanceof Error ? e.message : "Dictation language unavailable");
 			cleanup();
 			return;
 		}
-		if (gen !== genRef.current) return;
-		// The local engine needs no token and no socket; an unreadable setting
-		// falls back to the hosted engine, which reports its own state.
-		const local = (await loadSpeech().catch(() => undefined))?.dictation === "local";
 		if (gen !== genRef.current) return;
 		localRef.current = local ? new LocalTranscriber(language) : null;
 
@@ -679,7 +679,7 @@ export function useDictation({ append, destination = "primary", disabled = false
 		const localRun = localRef.current;
 		if (localRun) {
 			// The last piece is still being transcribed: the run ends when it lands.
-			localRef.current = null;
+			// The run stays in localRef until then, so Esc can cancel its requests.
 			void localRun.finish().then(({ texts, error: failed }) => {
 				if (gen !== genRef.current) return;
 				bufferRef.current.push(...texts);
@@ -754,7 +754,7 @@ export function useDictation({ append, destination = "primary", disabled = false
 	// focused plugin control first, otherwise core fallback; Esc always
 	// cancels the actual recording owner rather than the focused widget.
 	useEffect(() => {
-		warmTokens.refresh(); // pre-mint at mount (mitigation D) — silent if keyless
+		whenHostedDictation(warmTokens.refresh); // pre-mint at mount (mitigation D) — silent if keyless
 		return () => {
 			// Navigation cancels capture: invalidate every pending await before
 			// releasing resources, and never append into a different page's input.

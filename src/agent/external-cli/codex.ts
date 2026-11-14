@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 
 import { externalCliEnv } from "../../core/auth-env.ts";
+import { toEffort } from "../claude-code/stream.ts";
 import { findCliBinary } from "./binary.ts";
 import {
 	BRIDGE_SERVER_NAME, CliLaunchError, PRIVATE_FILE_MODE, TOOL_TIMEOUT_SECONDS, asRecord, countOf, parseJsonLine,
@@ -14,9 +15,6 @@ import {
 const TOKEN_ENV = "LH_CODEX_BRIDGE_TOKEN";
 /** A tutor turn's only tools are the bridge's: no shell, apps, hooks, sub-agents or plugins. */
 const DISABLED_FEATURES = ["shell_tool", "apps", "hooks", "multi_agent", "plugins"];
-const EFFORTS: Partial<Record<ThinkingLevel, string>> = {
-	minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max",
-};
 
 type CodexArgsInput = { model: string; effort: ThinkingLevel | undefined; cwd: string; instructionsFile: string; bridgeUrl: string };
 
@@ -27,7 +25,8 @@ function configArgs(pairs: Record<string, string | number>): string[] {
 
 export function toCodexArgs(input: CodexArgsInput): string[] {
 	const server = `mcp_servers.${BRIDGE_SERVER_NAME}`;
-	const effort = input.effort ? EFFORTS[input.effort] : undefined;
+	// Codex takes the same effort names as Claude Code.
+	const effort = input.effort ? toEffort(input.effort) : undefined;
 	return [
 		"exec", "--json", "--ephemeral", "--skip-git-repo-check",
 		// The user's config.toml names their own instructions file and MCP servers.
@@ -77,29 +76,32 @@ export function parseCodexLine(line: string): CliLineEvent[] {
 	}
 }
 
+async function tempDir(made: string[], prefix: string): Promise<string> {
+	const dir = await mkdtemp(join(tmpdir(), prefix));
+	made.push(dir);
+	return dir;
+}
+
+/** The bridge token travels only in the environment, never in an argument. */
+function codexEnv(input: CliPrepareInput): NodeJS.ProcessEnv {
+	return {
+		...externalCliEnv(),
+		[TOKEN_ENV]: input.bridge.authorization.replace(/^Bearer /, ""),
+		...(input.home ? { CODEX_HOME: input.home } : {}),
+	};
+}
+
 async function prepareCodex(input: CliPrepareInput): Promise<CliLaunch> {
 	const binary = findCliBinary("codex");
 	if (!binary) throw new CliLaunchError("Codex CLI not found");
-	const cwd = await mkdtemp(join(tmpdir(), "lh-codex-cwd-"));
-	const privateDir = await mkdtemp(join(tmpdir(), "lh-codex-private-"));
-	const cleanup = async () => {
-		await Promise.all([rm(cwd, { recursive: true, force: true }), rm(privateDir, { recursive: true, force: true })]);
-	};
+	const made: string[] = [];
+	const cleanup = async () => { await Promise.all(made.map((dir) => rm(dir, { recursive: true, force: true }))); };
 	try {
-		const instructionsFile = join(privateDir, "instructions.md");
+		const cwd = await tempDir(made, "lh-codex-cwd-");
+		const instructionsFile = join(await tempDir(made, "lh-codex-private-"), "instructions.md");
 		await writeFile(instructionsFile, input.systemPrompt, { mode: PRIVATE_FILE_MODE });
-		return {
-			binary,
-			args: toCodexArgs({ model: input.model, effort: input.effort, cwd, instructionsFile, bridgeUrl: input.bridge.url }),
-			env: {
-				...externalCliEnv(),
-				[TOKEN_ENV]: input.bridge.authorization.replace(/^Bearer /, ""),
-				...(input.home ? { CODEX_HOME: input.home } : {}),
-			},
-			cwd,
-			stdin: input.prompt,
-			cleanup,
-		};
+		const args = toCodexArgs({ model: input.model, effort: input.effort, cwd, instructionsFile, bridgeUrl: input.bridge.url });
+		return { binary, args, env: codexEnv(input), cwd, stdin: input.prompt, cleanup };
 	} catch (error) {
 		await cleanup();
 		throw error;
