@@ -158,7 +158,7 @@ Delete `app/`, the React components, Next, Tailwind and the React render tests. 
 
 ## E Later features (Phases 6 and 7)
 
-Model-built canvases, then the design points in DESIGN §6 (seventeen so far). Each opens with its own Discovery; none
+Model-built canvases, then the design points in DESIGN §6 (eighteen so far). Each opens with its own Discovery; none
 is designed here.
 
 ### Phase 6: Canvases
@@ -190,6 +190,7 @@ Discovery sprint that states what exists, what it changes in the engine, and wha
 | Skill tree: successes and failures mapped visually to what is known and what is being learned | yes |
 | Definitions and levels: a built-in place for definitions, and the lesson, topic, unit, subject and discipline tracked as metadata while lessons are worked through | open |
 | Notes and a notebook: notes after each teaching, a collection per set of teachings, and a notebook across all teachings by metadata filtering and tags | open |
+| Key Points: sections of a response marked inline and linked into the notebook as a personal study guide; marked as things to work on, with navigation back to the section and practice on one key point, on all of them, or mixed into other practice sessions | open |
 
 Items that touch `src/{agent,core,store}` change upstream's engine, so each is designed to stay separable from
 it (SPEC §5.5).
