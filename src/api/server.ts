@@ -1,10 +1,16 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
+import { bodyLimit } from "./router.ts";
 import type { Dispatch, ServeHttp } from "./types.ts";
 
 export interface ServeHttpOptions {
 	getBodyLimit?: (pathname: string) => number | null;
 	onWarn?: (message: string) => void;
+	onError?: (error: unknown) => void;
 	shutdownSignal?: AbortSignal;
+}
+
+export interface CreateApiHttpServerOptions extends ServeHttpOptions {
+	shutdownTimeoutMs?: number;
 }
 
 export interface ApiHttpServer {
@@ -12,24 +18,9 @@ export interface ApiHttpServer {
 	close(): Promise<void>;
 }
 
-type BodyLimitFn = (pathname: string) => number | null;
 type StreamingRequestInit = RequestInit & { duplex?: "half" };
 
-const FALLBACK_BODY_LIMIT = 27_262_976;
-let cachedBodyLimit: BodyLimitFn | null = null;
-
-async function getDefaultBodyLimit(): Promise<BodyLimitFn> {
-	if (cachedBodyLimit) return cachedBodyLimit;
-	try {
-		const { bodyLimit } = (await import("./router.ts")) as { bodyLimit: BodyLimitFn };
-		cachedBodyLimit = bodyLimit;
-		return bodyLimit;
-	} catch (error) {
-		const code = (error as NodeJS.ErrnoException | null)?.code;
-		if (code === "ERR_MODULE_NOT_FOUND") return () => FALLBACK_BODY_LIMIT;
-		throw error;
-	}
-}
+const DEFAULT_SHUTDOWN_DEADLINE_MS = 1500;
 
 function firstHostHeader(message: IncomingMessage): string | undefined {
 	const host = message.headers.host;
@@ -117,6 +108,11 @@ function failBodyStream(
 	controller.error(err instanceof Error ? err : new Error(String(err)));
 }
 
+function stripQueryFromTarget(rawUrl: string): string {
+	const qIdx = rawUrl.indexOf("?");
+	return qIdx === -1 ? rawUrl : rawUrl.slice(0, qIdx);
+}
+
 function handleBodyChunk(
 	ctx: BodyStreamContext,
 	controller: ReadableStreamDefaultController<Uint8Array>,
@@ -129,8 +125,8 @@ function handleBodyChunk(
 		const remaining = ctx.limit - ctx.received;
 		if (remaining > 0) controller.enqueue(bytes.subarray(0, remaining));
 		ctx.received = ctx.limit;
-		const targetUrl = ctx.message.url ?? "/";
-		ctx.onWarn(`Request body exceeded ${ctx.limit} bytes for ${targetUrl}. Only the first ${ctx.limit} bytes will be available.`);
+		const targetPath = stripQueryFromTarget(ctx.message.url ?? "/");
+		ctx.onWarn(`Request body exceeded ${ctx.limit} bytes for ${targetPath}. Only the first ${ctx.limit} bytes will be available.`);
 		closeBodyStream(ctx, controller);
 		ctx.message.resume();
 		return;
@@ -202,7 +198,7 @@ function createRequestBodyStream(
 	message: IncomingMessage,
 	limit: number | null,
 	onWarn: (message: string) => void,
-): ReadableStream<Uint8Array> {
+): { stream: ReadableStream<Uint8Array>; cancel: () => void } {
 	const ctx: BodyStreamContext = {
 		message,
 		limit,
@@ -212,13 +208,14 @@ function createRequestBodyStream(
 		settled: false,
 		detach: () => {},
 	};
-	return new ReadableStream<Uint8Array>(
+	const stream = new ReadableStream<Uint8Array>(
 		{
 			pull: (controller) => pullBodyChunk(ctx, controller),
 			cancel: () => cancelBodyStream(ctx),
 		},
 		{ highWaterMark: 0 },
 	);
+	return { stream, cancel: () => cancelBodyStream(ctx) };
 }
 
 function bindDisconnectSignal(
@@ -251,23 +248,23 @@ function bindDisconnectSignal(
 	return { signal: controller.signal, cleanup };
 }
 
-async function buildWebRequest(
+function buildWebRequest(
 	message: IncomingMessage,
 	signal: AbortSignal,
 	options?: ServeHttpOptions,
-): Promise<Request> {
+): { request: Request; cancelBody: (() => void) | null } {
 	const url = buildRequestUrl(message);
 	const method = message.method ?? "GET";
 	const headers = buildRequestHeaders(message);
 	const upper = method.toUpperCase();
 	if (upper === "GET" || upper === "HEAD") {
-		return new Request(url, { method, headers, signal });
+		return { request: new Request(url, { method, headers, signal }), cancelBody: null };
 	}
-	const getLimit = options?.getBodyLimit ?? (await getDefaultBodyLimit());
+	const getLimit = options?.getBodyLimit ?? bodyLimit;
 	const limit = getLimit(new URL(url).pathname);
-	const body = createRequestBodyStream(message, limit, options?.onWarn ?? console.warn);
-	const init: StreamingRequestInit = { method, headers, body, signal, duplex: "half" };
-	return new Request(url, init);
+	const { stream, cancel } = createRequestBodyStream(message, limit, options?.onWarn ?? console.warn);
+	const init: StreamingRequestInit = { method, headers, body: stream, signal, duplex: "half" };
+	return { request: new Request(url, init), cancelBody: cancel };
 }
 
 function applyResponseHeaders(res: ServerResponse, headers: Headers): void {
@@ -322,21 +319,22 @@ async function streamResponseBody(
 	res: ServerResponse,
 	body: ReadableStream<Uint8Array>,
 	signal: AbortSignal,
-	shutdownSignal?: AbortSignal,
+	options?: ServeHttpOptions,
 ): Promise<void> {
 	res.flushHeaders();
 	const reader = body.getReader();
 	const onAbort = () => {
 		void reader.cancel().catch(() => {});
-		if (shutdownSignal?.aborted && !res.writableEnded && !res.destroyed) res.end();
+		if (options?.shutdownSignal?.aborted && !res.writableEnded && !res.destroyed) res.end();
 	};
 	signal.addEventListener("abort", onAbort, { once: true });
 	if (signal.aborted) onAbort();
 	try {
 		await pumpReaderToResponse(reader, res, signal);
 	} catch (error) {
-		if (!signal.aborted && !res.destroyed && !res.writableEnded) {
-			res.destroy(error instanceof Error ? error : undefined);
+		if (!signal.aborted) {
+			options?.onError?.(error);
+			if (!res.destroyed && !res.writableEnded) res.destroy(error instanceof Error ? error : undefined);
 		}
 	} finally {
 		signal.removeEventListener("abort", onAbort);
@@ -359,11 +357,11 @@ async function writeWebResponse(
 	request: Request,
 	response: Response,
 	signal: AbortSignal,
-	shutdownSignal?: AbortSignal,
+	options?: ServeHttpOptions,
 ): Promise<void> {
 	if (signal.aborted || res.destroyed || res.writableEnded) {
 		await response.body?.cancel().catch(() => {});
-		if (shutdownSignal?.aborted && !res.writableEnded && !res.destroyed) {
+		if (options?.shutdownSignal?.aborted && !res.writableEnded && !res.destroyed) {
 			if (!res.headersSent) res.statusCode = 503;
 			res.end();
 		}
@@ -380,7 +378,7 @@ async function writeWebResponse(
 		res.end();
 		return;
 	}
-	await streamResponseBody(res, response.body, signal, shutdownSignal);
+	await streamResponseBody(res, response.body, signal, options);
 }
 
 export async function serveHttp(
@@ -390,19 +388,17 @@ export async function serveHttp(
 	options?: ServeHttpOptions,
 ): Promise<void> {
 	const { signal, cleanup } = bindDisconnectSignal(message, res, options?.shutdownSignal);
+	let cancelBody: (() => void) | null = null;
 	try {
-		const request = await buildWebRequest(message, signal, options);
-		let response: Response;
-		try {
-			response = await dispatch(request);
-		} catch {
-			sendInternalError(res);
-			return;
-		}
-		await writeWebResponse(res, request, response, signal, options?.shutdownSignal);
-	} catch {
+		const built = buildWebRequest(message, signal, options);
+		cancelBody = built.cancelBody;
+		const response = await dispatch(built.request);
+		await writeWebResponse(res, built.request, response, signal, options);
+	} catch (error) {
+		options?.onError?.(error);
 		sendInternalError(res);
 	} finally {
+		cancelBody?.();
 		cleanup();
 	}
 }
@@ -425,16 +421,29 @@ async function shutdownApiServer(
 	server: http.Server,
 	shutdownController: AbortController,
 	inFlight: Set<Promise<void>>,
+	deadlineMs: number,
+	onWarn?: (message: string) => void,
 ): Promise<void> {
 	const closed = closeNodeServer(server);
 	shutdownController.abort();
 	server.closeIdleConnections();
-	await Promise.allSettled(inFlight);
-	server.closeIdleConnections();
-	const forceTimer = setTimeout(() => server.closeAllConnections(), 100);
+	let forced = false;
+	let resolveForce!: () => void;
+	const forceTriggered = new Promise<void>((resolve) => {
+		resolveForce = resolve;
+	});
+	const forceTimer = setTimeout(() => {
+		forced = true;
+		onWarn?.(`Forced HTTP connection close after ${deadlineMs}ms shutdown deadline.`);
+		server.closeAllConnections();
+		resolveForce();
+	}, deadlineMs);
 	forceTimer.unref();
 	try {
-		await closed;
+		await Promise.race([Promise.allSettled(inFlight), forceTriggered]);
+		if (!forced) server.closeIdleConnections();
+		await Promise.race([closed, forceTriggered]);
+		if (forced) await closed;
 	} finally {
 		clearTimeout(forceTimer);
 	}
@@ -442,13 +451,14 @@ async function shutdownApiServer(
 
 export function createApiHttpServer(
 	dispatch: Dispatch,
-	options?: ServeHttpOptions & { onError?: (error: unknown) => void },
+	options?: CreateApiHttpServerOptions,
 ): ApiHttpServer {
 	const shutdownController = new AbortController();
 	if (options?.shutdownSignal?.aborted) shutdownController.abort();
 	else options?.shutdownSignal?.addEventListener("abort", () => shutdownController.abort(), { once: true });
 	const inFlight = new Set<Promise<void>>();
 	const mergedOptions: ServeHttpOptions = { ...options, shutdownSignal: shutdownController.signal };
+	const deadlineMs = options?.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_DEADLINE_MS;
 	const server = http.createServer((message, res) => {
 		const task = serveHttp(message, res, dispatch, mergedOptions).catch((error) => {
 			options?.onError?.(error);
@@ -456,12 +466,11 @@ export function createApiHttpServer(
 		inFlight.add(task);
 		void task.finally(() => inFlight.delete(task));
 	});
-	server.requestTimeout = 0;
 	let closing: Promise<void> | null = null;
 	return {
 		server,
 		close(): Promise<void> {
-			closing ??= shutdownApiServer(server, shutdownController, inFlight);
+			closing ??= shutdownApiServer(server, shutdownController, inFlight, deadlineMs, options?.onWarn);
 			return closing;
 		},
 	};

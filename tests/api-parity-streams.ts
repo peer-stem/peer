@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import * as http from "node:http";
 import type { ServerSide } from "./api-parity-stubs.ts";
-import { connectWireStream, openWireStream, parseNdjsonStream, parseSseStream, sendWire, type LiveStreamHandle } from "./api-parity-wire.ts";
+import {
+	connectWireStream,
+	normalizeRawHeaders,
+	openWireStream,
+	parseNdjsonStream,
+	parseSseStream,
+	sendWire,
+	type LiveStreamHandle,
+} from "./api-parity-wire.ts";
 import {
 	assertDataDirsEqual,
 	compareResponseHeaders,
@@ -10,29 +18,24 @@ import {
 	runParityRequest,
 	type ParityHarness,
 } from "./api-parity-compare.ts";
-import { GOLDEN_TEACH_CHAT } from "./api-parity-routes-a.ts";
-import { pulseEventsBusOnBoth, waitChatSettledOnBoth, waitExtractionIdleOnBoth } from "./api-parity-routes-b.ts";
-
-const GOLDEN_SIDE_THREAD = "side_msg_mv27s2zx_8e76e94b";
-const MAX_TTS_AUDIO_BYTES = 33_554_432;
-
-async function waitStreamContainsCount(stream: LiveStreamHandle, needle: string, minCount: number, timeoutMs = 10_000): Promise<string> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		const text = stream.snapshotText();
-		const count = text.split(needle).length - 1;
-		if (count >= minCount) return text;
-		await new Promise((r) => setTimeout(r, 25));
-	}
-	throw new Error(`Timed out waiting for ${minCount}x "${needle}" in stream; got:\n${stream.snapshotText()}`);
-}
+import {
+	GOLDEN_SIDE_THREAD,
+	GOLDEN_TEACH_CHAT,
+	MAX_TTS_AUDIO_BYTES,
+} from "./api-test-helpers.ts";
+import {
+	openEventsWithPulse,
+	pulseEventsBusOnBoth,
+	waitChatSettledOnBoth,
+	waitExtractionIdleOnBoth,
+} from "./api-parity-routes-b.ts";
 
 export async function runEventsStreamParity(h: ParityHarness): Promise<void> {
 	const nextConn = connectWireStream(h.pair.next.port, { method: "GET", path: "/api/events" });
 	const apiConn = connectWireStream(h.pair.api.port, { method: "GET", path: "/api/events" });
 	const apiStream = await apiConn.waitHeaders(1_500);
 	assert.equal(apiStream.status, 200);
-	await new Promise((r) => setTimeout(r, 80));
+	await sendWire(h.pair.next.port, { method: "GET", path: "/api/settings" });
 	if (!nextConn.headersArrived()) {
 		h.recordObservation({
 			ruleId: "events-header-flush-timing",
@@ -41,18 +44,20 @@ export async function runEventsStreamParity(h: ParityHarness): Promise<void> {
 			apiSummary: `headers flushed immediately (${apiStream.headersElapsedMs}ms)`,
 		});
 	}
-	await triggerEventsOnPending(h, nextConn, apiStream);
-	nextConn.abort();
-	apiConn.abort();
-	const reopenNext = connectWireStream(h.pair.next.port, { method: "GET", path: "/api/events" });
-	const reopenApi = connectWireStream(h.pair.api.port, { method: "GET", path: "/api/events" });
-	await new Promise((r) => setTimeout(r, 40));
-	await pulseEventsBusOnBoth(h);
-	const [rn, ra] = await Promise.all([reopenNext.waitHeaders(5_000), reopenApi.waitHeaders(5_000)]);
-	assert.equal(rn.status, 200);
-	assert.equal(ra.status, 200);
-	rn.abort();
-	ra.abort();
+	try {
+		await triggerEventsOnPending(h, nextConn, apiStream);
+	} finally {
+		nextConn.abort();
+		apiConn.abort();
+	}
+	const { nextEv: rn, apiEv: ra } = await openEventsWithPulse(h.pair.next.port, h.pair.api.port);
+	try {
+		assert.equal(rn.status, 200);
+		assert.equal(ra.status, 200);
+	} finally {
+		rn.abort();
+		ra.abort();
+	}
 }
 
 async function triggerEventsOnPending(
@@ -60,13 +65,22 @@ async function triggerEventsOnPending(
 	nextConn: ReturnType<typeof connectWireStream>,
 	apiStream: LiveStreamHandle,
 ): Promise<void> {
-	await pulseEventsBusOnBoth(h);
-	const nextStream = await nextConn.waitHeaders(5_000);
+	const pulser = setInterval(() => {
+		void pulseEventsBusOnBoth(h).catch(() => {});
+	}, 80);
+	let nextStream: LiveStreamHandle;
+	try {
+		await pulseEventsBusOnBoth(h);
+		nextStream = await nextConn.waitHeaders(5_000);
+	} finally {
+		clearInterval(pulser);
+	}
 	assert.equal(nextStream.status, 200);
 	compareResponseHeaders(h, nextStream.headers, apiStream.headers, { requestLabel: "stream /api/events" });
+	await pulseEventsBusOnBoth(h);
 	const [nextRaw, apiRaw] = await Promise.all([
-		waitStreamContainsCount(nextStream, "data: ", 3),
-		waitStreamContainsCount(apiStream, "data: ", 3),
+		nextStream.waitForCount("data: ", 3, 10_000),
+		apiStream.waitForCount("data: ", 3, 10_000),
 	]);
 	const nextEvents = normalizeSseEvents(h, "next", parseSseStream(nextRaw).slice(0, 3));
 	const apiEvents = normalizeSseEvents(h, "api", parseSseStream(apiRaw).slice(0, 3));
@@ -169,27 +183,44 @@ async function waitSideIdle(h: ParityHarness): Promise<void> {
 	throw new Error("Side-chat stream did not settle in time");
 }
 
+interface StreamedAudioOutcome {
+	status: number;
+	headers: Record<string, string>;
+	totalBytes: number;
+	complete: boolean;
+}
+
 function collectAudioBytesResponse(
 	res: http.IncomingMessage,
-	resolve: (v: { status: number; headers: Record<string, string>; totalBytes: number }) => void,
+	onCapReached: () => void,
+	resolve: (v: StreamedAudioOutcome) => void,
 ): void {
-	const headers: Record<string, string> = {};
-	for (const [k, v] of Object.entries(res.headers)) {
-		if (v !== undefined) headers[k.toLowerCase()] = Array.isArray(v) ? v.join(", ") : v;
-	}
+	const headers = normalizeRawHeaders(res.rawHeaders);
 	let totalBytes = 0;
+	let capSignaled = false;
 	let done = false;
-	const finish = () => { if (!done) { done = true; resolve({ status: res.statusCode ?? 0, headers, totalBytes }); } };
-	res.on("data", (chunk: Buffer) => { totalBytes += chunk.length; });
+	const finish = () => {
+		if (!done) {
+			done = true;
+			resolve({ status: res.statusCode ?? 0, headers, totalBytes, complete: res.complete });
+		}
+	};
+	res.on("data", (chunk: Buffer) => {
+		totalBytes += chunk.length;
+		if (!capSignaled && totalBytes >= MAX_TTS_AUDIO_BYTES) {
+			capSignaled = true;
+			onCapReached();
+		}
+	});
 	res.on("end", finish);
 	res.on("close", finish);
 	res.on("error", finish);
 }
 
-function readStreamedAudioBytes(port: number, payload: string): Promise<{ status: number; headers: Record<string, string>; totalBytes: number }> {
+function readStreamedAudioBytes(port: number, payload: string, onCapReached: () => void): Promise<StreamedAudioOutcome> {
 	return new Promise((resolve, reject) => {
 		const opts = { host: "127.0.0.1", port, method: "POST", path: "/api/tts/speak", headers: { "Content-Type": "application/json", Host: `127.0.0.1:${port}` } };
-		const req = http.request(opts, (res) => collectAudioBytesResponse(res, resolve));
+		const req = http.request(opts, (res) => collectAudioBytesResponse(res, onCapReached, resolve));
 		req.on("error", reject);
 		req.end(payload);
 	});
@@ -219,13 +250,15 @@ async function runTtsOverCapChecks(h: ParityHarness, payload: string): Promise<v
 		});
 		h.stub.setTtsMode("over-cap");
 		const [nextCap, apiCap] = await Promise.all([
-			readStreamedAudioBytes(h.pair.next.port, payload),
-			readStreamedAudioBytes(h.pair.api.port, payload),
+			readStreamedAudioBytes(h.pair.next.port, payload, () => h.stub.releaseTtsOverflow("next")),
+			readStreamedAudioBytes(h.pair.api.port, payload, () => h.stub.releaseTtsOverflow("api")),
 		]);
 		assert.equal(nextCap.status, 200);
 		assert.equal(apiCap.status, 200);
-		assert.ok(nextCap.totalBytes <= MAX_TTS_AUDIO_BYTES, `Next exceeded TTS cap: ${nextCap.totalBytes}`);
-		assert.ok(apiCap.totalBytes <= MAX_TTS_AUDIO_BYTES, `API exceeded TTS cap: ${apiCap.totalBytes}`);
+		assert.equal(nextCap.totalBytes, MAX_TTS_AUDIO_BYTES);
+		assert.equal(apiCap.totalBytes, nextCap.totalBytes, "TTS over-cap byte count mismatch");
+		assert.equal(nextCap.complete, false, "Expected Next TTS stream to abort mid-stream on cap overflow");
+		assert.equal(apiCap.complete, false, "Expected API TTS stream to abort mid-stream on cap overflow");
 	} finally {
 		h.stub.setTtsMode("normal");
 	}

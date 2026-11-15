@@ -2,70 +2,11 @@ import assert from "node:assert/strict";
 import { tinyPdf } from "./helpers/tiny-pdf.ts";
 import { runParityRequest, type ParityHarness } from "./api-parity-compare.ts";
 import type { ServerSide } from "./api-parity-stubs.ts";
-
-export const GOLDEN_TEACH_CHAT = "chat_mv27rrra_feff23b6";
-export const GOLDEN_PRACTICE_CHAT = "chat_mv293wv5_10656952";
-export const GOLDEN_NODE_DELETE = "n_d7a78bb8cdef";
-
-export const CONCRETE_ROUTE_PATHS: Readonly<Record<string, string>> = {
-	"/api/activity/abort": "/api/activity/abort",
-	"/api/activity": "/api/activity",
-	"/api/chat": "/api/chat",
-	"/api/chats/[id]/artifact-ui": `/api/chats/${GOLDEN_TEACH_CHAT}/artifact-ui`,
-	"/api/chats/[id]/dismiss": `/api/chats/${GOLDEN_TEACH_CHAT}/dismiss`,
-	"/api/chats/[id]/images/[snapshotId]": `/api/chats/${GOLDEN_TEACH_CHAT}/images/${"0".repeat(64)}`,
-	"/api/chats/[id]/markdown": `/api/chats/${GOLDEN_TEACH_CHAT}/markdown`,
-	"/api/chats/[id]": `/api/chats/${GOLDEN_TEACH_CHAT}`,
-	"/api/chats/[id]/settings": `/api/chats/${GOLDEN_TEACH_CHAT}/settings`,
-	"/api/chats/[id]/side-chats": `/api/chats/${GOLDEN_TEACH_CHAT}/side-chats`,
-	"/api/chats/[id]/side-chats/[threadId]": `/api/chats/${GOLDEN_TEACH_CHAT}/side-chats/side_missing`,
-	"/api/chats/[id]/side-chats/[threadId]/stop": `/api/chats/${GOLDEN_TEACH_CHAT}/side-chats/side_missing/stop`,
-	"/api/chats/[id]/steer": `/api/chats/${GOLDEN_TEACH_CHAT}/steer`,
-	"/api/chats/[id]/stream": `/api/chats/${GOLDEN_TEACH_CHAT}/stream`,
-	"/api/chats": "/api/chats",
-	"/api/claude-code": "/api/claude-code",
-	"/api/custom-provider": "/api/custom-provider",
-	"/api/events": "/api/events",
-	"/api/external-cli": "/api/external-cli?id=codex-cli",
-	"/api/graph/costs": "/api/graph/costs",
-	"/api/graph/coverage/extract": "/api/graph/coverage/extract",
-	"/api/graph/import": "/api/graph/import",
-	"/api/graph/nodes/[id]": "/api/graph/nodes/n_missing000000",
-	"/api/graph/positions": "/api/graph/positions",
-	"/api/graph/render-settings": "/api/graph/render-settings",
-	"/api/graph": "/api/graph",
-	"/api/graph/sources": "/api/graph/sources",
-	"/api/graph/status": "/api/graph/status",
-	"/api/jobs": "/api/jobs",
-	"/api/keys/[id]": "/api/keys/BRAVE_API_KEY",
-	"/api/keys": "/api/keys",
-	"/api/models": "/api/models",
-	"/api/plugins/[id]/assets/[...file]": "/api/plugins/document-one/assets/styles.css",
-	"/api/plugins/[id]/call": "/api/plugins/document-one/call",
-	"/api/plugins/[id]/documents/markdown": "/api/plugins/document-one/documents/markdown",
-	"/api/plugins/[id]": "/api/plugins/document-one",
-	"/api/plugins": "/api/plugins",
-	"/api/search": "/api/search",
-	"/api/settings/prompts": "/api/settings/prompts",
-	"/api/settings/prompts/[...segment]": "/api/settings/prompts/teacher/identity.md",
-	"/api/settings": "/api/settings",
-	"/api/settings/[section]": "/api/settings/appearance",
-	"/api/stt/token": "/api/stt/token",
-	"/api/stt/transcribe": "/api/stt/transcribe",
-	"/api/subscriptions/browser": "/api/subscriptions/browser?id=00000000-0000-0000-0000-000000000000",
-	"/api/subscriptions": "/api/subscriptions",
-	"/api/themes/[id]": "/api/themes/missing-theme",
-	"/api/themes": "/api/themes",
-	"/api/tts/speak": "/api/tts/speak",
-	"/api/tts/voices": "/api/tts/voices",
-};
-
-export async function encodeMultipartRequest(form: FormData): Promise<{ contentType: string; body: Buffer }> {
-	const req = new Request("http://127.0.0.1/upload", { method: "POST", body: form });
-	const contentType = req.headers.get("content-type") ?? "";
-	const body = Buffer.from(await req.arrayBuffer());
-	return { contentType, body };
-}
+import {
+	CONCRETE_ROUTE_PATHS,
+	DOC_MARKDOWN_PATH,
+	encodeMultipartRequest,
+} from "./api-test-helpers.ts";
 
 async function runUnconfiguredChecks(h: ParityHarness): Promise<void> {
 	await runParityRequest(h, {
@@ -77,12 +18,14 @@ async function runUnconfiguredChecks(h: ParityHarness): Promise<void> {
 	await runParityRequest(h, {
 		label: "row 44 POST /api/stt/transcribe (unconfigured)",
 		pattern: "/api/stt/transcribe",
+		isWrite: true,
 		expectedStatus: 409,
 		request: { method: "POST", path: "/api/stt/transcribe", body: Buffer.from("RIFF") },
 	});
 	await runParityRequest(h, {
 		label: "row 49 POST /api/tts/speak (unconfigured)",
 		pattern: "/api/tts/speak",
+		isWrite: true,
 		expectedStatus: 409,
 		request: {
 			method: "POST",
@@ -340,6 +283,7 @@ async function runPluginsSuite(h: ParityHarness): Promise<void> {
 	await runParityRequest(h, {
 		label: "row 37 POST /api/plugins (refresh)",
 		pattern: "/api/plugins",
+		isWrite: true,
 		expectedStatus: 200,
 		request: { method: "POST", path: "/api/plugins", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "refresh" }) },
 	});
@@ -359,6 +303,7 @@ async function runPluginsSuite(h: ParityHarness): Promise<void> {
 	await runParityRequest(h, {
 		label: "row 34 POST /api/plugins/document-one/call",
 		pattern: "/api/plugins/[id]/call",
+		isWrite: true,
 		expectedStatus: 200,
 		request: { method: "POST", path: "/api/plugins/document-one/call", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ operation: "echo", input: { k: 7 } }) },
 	});
@@ -366,7 +311,6 @@ async function runPluginsSuite(h: ParityHarness): Promise<void> {
 }
 
 async function runPluginDocumentMethods(h: ParityHarness): Promise<void> {
-	const docPath = "/api/plugins/document-one/documents/markdown";
 	const pat = "/api/plugins/[id]/documents/markdown";
 	const formTxt = new FormData();
 	formTxt.append("file", new File(["Parity markdown text\n"], "small.txt", { type: "text/plain" }));
@@ -374,8 +318,9 @@ async function runPluginDocumentMethods(h: ParityHarness): Promise<void> {
 	await runParityRequest(h, {
 		label: "row 35 POST /api/plugins/document-one/documents/markdown (txt)",
 		pattern: pat,
+		isWrite: true,
 		expectedStatus: 200,
-		request: { method: "POST", path: docPath, headers: { "Content-Type": mpTxt.contentType }, body: mpTxt.body },
+		request: { method: "POST", path: DOC_MARKDOWN_PATH, headers: { "Content-Type": mpTxt.contentType }, body: mpTxt.body },
 	});
 	const pdfBytes = tinyPdf([{ runs: [{ text: "Parity PDF line.", x: 72, y: 700 }] }]);
 	const formPdf = new FormData();
@@ -383,16 +328,17 @@ async function runPluginDocumentMethods(h: ParityHarness): Promise<void> {
 	const mpPdf = await encodeMultipartRequest(formPdf);
 	await runParityRequest(h, {
 		label: "row 35 POST /api/plugins/document-one/documents/markdown (pdf)",
+		isWrite: true,
 		expectedStatus: 200,
-		request: { method: "POST", path: docPath, headers: { "Content-Type": mpPdf.contentType }, body: mpPdf.body },
+		request: { method: "POST", path: DOC_MARKDOWN_PATH, headers: { "Content-Type": mpPdf.contentType }, body: mpPdf.body },
 	});
-	await runParityRequest(h, { label: "row 35 OPTIONS", pattern: pat, expectedStatus: 204, request: { method: "OPTIONS", path: docPath } });
+	await runParityRequest(h, { label: "row 35 OPTIONS", pattern: pat, expectedStatus: 204, request: { method: "OPTIONS", path: DOC_MARKDOWN_PATH } });
 	for (const method of ["GET", "HEAD", "PUT", "PATCH", "DELETE"] as const) {
 		await runParityRequest(h, {
 			label: `row 35 ${method}`,
 			pattern: pat,
 			expectedStatus: 405,
-			request: { method, path: docPath },
+			request: { method, path: DOC_MARKDOWN_PATH },
 		});
 	}
 }
@@ -400,11 +346,13 @@ async function runPluginDocumentMethods(h: ParityHarness): Promise<void> {
 async function runSpeechConfigured(h: ParityHarness): Promise<void> {
 	await runParityRequest(h, {
 		label: "row 44 POST /api/stt/transcribe (configured)",
+		isWrite: true,
 		expectedStatus: 200,
 		request: { method: "POST", path: "/api/stt/transcribe?language=en-US", headers: { "Content-Type": "audio/wav" }, body: Buffer.from("RIFF_WAV_STUB") },
 	});
 	await runParityRequest(h, {
 		label: "row 49 POST /api/tts/speak (configured)",
+		isWrite: true,
 		expectedStatus: 200,
 		request: { method: "POST", path: "/api/tts/speak", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "Parity spoken sentence." }) },
 	});
@@ -421,6 +369,7 @@ async function runSubscriptionsSuite(h: ParityHarness): Promise<void> {
 	await runParityRequest(h, {
 		label: "row 46 POST /api/subscriptions (unsupported control)",
 		pattern: "/api/subscriptions",
+		isWrite: true,
 		expectedStatus: 400,
 		request: (_side, port) => ({
 			method: "POST",
@@ -439,6 +388,7 @@ async function runSubscriptionsSuite(h: ParityHarness): Promise<void> {
 	await runParityRequest(h, {
 		label: "row 45 POST /api/subscriptions/browser",
 		pattern: "/api/subscriptions/browser",
+		isWrite: true,
 		expectedStatus: 410,
 		request: (_side, port) => ({
 			method: "POST",

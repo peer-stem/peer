@@ -2,45 +2,17 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { after, it } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import type { Method, RouteRecord } from "../src/api/types.ts";
+import { GOLDEN_ROUTE_PATTERNS, installScratchProcessEnv, WORKTREE_ROOT } from "./api-test-helpers.ts";
 
 const ALL_METHODS: readonly Method[] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
-const ENV_KEYS = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "TMPDIR", "LH_DATA_DIR", "LH_AUTH_FILE"] as const;
-const WORKTREE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const scratchBase = await fs.stat("/usr/lib/persist/peer").then(
-	() => "/usr/lib/persist/peer/scratch",
-	() => path.join(WORKTREE_ROOT, ".fresh-data"),
-);
-
-await fs.mkdir(scratchBase, { recursive: true, mode: 0o700 });
-const scratchRoot = await fs.mkdtemp(path.join(scratchBase, "api-routes-"));
-await fs.chmod(scratchRoot, 0o700);
-const homeDir = path.join(scratchRoot, "home");
-const configDir = path.join(scratchRoot, "config");
-const dataDir = path.join(scratchRoot, "data");
-const authFile = path.join(scratchRoot, "auth.json");
-for (const dir of [homeDir, configDir, dataDir]) {
-	await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-}
-await fs.writeFile(authFile, "{}\n", { mode: 0o600 });
-
-const priorEnv = new Map<string, string | undefined>(ENV_KEYS.map((key) => [key, process.env[key]]));
-process.env.HOME = homeDir;
-process.env.USERPROFILE = homeDir;
-process.env.XDG_CONFIG_HOME = configDir;
-process.env.TMPDIR = scratchRoot;
-process.env.LH_DATA_DIR = dataDir;
-process.env.LH_AUTH_FILE = authFile;
+const scratchEnv = installScratchProcessEnv("api-routes-");
 
 const { patternFromFile, routes } = await import("../src/api/routes.ts");
 
-after(async () => {
-	for (const [key, value] of priorEnv) {
-		if (value === undefined) delete process.env[key];
-		else process.env[key] = value;
-	}
-	await fs.rm(scratchRoot, { recursive: true, force: true });
+after(() => {
+	scratchEnv.restore();
 });
 
 async function walkRouteFiles(dir: string, repoRoot: string): Promise<string[]> {
@@ -72,17 +44,18 @@ async function assertModuleParity(repoRoot: string, file: string, records: reado
 }
 
 it("routes-import", async () => {
-	const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-	const diskFiles = await walkRouteFiles(path.join(repoRoot, "app", "api"), repoRoot);
+	const diskFiles = await walkRouteFiles(path.join(WORKTREE_ROOT, "app", "api"), WORKTREE_ROOT);
 	assert.equal(diskFiles.length, 50, "expected exactly 50 app/api/**/route.ts files on disk");
 
 	const listedFiles = [...new Set(routes.map((record) => record.file))].sort();
 	assert.deepEqual(listedFiles, diskFiles, "routes.ts file list must match disk files 1:1");
+	const listedPatterns = [...new Set(routes.map((record) => record.pattern))].sort();
+	assert.deepEqual(listedPatterns, GOLDEN_ROUTE_PATTERNS, "routes.ts patterns must match the 50 golden patterns");
 	assert.equal(routes.length, 73, "expected exactly 73 exported method records across all 50 modules");
 
 	for (const file of diskFiles) {
 		const fileRecords = routes.filter((record) => record.file === file);
-		await assertModuleParity(repoRoot, file, fileRecords);
+		await assertModuleParity(WORKTREE_ROOT, file, fileRecords);
 	}
 });
 

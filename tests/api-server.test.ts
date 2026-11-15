@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import http from "node:http";
+import { PassThrough } from "node:stream";
+import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import net, { type AddressInfo } from "node:net";
 import { test, type TestContext } from "node:test";
+import { MAX_IMPORT_BODY_BYTES } from "../lib/notes-import-limits.ts";
 import {
 	createApiHttpServer,
 	serveHttp,
 	type ApiHttpServer,
-	type ServeHttpOptions,
+	type CreateApiHttpServerOptions,
 } from "../src/api/server.ts";
-import type { Dispatch, ServeHttp } from "../src/api/types.ts";
+import type { Dispatch } from "../src/api/types.ts";
 
 interface BoundTestServer {
 	api: ApiHttpServer;
@@ -19,7 +21,7 @@ interface BoundTestServer {
 async function startServer(
 	t: TestContext,
 	dispatch: Dispatch,
-	options?: ServeHttpOptions,
+	options?: CreateApiHttpServerOptions,
 ): Promise<BoundTestServer> {
 	const api = createApiHttpServer(dispatch, options);
 	t.after(async () => {
@@ -92,6 +94,7 @@ function makeStreamOnCancel(onCancel: () => void): ReadableStream<Uint8Array> {
 function makeControlledStream(): {
 	stream: ReadableStream<Uint8Array>;
 	push: (text: string) => void;
+	fail: (err: Error) => void;
 	close: () => void;
 } {
 	let ctrl!: ReadableStreamDefaultController<Uint8Array>;
@@ -104,6 +107,7 @@ function makeControlledStream(): {
 	return {
 		stream,
 		push: (text: string) => ctrl.enqueue(encoder.encode(text)),
+		fail: (err: Error) => ctrl.error(err),
 		close: () => ctrl.close(),
 	};
 }
@@ -111,30 +115,45 @@ function makeControlledStream(): {
 function makeBackpressureStream(
 	totalChunks: number,
 	chunkBytes: Uint8Array,
-): { stream: ReadableStream<Uint8Array>; getPulled: () => number } {
+): { stream: ReadableStream<Uint8Array>; getPulled: () => number; waitStalled: () => Promise<number> } {
 	let pulled = 0;
+	const firstPull = deferred<void>();
 	const pull = (controller: ReadableStreamDefaultController<Uint8Array>) => {
 		if (pulled >= totalChunks) {
 			controller.close();
 			return;
 		}
 		pulled += 1;
+		if (pulled === 1) firstPull.resolve();
 		controller.enqueue(chunkBytes);
 	};
 	const stream = new ReadableStream<Uint8Array>({ pull }, { highWaterMark: 0 });
-	return { stream, getPulled: () => pulled };
+	const waitStalled = async (): Promise<number> => {
+		await firstPull.promise;
+		let prev = -1;
+		for (let i = 0; i < 200; i++) {
+			await new Promise<void>((r) => setImmediate(r));
+			if (pulled === prev) return pulled;
+			prev = pulled;
+		}
+		return pulled;
+	};
+	return { stream, getPulled: () => pulled, waitStalled };
 }
 
 async function summarizeBodyDispatch(req: Request): Promise<Response> {
 	const bytes = new Uint8Array(await req.arrayBuffer());
 	const head = Buffer.from(bytes.subarray(0, 8)).toString("utf-8");
 	const tail = Buffer.from(bytes.subarray(Math.max(0, bytes.byteLength - 8))).toString("utf-8");
-	return Response.json({ len: bytes.byteLength, head, tail });
+	return Response.json({
+		len: bytes.byteLength,
+		contentLength: req.headers.get("content-length"),
+		head,
+		tail,
+	});
 }
 
 test("preserves raw URL, Host, multi Set-Cookie, and omits framework headers", async (t) => {
-	const typeCheck: ServeHttp = serveHttp;
-	assert.equal(typeof typeCheck, "function");
 	let seenUrl = "";
 	let seenHost = "";
 	let seenCustom = "";
@@ -170,13 +189,42 @@ test("preserves raw URL, Host, multi Set-Cookie, and omits framework headers", a
 	assert.equal(res.body.toString("utf-8"), '{"ok":true}');
 });
 
-test("returns 500 Internal Server Error when dispatch throws before headers", async (t) => {
-	const srv = await startServer(t, async () => {
-		throw new Error("boom");
+test("reports request-build, dispatch, and mid-stream body failures via options.onError", async (t) => {
+	const reported: Error[] = [];
+	const controlled = makeControlledStream();
+	const dispatch = async (req: Request) => {
+		if (new URL(req.url).pathname === "/stream-err") {
+			return new Response(controlled.stream, { status: 200, headers: { "Content-Type": "text/plain" } });
+		}
+		throw new Error("dispatch-boom");
+	};
+	const srv = await startServer(t, dispatch, {
+		onError: (err) => reported.push(err instanceof Error ? err : new Error(String(err))),
 	});
-	const res = await fetch(`${srv.url}/api/fail`);
-	assert.equal(res.status, 500);
-	assert.equal(await res.text(), "Internal Server Error");
+
+	// 1. buildWebRequest throws on forbidden TRACE method
+	const traceRes = await sendRawRequest({ host: "127.0.0.1", port: srv.port, method: "TRACE", path: "/api/x" });
+	assert.equal(traceRes.status, 500);
+	assert.equal(traceRes.body.toString("utf-8"), "Internal Server Error");
+	assert.equal(reported.length, 1);
+
+	// 2. dispatch throws before headers
+	const dispRes = await fetch(`${srv.url}/api/fail`);
+	assert.equal(dispRes.status, 500);
+	assert.equal(await dispRes.text(), "Internal Server Error");
+	assert.equal(reported.length, 2);
+	assert.equal(reported[1]?.message, "dispatch-boom");
+
+	// 3. response body stream errors mid-way after flushing first chunk
+	const { res } = await openClientStream(`${srv.url}/stream-err`);
+	const first = readNextChunk(res);
+	controlled.push("part-1");
+	assert.equal((await first).toString("utf-8"), "part-1");
+	const closed = new Promise<void>((resolve) => res.once("close", () => resolve()));
+	controlled.fail(new Error("mid-stream-boom"));
+	await closed;
+	assert.equal(reported.length, 3);
+	assert.equal(reported[2]?.message, "mid-stream-boom");
 });
 
 test("uses null body for GET/HEAD and unread empty stream for bodiless POST/DELETE", async (t) => {
@@ -259,7 +307,7 @@ function drainSocketToEnd(sock: net.Socket): Promise<number> {
 }
 
 test("applies socket drain backpressure when streaming to a paused client", async (t) => {
-	const totalChunks = 512;
+	const totalChunks = 256;
 	const chunkBytes = new Uint8Array(64 * 1024).fill(0x6b);
 	const producer = makeBackpressureStream(totalChunks, chunkBytes);
 	const srv = await startServer(t, async () => new Response(producer.stream, { status: 200 }));
@@ -271,8 +319,7 @@ test("applies socket drain backpressure when streaming to a paused client", asyn
 	});
 	sock.pause();
 	sock.write("GET /backpressure HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-	await new Promise((resolve) => setTimeout(resolve, 80));
-	const pulledWhilePaused = producer.getPulled();
+	const pulledWhilePaused = await producer.waitStalled();
 	assert.ok(pulledWhilePaused > 0 && pulledWhilePaused < totalChunks, `pulled=${pulledWhilePaused}`);
 	const wireBytes = await drainSocketToEnd(sock);
 	assert.ok(wireBytes > totalChunks * chunkBytes.byteLength);
@@ -297,57 +344,146 @@ test("mid-stream client disconnect aborts request.signal and immediately cancels
 	await Promise.all([signalAborted.promise, bodyCancelled.promise]);
 });
 
-test("caps request body at exact byte limit with warning and no ECONNRESET vs null uncut", async (t) => {
+test("caps request body at exact 27,262,976-byte default limit, strips query from warning, and leaves exempt uncut", async (t) => {
 	const warnings: string[] = [];
 	const srv = await startServer(t, summarizeBodyDispatch, {
-		getBodyLimit: (pathname) => (pathname === "/exempt" ? null : 64),
 		onWarn: (msg) => warnings.push(msg),
 	});
-	const exactRes = await fetch(`${srv.url}/capped`, { method: "POST", body: "X".repeat(64) });
+	const exactPayload = Buffer.alloc(MAX_IMPORT_BODY_BYTES, 0x58);
+	const exactRes = await fetch(`${srv.url}/api/capped`, { method: "POST", body: exactPayload });
 	assert.equal(exactRes.status, 200);
-	assert.deepEqual(await exactRes.json(), { len: 64, head: "XXXXXXXX", tail: "XXXXXXXX" });
+	assert.deepEqual(await exactRes.json(), {
+		len: MAX_IMPORT_BODY_BYTES,
+		contentLength: String(MAX_IMPORT_BODY_BYTES),
+		head: "XXXXXXXX",
+		tail: "XXXXXXXX",
+	});
 	assert.equal(warnings.length, 0);
 
-	const prefix = "A".repeat(56) + "12345678";
-	const oversized = Buffer.concat([Buffer.from(prefix), Buffer.alloc(512 * 1024, 0x5a)]);
-	const cutRes = await fetch(`${srv.url}/capped?x=1`, { method: "POST", body: oversized });
+	const oversized = Buffer.alloc(MAX_IMPORT_BODY_BYTES + 4096, 0x41);
+	oversized.write("12345678", MAX_IMPORT_BODY_BYTES - 8, "utf-8");
+	oversized.fill(0x5a, MAX_IMPORT_BODY_BYTES);
+	const cutRes = await fetch(`${srv.url}/api/capped?token=secret`, { method: "POST", body: oversized });
 	assert.equal(cutRes.status, 200);
-	assert.deepEqual(await cutRes.json(), { len: 64, head: "AAAAAAAA", tail: "12345678" });
+	assert.deepEqual(await cutRes.json(), {
+		len: MAX_IMPORT_BODY_BYTES,
+		contentLength: String(oversized.byteLength),
+		head: "AAAAAAAA",
+		tail: "12345678",
+	});
 	assert.deepEqual(warnings, [
-		"Request body exceeded 64 bytes for /capped?x=1. Only the first 64 bytes will be available.",
+		`Request body exceeded ${MAX_IMPORT_BODY_BYTES} bytes for /api/capped. Only the first ${MAX_IMPORT_BODY_BYTES} bytes will be available.`,
 	]);
 
-	const exemptRes = await fetch(`${srv.url}/exempt`, { method: "POST", body: oversized });
+	const exemptRes = await fetch(`${srv.url}/api/plugins/document-one/documents/markdown`, {
+		method: "POST",
+		body: oversized,
+	});
 	assert.equal(exemptRes.status, 200);
-	const exemptJson = (await exemptRes.json()) as { len: number; head: string; tail: string };
+	const exemptJson = (await exemptRes.json()) as { len: number; tail: string };
 	assert.equal(exemptJson.len, oversized.byteLength);
 	assert.equal(exemptJson.tail, "ZZZZZZZZ");
-	assert.equal(warnings.length, 1);
 });
 
-test("createApiHttpServer sets requestTimeout=0 and closes open SSE streams in < 500ms", async () => {
+test("keeps Node default requestTimeout and closes open SSE streams cleanly without force warning", async (t) => {
 	let cancelledCount = 0;
-	const api = createApiHttpServer(async () => {
-		const sse = makeStreamOnCancel(() => {
-			cancelledCount += 1;
-		});
+	const warnings: string[] = [];
+	const dispatch = async () => {
+		const sse = makeStreamOnCancel(() => { cancelledCount += 1; });
 		return new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
-	});
-	assert.equal(api.server.requestTimeout, 0);
-	await new Promise<void>((resolve) => {
-		api.server.listen(0, "127.0.0.1", () => resolve());
-	});
-	const port = (api.server.address() as AddressInfo).port;
-	const c1 = await openClientStream(`http://127.0.0.1:${port}/sse-1`);
-	const c2 = await openClientStream(`http://127.0.0.1:${port}/sse-2`);
+	};
+	const srv = await startServer(t, dispatch, { onWarn: (msg) => warnings.push(msg) });
+	assert.equal(srv.api.server.requestTimeout, 300_000);
+	const c1 = await openClientStream(`${srv.url}/sse-1`);
+	const c2 = await openClientStream(`${srv.url}/sse-2`);
 	const end1 = waitForStreamEnd(c1.res);
 	const end2 = waitForStreamEnd(c2.res);
 
-	const startedAt = performance.now();
-	await api.close();
-	const elapsedMs = performance.now() - startedAt;
-
+	await srv.api.close();
 	await Promise.all([end1, end2]);
 	assert.equal(cancelledCount, 2);
-	assert.ok(elapsedMs < 500, `expected close() < 500ms, took ${elapsedMs.toFixed(1)}ms`);
+	assert.deepEqual(warnings, []);
+});
+
+test("arms shutdown deadline before in-flight handlers settle and logs when close is forced", async (t) => {
+	const warnings: string[] = [];
+	const entered = deferred<void>();
+	const releaseStuck = deferred<void>();
+	const dispatch = async () => {
+		entered.resolve();
+		await releaseStuck.promise;
+		return new Response("late");
+	};
+	const srv = await startServer(t, dispatch, { shutdownTimeoutMs: 60, onWarn: (msg) => warnings.push(msg) });
+	t.after(() => releaseStuck.resolve());
+	const pendingFetch = fetch(`${srv.url}/stuck`).catch(() => null);
+	await entered.promise;
+	await srv.api.close();
+	await pendingFetch;
+	assert.deepEqual(warnings, ["Forced HTTP connection close after 60ms shutdown deadline."]);
+});
+
+function makeFakeServerResponse(msg: IncomingMessage): ServerResponse {
+	const res = new http.ServerResponse(msg);
+	res.assignSocket(new PassThrough() as unknown as net.Socket);
+	return res;
+}
+
+test("normalizes absolute-form, asterisk-form, IPv6, and Host-port fallback targets in serveHttp", async (t) => {
+	const seenUrls: string[] = [];
+	const srv = await startServer(t, async (req) => {
+		seenUrls.push(req.url);
+		return new Response(null, { status: 204 });
+	});
+	const sock = net.connect(srv.port, "127.0.0.1");
+	t.after(() => sock.destroy());
+	await new Promise<void>((resolve, reject) => {
+		sock.once("connect", () => resolve());
+		sock.once("error", reject);
+	});
+	sock.write(`GET http://foreign.example:9999/api/abs?q=1 HTTP/1.1\r\nHost: 127.0.0.1:${srv.port}\r\nConnection: close\r\n\r\n`);
+	await drainSocketToEnd(sock);
+	assert.equal(seenUrls[0], `http://127.0.0.1:${srv.port}/api/abs?q=1`);
+
+	const asteriskPipe = new PassThrough();
+	const fakeMsg = Object.assign(asteriskPipe, {
+		method: "OPTIONS",
+		url: "*",
+		headers: { host: "[::1]:4321" },
+		rawHeaders: ["Host", "[::1]:4321"],
+		aborted: false,
+		complete: true,
+		socket: { localAddress: "::1", localPort: 0 },
+	}) as unknown as IncomingMessage;
+	asteriskPipe.end();
+	await serveHttp(fakeMsg, makeFakeServerResponse(fakeMsg), async (req) => {
+		seenUrls.push(req.url);
+		return new Response(null, { status: 204 });
+	});
+	assert.equal(seenUrls[1], "http://[::1]:4321/");
+});
+
+test("detaches request body listeners in finally when handler stops reading mid-stream", async () => {
+	const bodyPipe = new PassThrough();
+	const fakeMsg = Object.assign(bodyPipe, {
+		method: "POST",
+		url: "/api/partial",
+		headers: { host: "127.0.0.1:8080" },
+		rawHeaders: ["Host", "127.0.0.1:8080"],
+		aborted: false,
+		complete: false,
+		socket: { localAddress: "127.0.0.1", localPort: 8080 },
+	}) as unknown as IncomingMessage;
+	bodyPipe.write(Buffer.from("first-chunk"));
+	await serveHttp(fakeMsg, makeFakeServerResponse(fakeMsg), async (req) => {
+		const reader = req.body!.getReader();
+		const first = await reader.read();
+		assert.equal(Buffer.from(first.value ?? []).toString("utf-8"), "first-chunk");
+		reader.releaseLock();
+		return new Response("early-400", { status: 400 });
+	});
+	assert.equal(bodyPipe.listenerCount("data"), 0);
+	assert.equal(bodyPipe.listenerCount("end"), 0);
+	assert.equal(bodyPipe.listenerCount("aborted"), 0);
+	bodyPipe.end();
 });

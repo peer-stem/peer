@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import { connectWireStream, openWireStream, sendRawSocket, sendWire } from "./api-parity-wire.ts";
 import { compareResponseHeaders, runParityRequest, type ParityHarness } from "./api-parity-compare.ts";
-import { GOLDEN_TEACH_CHAT } from "./api-parity-routes-a.ts";
-import { pulseEventsBusOnBoth } from "./api-parity-routes-b.ts";
-
-const GOLDEN_SIDE_THREAD = "side_msg_mv27s2zx_8e76e94b";
+import { GOLDEN_SIDE_THREAD, GOLDEN_TEACH_CHAT } from "./api-test-helpers.ts";
+import { openEventsWithPulse, pulseEventsBusOnBoth } from "./api-parity-routes-b.ts";
 
 export async function caseHeadOnGetRoute(h: ParityHarness): Promise<void> {
 	for (const routePath of ["/api/graph", "/api/settings"]) {
@@ -86,30 +84,38 @@ export async function caseUnknownMethod(h: ParityHarness): Promise<void> {
 }
 
 export async function caseParamDecoding(h: ParityHarness): Promise<void> {
-	const getPaths = [
-		"/api/plugins/document%2Done/assets/assets/nested/info.txt",
-		"/api/plugins/document-one/assets/assets/nested/info%2Etxt",
-		"/api/plugins/document-one/assets/assets%2Fnested/info.txt",
-		"/api/chats/chat%2Dmissing",
-		"/api/chats/chat%2Fslash",
-		"/api/chats/chat%25percent",
-		"/api/chats/caf%C3%A9",
+	const getCases: ReadonlyArray<{ path: string; status: number; body?: string }> = [
+		{ path: "/api/plugins/document%2Done/assets/assets/nested/info.txt", status: 200, body: "nested plugin asset\n" },
+		{ path: "/api/plugins/document-one/assets/assets/nested/info%2Etxt", status: 200, body: "nested plugin asset\n" },
+		{ path: "/api/plugins/document-one/assets/assets%2Fnested/info.txt", status: 400 },
+		{ path: "/api/chats/chat%2Dmissing", status: 404 },
+		{ path: "/api/chats/chat%2Fslash", status: 404 },
+		{ path: "/api/chats/chat%25percent", status: 404 },
+		{ path: "/api/chats/caf%C3%A9", status: 404 },
 	];
-	for (const reqPath of getPaths) {
-		await runParityRequest(h, {
-			label: `param-decoding GET ${reqPath}`,
-			request: { method: "GET", path: reqPath },
+	for (const item of getCases) {
+		const out = await runParityRequest(h, {
+			label: `param-decoding GET ${item.path}`,
+			expectedStatus: item.status,
+			request: { method: "GET", path: item.path },
 		});
+		if (item.body !== undefined) {
+			assert.equal(out.apiRes.text, item.body);
+		}
 	}
-	await runParityRequest(h, {
+	const putOut = await runParityRequest(h, {
 		label: "param-decoding PUT catch-all encoded segment",
+		expectedStatus: 400,
+		isWrite: true,
 		request: {
 			method: "PUT",
-			path: "/api/settings/prompts/teacher/caf%C3%A9%2Dmissing.md",
+			path: "/api/settings/prompts/teacher/99%2Dmissing%2Esegment.md",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ text: "x" }),
 		},
 	});
+	const putErr = (JSON.parse(putOut.apiRes.text) as { error?: string }).error;
+	assert.equal(putErr, '"teacher/99-missing.segment.md" is not a current source segment');
 }
 
 export async function caseRequestUrlAndHost(h: ParityHarness): Promise<void> {
@@ -186,7 +192,7 @@ export async function caseCancelOnDisconnect(h: ParityHarness): Promise<void> {
 	for (let i = 0; i < 50; i++) {
 		const nEv = connectWireStream(h.pair.next.port, { method: "GET", path: "/api/events" });
 		const aEv = connectWireStream(h.pair.api.port, { method: "GET", path: "/api/events" });
-		await new Promise((r) => setTimeout(r, 5));
+		await aEv.waitHeaders(2_000);
 		nEv.abort();
 		aEv.abort();
 		const [nSc, aSc] = await Promise.all([
@@ -195,6 +201,16 @@ export async function caseCancelOnDisconnect(h: ParityHarness): Promise<void> {
 		]);
 		nSc.abort();
 		aSc.abort();
+	}
+	assert.equal(h.pair.api.logs().includes("MaxListenersExceededWarning"), false, "API leaked event listeners");
+	assert.equal(h.pair.next.logs().includes("MaxListenersExceededWarning"), false, "Next leaked event listeners");
+	const { nextEv, apiEv } = await openEventsWithPulse(h.pair.next.port, h.pair.api.port);
+	try {
+		await pulseEventsBusOnBoth(h);
+		await Promise.all([nextEv.waitForText("sources-changed", 5_000), apiEv.waitForText("sources-changed", 5_000)]);
+	} finally {
+		nextEv.abort();
+		apiEv.abort();
 	}
 	await runParityRequest(h, {
 		label: "cancel-on-disconnect post-50x health check",
@@ -231,13 +247,16 @@ export async function caseGzip(h: ParityHarness): Promise<void> {
 		assert.equal(apiRes.headers["content-encoding"], undefined, `API unexpected content-encoding on ${reqPath}`);
 		compareResponseHeaders(h, nextRes.headers, apiRes.headers, { requestLabel: `gzip GET ${reqPath}` });
 	}
-	const nConn = connectWireStream(h.pair.next.port, { method: "GET", path: "/api/events", headers: { "Accept-Encoding": "gzip" } });
-	const aConn = connectWireStream(h.pair.api.port, { method: "GET", path: "/api/events", headers: { "Accept-Encoding": "gzip" } });
-	await new Promise((r) => setTimeout(r, 40));
-	await pulseEventsBusOnBoth(h);
-	const [nEv, aEv] = await Promise.all([nConn.waitHeaders(5_000), aConn.waitHeaders(5_000)]);
-	assert.equal(nEv.headers["content-encoding"], undefined);
-	assert.equal(aEv.headers["content-encoding"], undefined);
-	nEv.abort();
-	aEv.abort();
+	const { nextEv: nEv, apiEv: aEv } = await openEventsWithPulse(
+		h.pair.next.port,
+		h.pair.api.port,
+		{ "Accept-Encoding": "gzip" },
+	);
+	try {
+		assert.equal(nEv.headers["content-encoding"], undefined);
+		assert.equal(aEv.headers["content-encoding"], undefined);
+	} finally {
+		nEv.abort();
+		aEv.abort();
+	}
 }

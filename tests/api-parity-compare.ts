@@ -1,76 +1,45 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { RouteRecord } from "../src/api/types.ts";
 import { CUSTOM_AUTH_BINDING } from "../src/core/custom-provider-auth.ts";
-import { routes } from "../src/api/routes.ts";
 import { GOLDEN_DIR, type ParityPair } from "./api-parity-servers.ts";
 import type { ServerSide, StubServer } from "./api-parity-stubs.ts";
-import {
-	parseNdjsonStream,
-	parseSseStream,
-	sendWire,
-	type SseEvent,
-	type WireRequest,
-	type WireResponse,
-} from "./api-parity-wire.ts";
+import { parseNdjsonStream, parseSseStream, sendWire, type SseEvent, type WireRequest, type WireResponse } from "./api-parity-wire.ts";
 
 export const NEXT_APP_ROUTE_VARY = "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch";
 export const NEXT_PROXY_VARY = "Accept-Encoding";
+const NEXT_TRACE_CACHE_CONTROL = "private, no-cache, no-store, max-age=0, must-revalidate";
 
-export interface ApprovedDifferenceRule {
-	id: string;
-	summary: string;
-	specRef: string;
-}
+export interface RecordedDifferenceRule { id: string; summary: string; specRef: string; approved: boolean }
 
-export const APPROVED_RECORDED_DIFFERENCES: readonly ApprovedDifferenceRule[] = [
-	{
-		id: "next-app-route-vary",
-		summary: `Next 16.4.3 App Router adds vary: "${NEXT_APP_ROUTE_VARY}"; src/api omits it.`,
-		specRef: "SPEC.md §2.9",
-	},
-	{
-		id: "next-proxy-vary",
-		summary: `Next 16.4.3 proxy.ts (NextResponse) adds vary: "${NEXT_PROXY_VARY}" on proxy-generated 403 refusals; src/api omits it.`,
-		specRef: "SPEC.md §2.9",
-	},
-	{
-		id: "custom-provider-per-process-etag",
-		summary: "GET/POST/PATCH/DELETE /api/custom-provider computes HMAC ETag from a per-process 32-byte startup key.",
-		specRef: "src/server/custom-provider-http.ts:17",
-	},
-	{
-		id: "unknown-api-path-404",
-		summary: "Unmatched /api/* path post-gate: Next returns 404 HTML _not-found page (with x-powered-by: Next.js); src/api returns 404 empty body.",
-		specRef: "SPEC.md §2.1, §2.4 step 3, §2.9",
-	},
-	{
-		id: "trailing-slash-redirect-vs-gate-and-404",
-		summary: "Trailing-slash /api.../ paths: Next returns 308 Permanent Redirect BEFORE proxy.ts; src/api gates first (403) or returns 404 post-gate.",
-		specRef: "SPEC.md §2.4 steps 2-3, §2.9",
-	},
-	{
-		id: "trace-method-500-headers",
-		summary: "TRACE /api/... returns 500 Internal Server Error on both; Next sends text/plain + vary/cache-control/etag, src/api sends text/plain; charset=utf-8.",
-		specRef: "SPEC.md §2.9",
-	},
-	{
-		id: "events-header-flush-timing",
-		summary: "GET /api/events: src/api calls res.flushHeaders() immediately (<50ms); Next standalone buffers headers until first SSE frame or 25s ping.",
-		specRef: "src/api/server.ts:327, SPEC.md §2.7",
-	},
-	{
-		id: "sigterm-open-sse-exit",
-		summary: "SIGTERM with /api/events open: src/api cancels stream readers and exits <3s; Next standalone server.close() waits past 3s on open SSE.",
-		specRef: "SPEC.md §2.8, §2.10 item 12",
-	},
+export const RECORDED_DIFFERENCES: readonly RecordedDifferenceRule[] = [
+	{ id: "next-app-route-vary", summary: `Next 16.4.3 App Router adds vary: "${NEXT_APP_ROUTE_VARY}"; src/api omits it.`, specRef: "SPEC.md §2.9", approved: false },
+	{ id: "next-proxy-vary", summary: `Next 16.4.3 proxy.ts adds vary: "${NEXT_PROXY_VARY}" on proxy-generated 403 refusals; src/api omits it.`, specRef: "SPEC.md §2.9", approved: false },
+	{ id: "custom-provider-per-process-etag", summary: "GET/POST/PATCH/DELETE /api/custom-provider computes HMAC ETag from a per-process 32-byte startup key.", specRef: "src/server/custom-provider-http.ts:17", approved: false },
+	{ id: "unknown-api-path-404", summary: "Unmatched /api/* path post-gate: Next returns 404 HTML _not-found page; src/api returns 404 empty body.", specRef: "SPEC.md §2.1, §2.4 step 3, §2.9", approved: false },
+	{ id: "trailing-slash-redirect-vs-gate-and-404", summary: "Trailing-slash /api.../ paths: Next returns 308 Permanent Redirect BEFORE proxy.ts; src/api gates first (403) or 404 post-gate.", specRef: "SPEC.md §2.4 steps 2-3, §2.9", approved: false },
+	{ id: "trace-method-500-headers", summary: "TRACE /api/... returns 500 Internal Server Error on both; Next sends text/plain + vary/cache-control/etag, src/api sends text/plain; charset=utf-8.", specRef: "SPEC.md §2.9", approved: false },
+	{ id: "events-header-flush-timing", summary: "GET /api/events: src/api calls res.flushHeaders() immediately (<50ms); Next standalone buffers headers until first SSE frame or 25s ping.", specRef: "src/api/server.ts:327, SPEC.md §2.7", approved: false },
+	{ id: "sigterm-open-sse-exit", summary: "SIGTERM with /api/events open: src/api cancels stream readers and exits <3s; Next standalone server.close() waits past 3s on open SSE.", specRef: "SPEC.md §2.8, §2.10 item 12", approved: false },
 ];
 
-export interface ObservedDifference {
-	ruleId: string;
-	request: string;
-	nextSummary: string;
-	apiSummary: string;
+export interface ObservedDifference { ruleId: string; request: string; nextSummary: string; apiSummary: string }
+
+export function auditRecordedDifferences(
+	observed: readonly ObservedDifference[],
+	rules: readonly RecordedDifferenceRule[] = RECORDED_DIFFERENCES,
+): { unapprovedRuleIds: string[] } {
+	const byId = new Map(rules.map((r) => [r.id, r]));
+	const unapproved = new Set<string>();
+	for (const obs of observed) {
+		const rule = byId.get(obs.ruleId);
+		if (!rule) {
+			throw new Error(`Unrecorded parity difference "${obs.ruleId}" on ${obs.request}: next=${obs.nextSummary} api=${obs.apiSummary}`);
+		}
+		if (!rule.approved) unapproved.add(rule.id);
+	}
+	return { unapprovedRuleIds: [...unapproved].sort() };
 }
 
 const IGNORED_HEADERS = new Set(["date", "connection", "keep-alive", "transfer-encoding", "content-length"]);
@@ -121,13 +90,16 @@ function walkGoldenDir(dir: string, out: GoldenCorpus): void {
 	}
 }
 
-function loadGoldenCorpus(): GoldenCorpus {
-	const out: GoldenCorpus = { tokens: new Set(), isos: new Set(), numbers: new Set() };
-	walkGoldenDir(GOLDEN_DIR, out);
-	return out;
-}
+let cachedGoldenCorpus: GoldenCorpus | null = null;
 
-const GOLDEN_CORPUS = loadGoldenCorpus();
+function getGoldenCorpus(): GoldenCorpus {
+	if (!cachedGoldenCorpus) {
+		const out: GoldenCorpus = { tokens: new Set(), isos: new Set(), numbers: new Set() };
+		walkGoldenDir(GOLDEN_DIR, out);
+		cachedGoldenCorpus = out;
+	}
+	return cachedGoldenCorpus;
+}
 
 function classifyTokenPrefix(raw: string): string {
 	if (raw.startsWith("exchange_")) return "EXCHANGE";
@@ -163,6 +135,7 @@ export class IdMapper {
 	}
 
 	normalizeString(side: ServerSide, text: string, port: number, dataDir: string): string {
+		const corpus = getGoldenCorpus();
 		let out = text.split(dataDir).join("<DATA_DIR>");
 		out = out.split(`127.0.0.1:${port}`).join("127.0.0.1:<PORT>");
 		out = out.split(`localhost:${port}`).join("localhost:<PORT>");
@@ -170,7 +143,7 @@ export class IdMapper {
 			out = out.split(`127.0.0.1:${this.stubPort}/${side}/v1`).join(`127.0.0.1:${this.stubPort}/v1`);
 		}
 		return out.replace(DYN_TOKEN_RE, (matched) => {
-			if (GOLDEN_CORPUS.tokens.has(matched)) return matched;
+			if (corpus.tokens.has(matched)) return matched;
 			return this.mapToken(side, classifyTokenPrefix(matched), matched);
 		});
 	}
@@ -180,8 +153,10 @@ export class CoverageTracker {
 	private readonly expected = new Set<string>();
 	private readonly patterns = new Set<string>();
 	private readonly seen = new Set<string>();
+	private readonly exportedCount: number;
 
-	constructor() {
+	constructor(routes: readonly RouteRecord[]) {
+		this.exportedCount = routes.length;
 		for (const rec of routes) {
 			this.patterns.add(rec.pattern);
 			this.expected.add(`${rec.pattern} ${rec.method}`);
@@ -203,12 +178,12 @@ export class CoverageTracker {
 
 	assertComplete(): { patterns: number; exportedMethods: number; totalCheckedPairs: number } {
 		assert.equal(this.patterns.size, 50, "Expected exactly 50 route patterns");
-		assert.equal(routes.length, 73, "Expected exactly 73 exported route methods");
+		assert.equal(this.exportedCount, 73, "Expected exactly 73 exported route methods");
 		const missing = [...this.expected].filter((entry) => !this.seen.has(entry)).sort();
 		const extra = [...this.seen].filter((entry) => !this.expected.has(entry)).sort();
 		assert.deepEqual(missing, [], `Missing route parity coverage: ${missing.join(", ")}`);
 		assert.deepEqual(extra, [], `Unexpected route parity coverage entries: ${extra.join(", ")}`);
-		return { patterns: this.patterns.size, exportedMethods: routes.length, totalCheckedPairs: this.seen.size };
+		return { patterns: this.patterns.size, exportedMethods: this.exportedCount, totalCheckedPairs: this.seen.size };
 	}
 }
 
@@ -221,14 +196,18 @@ export interface ParityHarness {
 	recordObservation: (diff: ObservedDifference) => void;
 }
 
-export function createParityHarness(pair: ParityPair, stub: StubServer): ParityHarness {
+export function createParityHarness(
+	pair: ParityPair,
+	stub: StubServer,
+	routes: readonly RouteRecord[],
+): ParityHarness {
 	const observed: ObservedDifference[] = [];
 	const seenKeys = new Set<string>();
 	return {
 		pair,
 		stub,
 		ids: new IdMapper(stub.port),
-		coverage: new CoverageTracker(),
+		coverage: new CoverageTracker(routes),
 		observed,
 		recordObservation: (diff) => {
 			const key = `${diff.ruleId}|${diff.request}`;
@@ -245,6 +224,7 @@ export function normalizeJsonValue(
 	value: unknown,
 	keyHint = "",
 ): unknown {
+	const corpus = getGoldenCorpus();
 	const srv = side === "next" ? harness.pair.next : harness.pair.api;
 	if (typeof value === "string") {
 		if (keyHint === "credentialBindingId" && /^[0-9a-f]{32}$/.test(value)) {
@@ -255,14 +235,12 @@ export function normalizeJsonValue(
 			if (typeof parsed.id === "string") parsed.id = harness.ids.mapToken(side, "CRED_BINDING", parsed.id);
 			return normalizeJsonValue(harness, side, parsed, "");
 		}
-		if (ISO_RE.test(value) && !GOLDEN_CORPUS.isos.has(value)) {
-			return "<ISO_TS>";
-		}
+		if (ISO_RE.test(value) && !corpus.isos.has(value)) return "<ISO_TS>";
 		return harness.ids.normalizeString(side, value, srv.port, srv.dataDir);
 	}
 	if (typeof value === "number") {
-		if (EPOCH_KEYS.has(keyHint) && !GOLDEN_CORPUS.numbers.has(value)) return "<EPOCH_MS>";
-		if (DURATION_KEYS.has(keyHint) && !GOLDEN_CORPUS.numbers.has(value)) return "<DURATION_MS>";
+		if (EPOCH_KEYS.has(keyHint) && !corpus.numbers.has(value)) return "<EPOCH_MS>";
+		if (DURATION_KEYS.has(keyHint) && !corpus.numbers.has(value)) return "<DURATION_MS>";
 		return value;
 	}
 	if (Array.isArray(value)) {
@@ -307,31 +285,36 @@ function sanitizeHeadersForSide(
 	return out;
 }
 
-function stripApprovedHeaderDiffs(
+function stripRecordedHeaderDiffs(
 	harness: ParityHarness,
 	normNext: Record<string, string>,
 	normApi: Record<string, string>,
 	opts: HeaderCompareOptions,
 ): void {
+	if (opts.traceMethod500) {
+		assert.equal(normNext["content-type"], "text/plain", `${opts.requestLabel}: unexpected Next TRACE content-type`);
+		assert.equal(normNext.vary, NEXT_PROXY_VARY, `${opts.requestLabel}: unexpected Next TRACE vary`);
+		assert.equal(normNext["cache-control"], NEXT_TRACE_CACHE_CONTROL, `${opts.requestLabel}: unexpected Next TRACE cache-control`);
+		assert.match(normNext.etag ?? "", /^"(?:W\/)?[0-9a-z-]+"$/i, `${opts.requestLabel}: unexpected Next TRACE etag`);
+		assert.equal(normApi["content-type"], "text/plain; charset=utf-8", `${opts.requestLabel}: unexpected API TRACE content-type`);
+		harness.recordObservation({
+			ruleId: "trace-method-500-headers",
+			request: opts.requestLabel,
+			nextSummary: `content-type: ${normNext["content-type"]}, vary: ${normNext.vary}, cache-control: ${normNext["cache-control"]}, etag: ${normNext.etag}`,
+			apiSummary: `content-type: ${normApi["content-type"]}`,
+		});
+		delete normNext["cache-control"];
+		delete normNext.etag;
+		delete normNext.vary;
+		normNext["content-type"] = "text/plain; charset=utf-8";
+		return;
+	}
 	if (normNext.vary === NEXT_APP_ROUTE_VARY && normApi.vary === undefined) {
 		harness.recordObservation({ ruleId: "next-app-route-vary", request: opts.requestLabel, nextSummary: `vary: ${NEXT_APP_ROUTE_VARY}`, apiSummary: "(absent)" });
 		delete normNext.vary;
 	} else if (normNext.vary === NEXT_PROXY_VARY && normApi.vary === undefined) {
 		harness.recordObservation({ ruleId: "next-proxy-vary", request: opts.requestLabel, nextSummary: `vary: ${NEXT_PROXY_VARY}`, apiSummary: "(absent)" });
 		delete normNext.vary;
-	}
-	if (!opts.traceMethod500) return;
-	harness.recordObservation({
-		ruleId: "trace-method-500-headers",
-		request: opts.requestLabel,
-		nextSummary: `content-type: ${normNext["content-type"] ?? ""}, vary: ${normNext.vary ?? "(none)"}, cache-control: ${normNext["cache-control"] ?? "(none)"}, etag: ${normNext.etag ?? "(none)"}`,
-		apiSummary: `content-type: ${normApi["content-type"] ?? ""}`,
-	});
-	delete normNext["cache-control"];
-	delete normNext.etag;
-	delete normNext.vary;
-	if (normNext["content-type"] === "text/plain" && normApi["content-type"] === "text/plain; charset=utf-8") {
-		normNext["content-type"] = "text/plain; charset=utf-8";
 	}
 }
 
@@ -351,7 +334,7 @@ export function compareResponseHeaders(
 	}
 	const normNext = sanitizeHeadersForSide(harness, "next", nextHeaders, opts);
 	const normApi = sanitizeHeadersForSide(harness, "api", apiHeaders, opts);
-	stripApprovedHeaderDiffs(harness, normNext, normApi, opts);
+	stripRecordedHeaderDiffs(harness, normNext, normApi, opts);
 	assert.deepEqual(normApi, normNext, `Header mismatch for ${opts.requestLabel}`);
 }
 

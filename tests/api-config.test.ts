@@ -1,24 +1,33 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
+import type { Readable } from "node:stream";
+import { PassThrough } from "node:stream";
 import test, { after } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { readApiConfig } from "../src/api/config.ts";
-import { isMainModule, startApiServer } from "../src/api/main.ts";
+import { createLogger } from "../src/api/log.ts";
+import {
+	isMainModule,
+	reportGateRefusal,
+	reportRouteError,
+	reportServerError,
+	reportServerWarn,
+	safeRequestPath,
+	startApiServer,
+} from "../src/api/main.ts";
+import {
+	WORKTREE_ROOT,
+	buildScratchChildEnv,
+	createScratchDir,
+	installScratchProcessEnv,
+} from "./api-test-helpers.ts";
 
-const WORKTREE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MAIN_ENTRY = path.join(WORKTREE_ROOT, "src", "api", "main.ts");
-const TSX_BIN = path.join(WORKTREE_ROOT, "node_modules", ".bin", "tsx");
-
-const SCRATCH_ROOT = fs.existsSync("/usr/lib/persist/peer")
-	? "/usr/lib/persist/peer/scratch"
-	: path.join(WORKTREE_ROOT, ".fresh-data");
-fs.mkdirSync(SCRATCH_ROOT, { recursive: true, mode: 0o700 });
-const SCRATCH_DIR = fs.mkdtempSync(path.join(SCRATCH_ROOT, "api-config-"));
-fs.chmodSync(SCRATCH_DIR, 0o700);
+const SCRATCH_DIR = createScratchDir("api-config-");
 
 after(() => {
 	fs.rmSync(SCRATCH_DIR, { recursive: true, force: true });
@@ -30,38 +39,165 @@ interface SpawnOutcome {
 	stderr: string;
 }
 
-function runMainWithoutPort(dataDir: string, authFile: string): Promise<SpawnOutcome> {
-	const childEnv: NodeJS.ProcessEnv = {
-		...process.env,
-		TMPDIR: SCRATCH_DIR,
-		LH_DATA_DIR: dataDir,
-		LH_AUTH_FILE: authFile,
-	};
-	delete childEnv.PORT;
+interface StderrWatcher {
+	text: () => string;
+	waitFor: (needle: string, timeoutMs?: number) => Promise<string>;
+}
 
-	return new Promise<SpawnOutcome>((resolve, reject) => {
-		const child = spawn(TSX_BIN, [MAIN_ENTRY], {
-			cwd: WORKTREE_ROOT,
-			env: childEnv,
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-		let stderr = "";
-		child.stderr.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString("utf8");
-		});
-		const killer = setTimeout(() => {
-			if (child.pid !== undefined) process.kill(child.pid, "SIGKILL");
-		}, 8000);
-		killer.unref();
-		child.on("error", (err) => {
-			clearTimeout(killer);
-			reject(err);
-		});
-		child.on("close", (code, signal) => {
-			clearTimeout(killer);
-			resolve({ code, signal, stderr });
+function waitBufferNeedle(
+	readBuf: () => string,
+	waiters: Set<() => void>,
+	needle: string,
+	timeoutMs: number,
+): Promise<string> {
+	if (readBuf().includes(needle)) return Promise.resolve(readBuf());
+	return new Promise<string>((resolve, reject) => {
+		const check = () => {
+			if (!readBuf().includes(needle)) return;
+			clearTimeout(timer);
+			waiters.delete(check);
+			resolve(readBuf());
+		};
+		const timer = setTimeout(() => {
+			waiters.delete(check);
+			reject(new Error(`Timed out waiting for stderr "${needle}". Got:\n${readBuf()}`));
+		}, timeoutMs);
+		waiters.add(check);
+	});
+}
+
+function createStderrWatcher(stream: Readable): StderrWatcher {
+	let buf = "";
+	const waiters = new Set<() => void>();
+	stream.on("data", (chunk: Buffer) => {
+		buf += chunk.toString("utf8");
+		for (const notify of waiters) notify();
+	});
+	return {
+		text: () => buf,
+		waitFor: (needle: string, timeoutMs = 10_000) => waitBufferNeedle(() => buf, waiters, needle, timeoutMs),
+	};
+}
+
+function killPidQuietly(pid: number | undefined): void {
+	if (pid === undefined) return;
+	try { process.kill(pid, "SIGKILL"); } catch { /* exited */ }
+}
+
+function waitChildClose(
+	child: ChildProcessByStdio<null, Readable, Readable>,
+	timeoutMs = 5_000,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+	if (child.exitCode !== null || child.signalCode !== null) {
+		return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+	}
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			killPidQuietly(child.pid);
+			reject(new Error(`Child ${child.pid ?? "?"} did not exit within ${timeoutMs}ms`));
+		}, timeoutMs);
+		child.once("close", (code, signal) => {
+			clearTimeout(timer);
+			resolve({ code, signal });
 		});
 	});
+}
+
+function spawnMainProcess(env: NodeJS.ProcessEnv): ChildProcessByStdio<null, Readable, Readable> {
+	return spawn(process.execPath, ["--import", "tsx", MAIN_ENTRY], {
+		cwd: WORKTREE_ROOT,
+		env,
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+}
+
+async function runMainWithoutPort(homeDir: string, dataDir: string, authFile: string): Promise<SpawnOutcome> {
+	const childEnv = buildScratchChildEnv({ homeDir, dataDir, authFile });
+	delete childEnv.PORT;
+	const child = spawnMainProcess(childEnv);
+	const watcher = createStderrWatcher(child.stderr);
+	const { code, signal } = await waitChildClose(child, 8_000);
+	return { code, signal, stderr: watcher.text() };
+}
+
+function closeProbe(probe: net.Server): Promise<void> {
+	return new Promise<void>((resolve, reject) => {
+		probe.close((err) => (err ? reject(err) : resolve()));
+	});
+}
+
+async function findSparePort(): Promise<number> {
+	const probe = net.createServer();
+	await new Promise<void>((resolve, reject) => {
+		probe.once("error", reject);
+		probe.listen(0, "127.0.0.1", () => resolve());
+	});
+	const addr = probe.address();
+	const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+	await closeProbe(probe);
+	return port;
+}
+
+function collectHttpJsonResponse(
+	res: http.IncomingMessage,
+	resolve: (v: { status: number; body: string }) => void,
+): void {
+	const chunks: Buffer[] = [];
+	res.on("data", (chunk: Buffer) => chunks.push(chunk));
+	res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+}
+
+function httpJsonRequest(
+	port: number,
+	method: string,
+	urlPath: string,
+	body?: unknown,
+): Promise<{ status: number; body: string }> {
+	const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), "utf8");
+	const headers = payload
+		? { "content-type": "application/json", "content-length": String(payload.length) }
+		: undefined;
+	const opts = { hostname: "127.0.0.1", port, method, path: urlPath, headers };
+	return new Promise((resolve, reject) => {
+		const req = http.request(opts, (res) => collectHttpJsonResponse(res, resolve));
+		req.on("error", reject);
+		if (payload) req.write(payload);
+		req.end();
+	});
+}
+
+function seedCrashProbePlugin(dataDir: string): void {
+	const pluginsRoot = path.join(dataDir, "plugins");
+	const distDir = path.join(pluginsRoot, "crash-probe", "dist");
+	fs.mkdirSync(distDir, { recursive: true, mode: 0o700 });
+	const manifest = {
+		apiVersion: 1,
+		id: "crash-probe",
+		name: "Crash Probe",
+		version: "1.0.0",
+		minAppVersion: "0.1.0",
+		backend: "backend.cjs",
+	};
+	const backendSource = [
+		'"use strict";',
+		"exports.activate = function activate(ctx) {",
+		'\tctx.handle("reject", () => {',
+		'\t\tvoid Promise.reject(new Error("boom-unhandled-rejection"));',
+		"\t\treturn { triggered: \"reject\" };",
+		"\t});",
+		'\tctx.handle("throw-async", () => {',
+		"\t\tsetImmediate(() => {",
+		'\t\t\tthrow new Error("boom-uncaught-exception");',
+		"\t\t});",
+		"\t\treturn { triggered: \"throw-async\" };",
+		"\t});",
+		"};",
+		"",
+	].join("\n");
+	fs.writeFileSync(path.join(distDir, "manifest.json"), JSON.stringify(manifest), { mode: 0o600 });
+	fs.writeFileSync(path.join(distDir, "backend.cjs"), backendSource, { mode: 0o600 });
+	const state = { version: 1, enabled: { "crash-probe": true } };
+	fs.writeFileSync(path.join(dataDir, "plugins-state.json"), JSON.stringify(state), { mode: 0o600 });
 }
 
 test("readApiConfig rejects missing and invalid PORT values", () => {
@@ -163,88 +299,110 @@ test("startApiServer rejects missing PORT before dynamic imports and isMainModul
 	assert.equal(isMainModule(mainUrl, undefined), false);
 });
 
+test("typed main.ts reporters format structured events and strip URL query strings", async () => {
+	const sink = new PassThrough();
+	let output = "";
+	sink.setEncoding("utf8");
+	sink.on("data", (chunk: string) => {
+		output += chunk;
+	});
+	const logger = createLogger({ level: "debug", stream: sink });
+
+	reportRouteError(logger)(
+		new Error("route-boom"),
+		new Request("http://127.0.0.1:4100/api/keys?secret=top-secret-query", { method: "POST" }),
+	);
+	reportServerError(logger, "[api] Transport error")(new Error("socket-boom"));
+	reportServerWarn(logger)("Body capped warning");
+	reportGateRefusal(logger)("DELETE", "/api/chats/c1");
+	assert.equal(safeRequestPath("http://127.0.0.1/api/search?q=private"), "/api/search");
+	assert.equal(safeRequestPath(":::bad-url?token=leak"), "/:::bad-url");
+	assert.equal(safeRequestPath("http://[invalid?token=leak"), "http://[invalid");
+	await logger.flush();
+
+	assert.equal(output.includes("top-secret-query"), false);
+	assert.equal(output.includes("leak"), false);
+	const records = output.trim().split("\n").map((line) => JSON.parse(line) as {
+		message?: string;
+		fields?: Record<string, unknown>;
+	});
+	assert.equal(records.length, 4);
+	assert.equal(records[0]?.message, "[api] Unhandled route error");
+	assert.equal(records[0]?.fields?.path, "/api/keys");
+	assert.equal(records[0]?.fields?.url, undefined);
+	assert.equal(records[1]?.message, "[api] Transport error");
+	assert.equal(records[2]?.message, "Body capped warning");
+	assert.equal(records[3]?.message, "[api] Gate refused request");
+	assert.equal(records[3]?.fields?.path, "/api/chats/c1");
+});
+
+test("startApiServer logs plugin initialization failure and continues serving HTTP", async (t) => {
+	const scratch = installScratchProcessEnv("api-config-plugin-fail-");
+	t.after(() => scratch.restore());
+	fs.mkdirSync(path.join(scratch.dataDir, "plugins"), { recursive: true, mode: 0o700 });
+	fs.writeFileSync(path.join(scratch.dataDir, "plugins-state.json"), "{corrupt-json", { mode: 0o600 });
+
+	const sink = new PassThrough();
+	let logs = "";
+	sink.setEncoding("utf8");
+	sink.on("data", (chunk: string) => {
+		logs += chunk;
+	});
+	const logger = createLogger({ level: "info", stream: sink });
+	const port = await findSparePort();
+	const running = await startApiServer(
+		{ PORT: String(port), HOSTNAME: "127.0.0.1" },
+		{ logger },
+	);
+	try {
+		const res = await httpJsonRequest(running.port, "GET", "/api/settings");
+		assert.equal(res.status, 200);
+	} finally {
+		await running.close();
+	}
+	assert.match(logs, /\[plugins\] Initialization failed; plugin management will report the error:/);
+	assert.match(logs, /Engine API server listening/);
+});
+
 test("main.ts CLI exits non-zero immediately without PORT and creates no auth.json", async () => {
+	const homeDir = path.join(SCRATCH_DIR, "cli-no-port-home");
 	const dataDir = path.join(SCRATCH_DIR, "cli-data");
 	const authFile = path.join(SCRATCH_DIR, "auth.json");
 
-	const outcome = await runMainWithoutPort(dataDir, authFile);
-	assert.notEqual(outcome.code, 0);
+	const outcome = await runMainWithoutPort(homeDir, dataDir, authFile);
 	assert.equal(outcome.code, 1);
 	assert.match(outcome.stderr, /PORT is required and must be an integer between 1 and 65535/);
 	assert.equal(fs.existsSync(authFile), false, "auth.json must not be created when PORT is missing");
 	assert.equal(fs.existsSync(dataDir), false, "LH_DATA_DIR must not be created when PORT is missing");
 });
 
-function closeProbe(probe: net.Server): Promise<void> {
-	return new Promise<void>((resolve, reject) => {
-		probe.close((err) => (err ? reject(err) : resolve()));
-	});
-}
-
-async function findSparePort(): Promise<number> {
-	const probe = net.createServer();
-	await new Promise<void>((resolve, reject) => {
-		probe.once("error", reject);
-		probe.listen(0, "127.0.0.1", () => resolve());
-	});
-	const addr = probe.address();
-	const port = typeof addr === "object" && addr !== null ? addr.port : 0;
-	await closeProbe(probe);
-	return port;
-}
-
-function probeHttpOnce(port: number): Promise<number | null> {
-	return new Promise<number | null>((resolve) => {
-		const req = http.get({ hostname: "127.0.0.1", port, path: "/" }, (res) => {
-			res.resume();
-			resolve(res.statusCode ?? 0);
-		});
-		req.on("error", () => resolve(null));
-	});
-}
-
-async function waitUntilListening(port: number, maxAttempts = 80): Promise<number> {
-	for (let i = 0; i < maxAttempts; i += 1) {
-		const status = await probeHttpOnce(port);
-		if (status !== null) return status;
-		await new Promise((resolve) => setTimeout(resolve, 100));
-	}
-	throw new Error(`API server never answered on 127.0.0.1:${port}`);
-}
-
-test("main.ts CLI starts on explicit PORT and exits 0 within 3s on SIGTERM", async () => {
+test("main.ts CLI starts on explicit PORT and exits 0 cleanly within 3s on SIGTERM", async () => {
 	const port = await findSparePort();
 	assert.notEqual(port, 3000);
 	assert.notEqual(port, 3901);
+	const homeDir = path.join(SCRATCH_DIR, "sigterm-home");
 	const dataDir = path.join(SCRATCH_DIR, "sigterm-data");
 	const authFile = path.join(SCRATCH_DIR, "sigterm-auth.json");
 	fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 
-	const child = spawn(TSX_BIN, [MAIN_ENTRY], {
-		cwd: WORKTREE_ROOT,
-		env: {
-			...process.env,
-			PORT: String(port),
-			HOSTNAME: "127.0.0.1",
-			LH_LOG_LEVEL: "info",
-			TMPDIR: SCRATCH_DIR,
-			LH_DATA_DIR: dataDir,
-			LH_AUTH_FILE: authFile,
-		},
-		stdio: ["ignore", "pipe", "pipe"],
-	});
-
+	const child = spawnMainProcess(buildScratchChildEnv({
+		homeDir,
+		dataDir,
+		authFile,
+		extra: { PORT: String(port), HOSTNAME: "127.0.0.1", LH_LOG_LEVEL: "info" },
+	}));
+	const stderr = createStderrWatcher(child.stderr);
 	try {
-		const status = await waitUntilListening(port);
-		assert.equal(status > 0, true);
+		await stderr.waitFor("Engine API server listening");
+		const probe = await httpJsonRequest(port, "GET", "/api/settings");
+		assert.equal(probe.status, 200);
 		const sigtermSentAt = Date.now();
 		if (child.pid !== undefined) process.kill(child.pid, "SIGTERM");
-		const exitCode = await new Promise<number | null>((resolve) => {
-			child.once("close", (code) => resolve(code));
-		});
+		const { code } = await waitChildClose(child, 5_000);
 		const elapsedMs = Date.now() - sigtermSentAt;
-		assert.equal(exitCode, 0);
+		assert.equal(code, 0);
 		assert.equal(elapsedMs < 3000, true, `expected SIGTERM exit < 3000ms, took ${elapsedMs}ms`);
+		assert.equal(stderr.text().includes("Forced"), false, `unexpected forced close log:\n${stderr.text()}`);
 	} finally {
 		if (child.exitCode === null && child.pid !== undefined) {
 			try { process.kill(child.pid, "SIGKILL"); } catch { /* already exited */ }
@@ -252,3 +410,48 @@ test("main.ts CLI starts on explicit PORT and exits 0 within 3s on SIGTERM", asy
 	}
 });
 
+test("main.ts CLI logs uncaughtException and unhandledRejection and continues serving", async () => {
+	const port = await findSparePort();
+	const homeDir = path.join(SCRATCH_DIR, "crash-home");
+	const dataDir = path.join(SCRATCH_DIR, "crash-data");
+	const authFile = path.join(SCRATCH_DIR, "crash-auth.json");
+	seedCrashProbePlugin(dataDir);
+
+	const child = spawnMainProcess(buildScratchChildEnv({
+		homeDir,
+		dataDir,
+		authFile,
+		extra: { PORT: String(port), HOSTNAME: "127.0.0.1", LH_LOG_LEVEL: "info" },
+	}));
+	const stderr = createStderrWatcher(child.stderr);
+	try {
+		await stderr.waitFor("Engine API server listening");
+		const rejRes = await httpJsonRequest(port, "POST", "/api/plugins/crash-probe/call", {
+			operation: "reject",
+			input: {},
+		});
+		assert.equal(rejRes.status, 200);
+		await stderr.waitFor("[api] Unhandled rejection");
+		await stderr.waitFor("boom-unhandled-rejection");
+
+		const excRes = await httpJsonRequest(port, "POST", "/api/plugins/crash-probe/call", {
+			operation: "throw-async",
+			input: {},
+		});
+		assert.equal(excRes.status, 200);
+		await stderr.waitFor("[api] Uncaught exception");
+		await stderr.waitFor("boom-uncaught-exception");
+
+		assert.equal(child.exitCode, null, "server must stay alive after uncaught process errors");
+		const health = await httpJsonRequest(port, "GET", "/api/settings");
+		assert.equal(health.status, 200);
+
+		if (child.pid !== undefined) process.kill(child.pid, "SIGTERM");
+		const { code } = await waitChildClose(child, 5_000);
+		assert.equal(code, 0);
+	} finally {
+		if (child.exitCode === null && child.pid !== undefined) {
+			try { process.kill(child.pid, "SIGKILL"); } catch { /* already exited */ }
+		}
+	}
+});

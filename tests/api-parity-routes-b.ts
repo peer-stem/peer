@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { tinyPdf } from "./helpers/tiny-pdf.ts";
-import { WORKTREE_ROOT } from "./api-parity-servers.ts";
 import type { ServerSide } from "./api-parity-stubs.ts";
-import { connectWireStream, parseNdjsonStream, parseSseStream, sendWire } from "./api-parity-wire.ts";
+import { connectWireStream, parseNdjsonStream, parseSseStream, sendWire, type LiveStreamHandle } from "./api-parity-wire.ts";
 import {
 	assertDataDirsEqual,
 	compareResponseHeaders,
@@ -13,7 +12,12 @@ import {
 	runParityRequest,
 	type ParityHarness,
 } from "./api-parity-compare.ts";
-import { encodeMultipartRequest, GOLDEN_NODE_DELETE, GOLDEN_TEACH_CHAT } from "./api-parity-routes-a.ts";
+import {
+	GOLDEN_NODE_DELETE,
+	GOLDEN_TEACH_CHAT,
+	WORKTREE_ROOT,
+	encodeMultipartRequest,
+} from "./api-test-helpers.ts";
 
 const GOLDEN_JOB_ID = "job_murepie2_9d791321";
 const GOLDEN_DEMO_STEER_ID = "steer_job_mv28454n_25dc3185";
@@ -103,6 +107,7 @@ async function runAbortVariants(h: ParityHarness): Promise<void> {
 		await runParityRequest(h, {
 			label: `row 1 POST /api/activity/abort (${item.label})`,
 			pattern: "/api/activity/abort",
+			isWrite: true,
 			expectedStatus: item.status,
 			request: req,
 		});
@@ -119,24 +124,14 @@ async function runGraphReadAndSettingsSuite(h: ParityHarness): Promise<void> {
 		pattern: "/api/graph/render-settings",
 		isWrite: true,
 		expectedStatus: 200,
-		request: {
-			method: "PUT",
-			path: "/api/graph/render-settings",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ nodeSize: 1.25, labelSize: 1.05 }),
-		},
+		request: { method: "PUT", path: "/api/graph/render-settings", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nodeSize: 1.25, labelSize: 1.05 }) },
 	});
 	await runParityRequest(h, {
 		label: "row 24 PUT /api/graph/positions",
 		pattern: "/api/graph/positions",
 		isWrite: true,
 		expectedStatus: 200,
-		request: {
-			method: "PUT",
-			path: "/api/graph/positions",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ [GOLDEN_KEEP_NODE_ID]: { x: 42.5, y: -17.25 } }),
-		},
+		request: { method: "PUT", path: "/api/graph/positions", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ [GOLDEN_KEEP_NODE_ID]: { x: 42.5, y: -17.25 } }) },
 	});
 }
 
@@ -147,12 +142,7 @@ async function runGraphSourcesAndNodeDeleteSuite(h: ParityHarness): Promise<void
 		pattern: "/api/graph/sources",
 		isWrite: true,
 		expectedStatus: 200,
-		request: {
-			method: "POST",
-			path: "/api/graph/sources",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ action: "create-folder", name: "Parity Folder", parentId: null }),
-		},
+		request: { method: "POST", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "create-folder", name: "Parity Folder", parentId: null }) },
 	});
 	const folderIds: Record<ServerSide, string> = {
 		next: (JSON.parse(created.nextRes.text) as { createdFolderId: string }).createdFolderId,
@@ -162,12 +152,7 @@ async function runGraphSourcesAndNodeDeleteSuite(h: ParityHarness): Promise<void
 		label: "row 27 POST /api/graph/sources (rename-folder)",
 		isWrite: true,
 		expectedStatus: 200,
-		request: (side) => ({
-			method: "POST",
-			path: "/api/graph/sources",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ action: "rename-folder", id: folderIds[side], name: "Parity Folder Renamed" }),
-		}),
+		request: (side) => ({ method: "POST", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "rename-folder", id: folderIds[side], name: "Parity Folder Renamed" }) }),
 	});
 	await runDeleteFolderAndNode(h, folderIds);
 }
@@ -178,12 +163,7 @@ async function runDeleteFolderAndNode(h: ParityHarness, folderIds: Record<Server
 		pattern: "/api/graph/sources",
 		isWrite: true,
 		expectedStatus: 200,
-		request: (side) => ({
-			method: "DELETE",
-			path: "/api/graph/sources",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ sourceIds: [], folderIds: [folderIds[side]], deleteSessions: false }),
-		}),
+		request: (side) => ({ method: "DELETE", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sourceIds: [], folderIds: [folderIds[side]], deleteSessions: false }) }),
 	});
 	await runParityRequest(h, {
 		label: `row 23 DELETE /api/graph/nodes/${GOLDEN_NODE_DELETE}`,
@@ -366,6 +346,7 @@ async function runDismissAndSteerChecks(h: ParityHarness, teachIds: Record<Serve
 	await runParityRequest(h, {
 		label: "row 5 POST /api/chats/[id]/dismiss (no active problem)",
 		pattern: "/api/chats/[id]/dismiss",
+		isWrite: true,
 		expectedStatus: 400,
 		request: (side) => ({
 			method: "POST",
@@ -377,6 +358,7 @@ async function runDismissAndSteerChecks(h: ParityHarness, teachIds: Record<Serve
 	await runParityRequest(h, {
 		label: "row 13 POST /api/chats/[id]/steer (settled)",
 		pattern: "/api/chats/[id]/steer",
+		isWrite: true,
 		expectedStatus: 409,
 		request: (side) => ({
 			method: "POST",
@@ -448,29 +430,53 @@ async function runSideChatThreadSubroutes(h: ParityHarness, threadId: string): P
 	await runParityRequest(h, {
 		label: "row 12 POST /api/chats/[id]/side-chats/[threadId]/stop",
 		pattern: "/api/chats/[id]/side-chats/[threadId]/stop",
+		isWrite: true,
 		expectedStatus: 409,
 		request: { method: "POST", path: `${threadUrl}/stop` },
 	});
 }
 
-export async function pulseEventsBusOnBoth(h: ParityHarness): Promise<void> {
+export async function pulseEventsBusPorts(nextPort: number, apiPort: number): Promise<void> {
 	const body = JSON.stringify({ sourceIds: ["src_event_pulse_noop"], folderIds: [], deleteSessions: false });
 	await Promise.all([
-		sendWire(h.pair.next.port, { method: "DELETE", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body }),
-		sendWire(h.pair.api.port, { method: "DELETE", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body }),
+		sendWire(nextPort, { method: "DELETE", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body }),
+		sendWire(apiPort, { method: "DELETE", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body }),
 	]);
+}
+
+export function pulseEventsBusOnBoth(h: ParityHarness): Promise<void> {
+	return pulseEventsBusPorts(h.pair.next.port, h.pair.api.port);
+}
+
+export async function openEventsWithPulse(
+	nextPort: number,
+	apiPort: number,
+	headers?: Record<string, string>,
+): Promise<{ nextEv: LiveStreamHandle; apiEv: LiveStreamHandle }> {
+	const nextConn = connectWireStream(nextPort, { method: "GET", path: "/api/events", headers });
+	const apiConn = connectWireStream(apiPort, { method: "GET", path: "/api/events", headers });
+	const apiEv = await apiConn.waitHeaders(5_000);
+	const pulser = setInterval(() => {
+		void pulseEventsBusPorts(nextPort, apiPort).catch(() => {});
+	}, 80);
+	try {
+		await pulseEventsBusPorts(nextPort, apiPort);
+		const nextEv = await nextConn.waitHeaders(5_000);
+		return { nextEv, apiEv };
+	} finally {
+		clearInterval(pulser);
+	}
 }
 
 async function runEventsQuickCheck(h: ParityHarness): Promise<void> {
 	h.coverage.record("/api/events", "GET");
-	const nextConn = connectWireStream(h.pair.next.port, { method: "GET", path: "/api/events" });
-	const apiConn = connectWireStream(h.pair.api.port, { method: "GET", path: "/api/events" });
-	await new Promise((r) => setTimeout(r, 40));
-	await pulseEventsBusOnBoth(h);
-	const [nextEv, apiEv] = await Promise.all([nextConn.waitHeaders(5_000), apiConn.waitHeaders(5_000)]);
-	compareResponseHeaders(h, nextEv.headers, apiEv.headers, { requestLabel: "row 18 GET /api/events" });
-	nextEv.abort();
-	apiEv.abort();
+	const { nextEv, apiEv } = await openEventsWithPulse(h.pair.next.port, h.pair.api.port);
+	try {
+		compareResponseHeaders(h, nextEv.headers, apiEv.headers, { requestLabel: "row 18 GET /api/events" });
+	} finally {
+		nextEv.abort();
+		apiEv.abort();
+	}
 }
 
 export async function runRoutesGroupB(h: ParityHarness): Promise<Record<ServerSide, string>> {

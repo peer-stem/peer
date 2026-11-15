@@ -47,7 +47,6 @@ function isSafeSegment(segment: string): boolean {
 
 function parseSegments(requestUrl: string): { status: 400 | 404 } | { segments: string[] } {
 	const { pathname } = new URL(requestUrl);
-	if (pathname.includes("\0")) return { status: 400 };
 	const rawSegments = pathname.split("/").filter((segment) => segment.length > 0);
 	if (rawSegments.length === 0) return { status: 404 };
 	const segments: string[] = [];
@@ -61,11 +60,10 @@ function parseSegments(requestUrl: string): { status: 400 | 404 } | { segments: 
 }
 
 async function resolveStaticFile(
-	rootDir: string,
+	realRoot: string,
 	segments: string[],
 ): Promise<{ realTarget: string; size: number } | null> {
 	try {
-		const realRoot = await fs.realpath(rootDir);
 		const realTarget = await fs.realpath(path.join(realRoot, ...segments));
 		const rootPrefix = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
 		if (realTarget === realRoot || !realTarget.startsWith(rootPrefix)) return null;
@@ -88,6 +86,14 @@ function buildStaticHeaders(filePath: string, size: number): HeadersInit {
 
 export function createStaticHandler(publicDir: string = path.join(ROOT, "public")): Dispatch {
 	const rootDir = path.resolve(publicDir);
+	let cachedRoot: Promise<string | null> | null = null;
+	const resolveRootOnce = (): Promise<string | null> => {
+		cachedRoot ??= fs.realpath(rootDir).catch(() => {
+			cachedRoot = null;
+			return null;
+		});
+		return cachedRoot;
+	};
 	return async function handleStatic(request: Request): Promise<Response> {
 		if (request.method === "OPTIONS") {
 			return new Response(null, { status: 204, headers: { Allow: "GET, HEAD, OPTIONS" } });
@@ -97,7 +103,9 @@ export function createStaticHandler(publicDir: string = path.join(ROOT, "public"
 		}
 		const parsed = parseSegments(request.url);
 		if ("status" in parsed) return new Response(null, { status: parsed.status });
-		const resolved = await resolveStaticFile(rootDir, parsed.segments);
+		const realRoot = await resolveRootOnce();
+		if (!realRoot) return new Response(null, { status: 404 });
+		const resolved = await resolveStaticFile(realRoot, parsed.segments);
 		if (!resolved) return new Response(null, { status: 404 });
 		const headers = buildStaticHeaders(resolved.realTarget, resolved.size);
 		if (request.method === "HEAD") return new Response(null, { status: 200, headers });

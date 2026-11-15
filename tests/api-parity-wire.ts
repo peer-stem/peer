@@ -32,6 +32,7 @@ export interface LiveStreamHandle {
 	headersElapsedMs: number;
 	waitForBytes: (minBytes: number, timeoutMs?: number) => Promise<Buffer>;
 	waitForText: (needle: string, timeoutMs?: number) => Promise<string>;
+	waitForCount: (needle: string, minCount: number, timeoutMs?: number) => Promise<string>;
 	readRest: (timeoutMs?: number) => Promise<{ rawBody: Buffer; prematureClose: boolean }>;
 	snapshotText: () => string;
 	abort: () => void;
@@ -219,6 +220,10 @@ function waitStreamCondition(state: StreamBufferState, pred: () => boolean, time
 	});
 }
 
+function countOccurrences(haystack: string, needle: string): number {
+	return needle.length === 0 ? 0 : haystack.split(needle).length - 1;
+}
+
 function makeStreamWaiters(
 	req: http.ClientRequest,
 	res: http.IncomingMessage,
@@ -227,6 +232,7 @@ function makeStreamWaiters(
 	headers: Record<string, string>,
 	headersElapsedMs: number,
 ): LiveStreamHandle {
+	const readText = () => Buffer.concat(state.chunks).toString("utf8");
 	return {
 		status,
 		headers,
@@ -236,14 +242,18 @@ function makeStreamWaiters(
 			return Buffer.concat(state.chunks);
 		},
 		waitForText: async (needle, timeoutMs) => {
-			await waitStreamCondition(state, () => Buffer.concat(state.chunks).toString("utf8").includes(needle), timeoutMs);
-			return Buffer.concat(state.chunks).toString("utf8");
+			await waitStreamCondition(state, () => readText().includes(needle), timeoutMs);
+			return readText();
+		},
+		waitForCount: async (needle, minCount, timeoutMs) => {
+			await waitStreamCondition(state, () => countOccurrences(readText(), needle) >= minCount, timeoutMs);
+			return readText();
 		},
 		readRest: async (timeoutMs = 15_000) => {
 			await waitStreamCondition(state, () => state.ended, timeoutMs);
 			return { rawBody: Buffer.concat(state.chunks), prematureClose: state.premature };
 		},
-		snapshotText: () => Buffer.concat(state.chunks).toString("utf8"),
+		snapshotText: readText,
 		abort: () => {
 			res.destroy();
 			req.destroy();

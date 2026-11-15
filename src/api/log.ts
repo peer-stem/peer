@@ -26,6 +26,10 @@ interface SinkState {
 }
 
 const DEFAULT_MAX_BUFFERED_LINES = 1024;
+const MAX_SANITIZE_DEPTH = 4;
+const MAX_STRING_CHARS = 4096;
+const MAX_COLLECTION_ITEMS = 64;
+const MAX_LOG_LINE_BYTES = 16384;
 const LEVEL_RANK: Record<LogLevel, number> = {
 	debug: 10,
 	info: 20,
@@ -49,67 +53,113 @@ function normalizeMaxBufferedLines(value: number | undefined): number {
 	return Math.trunc(value);
 }
 
+function truncateString(value: string, limit = MAX_STRING_CHARS): string {
+	if (value.length <= limit) return value;
+	return `${value.slice(0, limit)}...[truncated ${value.length - limit} chars]`;
+}
+
 function safeReadProperty(
 	record: Record<string, unknown>,
 	key: string,
 	ancestors: Set<object>,
+	depth: number,
 ): unknown {
 	try {
-		return sanitizeValue(record[key], ancestors);
+		return sanitizeValue(record[key], ancestors, depth);
 	} catch {
 		return "[Unserializable]";
 	}
 }
 
-function serializeError(err: Error, ancestors: Set<object>): Record<string, unknown> {
+function serializeError(err: Error, ancestors: Set<object>, depth: number): Record<string, unknown> {
 	const out: Record<string, unknown> = {
-		name: err.name,
-		message: err.message,
+		name: truncateString(err.name),
+		message: truncateString(err.message),
 	};
-	if (err.stack !== undefined) out.stack = err.stack;
-	if (err.cause !== undefined) out.cause = sanitizeValue(err.cause, ancestors);
-	for (const key of Object.keys(err)) {
+	if (err.stack !== undefined) out.stack = truncateString(err.stack);
+	if (err.cause !== undefined) out.cause = sanitizeValue(err.cause, ancestors, depth + 1);
+	const keys = Object.keys(err);
+	const limit = Math.min(keys.length, MAX_COLLECTION_ITEMS);
+	for (let i = 0; i < limit; i++) {
+		const key = keys[i]!;
 		if (key in out) continue;
-		out[key] = safeReadProperty(err as unknown as Record<string, unknown>, key, ancestors);
+		out[key] = safeReadProperty(err as unknown as Record<string, unknown>, key, ancestors, depth + 1);
 	}
+	if (keys.length > MAX_COLLECTION_ITEMS) out._truncatedKeys = keys.length - MAX_COLLECTION_ITEMS;
 	return out;
 }
 
-function sanitizeRecord(input: Record<string, unknown>, ancestors: Set<object>): Record<string, unknown> {
+function sanitizeArray(items: unknown[], ancestors: Set<object>, depth: number): unknown[] {
+	const limit = Math.min(items.length, MAX_COLLECTION_ITEMS);
+	const out = items.slice(0, limit).map((item) => sanitizeValue(item, ancestors, depth + 1));
+	if (items.length > MAX_COLLECTION_ITEMS) out.push(`[...${items.length - MAX_COLLECTION_ITEMS} more items]`);
+	return out;
+}
+
+function sanitizeRecord(
+	input: Record<string, unknown>,
+	ancestors: Set<object>,
+	depth: number,
+): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
-	for (const key of Object.keys(input)) {
-		out[key] = safeReadProperty(input, key, ancestors);
+	const keys = Object.keys(input);
+	const limit = Math.min(keys.length, MAX_COLLECTION_ITEMS);
+	for (let i = 0; i < limit; i++) {
+		const key = keys[i]!;
+		out[key] = safeReadProperty(input, key, ancestors, depth + 1);
 	}
+	if (keys.length > MAX_COLLECTION_ITEMS) out._truncatedKeys = keys.length - MAX_COLLECTION_ITEMS;
 	return out;
 }
 
-function sanitizeValue(value: unknown, ancestors: Set<object>): unknown {
-	if (value === null || value === undefined) return value;
-	if (typeof value === "bigint") return value.toString();
-	if (typeof value === "function" || typeof value === "symbol") return String(value);
-	if (typeof value !== "object") return value;
+function sanitizeObjectValue(value: object, ancestors: Set<object>, depth: number): unknown {
+	if (value instanceof Date) return Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString();
+	if (ArrayBuffer.isView(value)) {
+		const kind = Buffer.isBuffer(value) ? "Buffer" : (value.constructor?.name || "TypedArray");
+		return `[${kind} ${value.byteLength} bytes]`;
+	}
+	if (value instanceof ArrayBuffer) return `[ArrayBuffer ${value.byteLength} bytes]`;
+	if (depth >= MAX_SANITIZE_DEPTH) return "[MaxDepth]";
 	if (ancestors.has(value)) return "[Circular]";
 	ancestors.add(value);
 	try {
-		if (value instanceof Error) return serializeError(value, ancestors);
-		if (value instanceof Date) return Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString();
-		if (Array.isArray(value)) return value.map((item) => sanitizeValue(item, ancestors));
-		return sanitizeRecord(value as Record<string, unknown>, ancestors);
+		if (value instanceof Error) return serializeError(value, ancestors, depth);
+		if (Array.isArray(value)) return sanitizeArray(value, ancestors, depth);
+		return sanitizeRecord(value as Record<string, unknown>, ancestors, depth);
 	} finally {
 		ancestors.delete(value);
 	}
 }
 
+function sanitizeValue(value: unknown, ancestors: Set<object>, depth = 0): unknown {
+	if (value === null || value === undefined) return value;
+	if (typeof value === "string") return truncateString(value);
+	if (typeof value === "bigint") return value.toString();
+	if (typeof value === "function" || typeof value === "symbol") return truncateString(String(value));
+	if (typeof value !== "object") return value;
+	return sanitizeObjectValue(value, ancestors, depth);
+}
+
 function formatLogLine(level: ActiveLogLevel, message: string, fields?: Record<string, unknown>): string {
 	const timestamp = new Date().toISOString();
+	const safeMsg = truncateString(String(message));
 	try {
-		const record: Record<string, unknown> = { timestamp, level, message: String(message) };
+		const record: Record<string, unknown> = { timestamp, level, message: safeMsg };
 		if (fields !== undefined) {
-			record.fields = sanitizeValue(fields, new Set());
+			record.fields = sanitizeValue(fields, new Set(), 0);
 		}
-		return `${JSON.stringify(record)}\n`;
+		const serialized = JSON.stringify(record);
+		if (Buffer.byteLength(serialized, "utf8") <= MAX_LOG_LINE_BYTES) return `${serialized}\n`;
+		const capped = {
+			timestamp,
+			level,
+			message: truncateString(String(message), 1024),
+			truncated: true,
+			originalBytes: Buffer.byteLength(serialized, "utf8"),
+		};
+		return `${JSON.stringify(capped)}\n`;
 	} catch {
-		return `${JSON.stringify({ timestamp, level, message: String(message), fieldsError: true })}\n`;
+		return `${JSON.stringify({ timestamp, level, message: safeMsg, fieldsError: true })}\n`;
 	}
 }
 

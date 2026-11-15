@@ -7,22 +7,13 @@ import { after, before, test } from "node:test";
 import { ROOT } from "@/config.ts";
 import { createApiHttpServer, type ApiHttpServer } from "../src/api/server.ts";
 import { createStaticHandler, serveStatic } from "../src/api/static.ts";
+import { createScratchDir } from "./api-test-helpers.ts";
 
 let scratchBase = "";
 let publicScratch = "";
 let outsideScratch = "";
 let apiServer: ApiHttpServer;
 let baseUrl = "";
-
-function ensureTmpPeerRoot(): string {
-	const peerScratch = fs.existsSync("/usr/lib/persist/peer")
-		? "/usr/lib/persist/peer/scratch"
-		: path.join(ROOT, ".fresh-data");
-	fs.mkdirSync(peerScratch, { recursive: true, mode: 0o700 });
-	const dir = fs.mkdtempSync(path.join(peerScratch, "api-static-"));
-	fs.chmodSync(dir, 0o700);
-	return dir;
-}
 
 function populateScratchFiles(pubDir: string, outDir: string): void {
 	fs.mkdirSync(path.join(pubDir, "sub"), { recursive: true });
@@ -83,7 +74,7 @@ function rawHttpGet(port: number, rawPath: string): Promise<{ status: number; bo
 let mimeCases: Array<[string, string]> = [];
 
 before(async () => {
-	scratchBase = ensureTmpPeerRoot();
+	scratchBase = createScratchDir("api-static-");
 	publicScratch = path.join(scratchBase, "public");
 	outsideScratch = path.join(scratchBase, "outside");
 	fs.mkdirSync(publicScratch, { recursive: true, mode: 0o700 });
@@ -195,7 +186,7 @@ test("blocks dot-dot, percent-encoded traversal, separators, and symlink escapes
 	}
 });
 
-test("returns 400 for malformed percent-encoding and raw NUL in pathname", async () => {
+test("returns 400 for malformed percent-encoding in pathname", async () => {
 	const addr = apiServer.server.address() as AddressInfo;
 	const badUri = await rawHttpGet(addr.port, "/%E0%A4%A");
 	assert.equal(badUri.status, 400);
@@ -204,6 +195,22 @@ test("returns 400 for malformed percent-encoding and raw NUL in pathname", async
 	const handler = createStaticHandler(publicScratch);
 	const badDirect = await handler(new Request("http://127.0.0.1/%E0%A4%A"));
 	assert.equal(badDirect.status, 400);
+});
+
+test("resolves static root realpath once lazily across repeated requests", async (t) => {
+	let rootCalls = 0;
+	const origRealpath = fs.promises.realpath.bind(fs.promises);
+	const expectedRoot = path.resolve(publicScratch);
+	t.mock.method(fs.promises, "realpath", async (target: fs.PathLike) => {
+		if (String(target) === expectedRoot) rootCalls += 1;
+		return origRealpath(target);
+	});
+	const handler = createStaticHandler(publicScratch);
+	for (let i = 0; i < 4; i++) {
+		const res = await handler(new Request("http://127.0.0.1/template.html", { method: "HEAD" }));
+		assert.equal(res.status, 200);
+	}
+	assert.equal(rootCalls, 1);
 });
 
 test("answers OPTIONS with 204 Allow and rejects unsupported methods with 405", async () => {

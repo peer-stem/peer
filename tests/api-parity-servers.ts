@@ -4,21 +4,29 @@ import http from "node:http";
 import net from "node:net";
 import * as path from "node:path";
 import { writeCliStubs, type ServerSide } from "./api-parity-stubs.ts";
+import {
+	WORKTREE_ROOT,
+	buildScratchChildEnv,
+	createScratchDir,
+} from "./api-test-helpers.ts";
 
-export const WORKTREE_ROOT = path.resolve(import.meta.dirname, "..");
+export { WORKTREE_ROOT };
 export const STANDALONE_DIR = path.join(WORKTREE_ROOT, ".next", "standalone");
 export const STANDALONE_SERVER = path.join(STANDALONE_DIR, "server.js");
 export const API_MAIN = path.join(WORKTREE_ROOT, "src", "api", "main.ts");
 export const FIXTURES_DIR = path.join(WORKTREE_ROOT, "tests", "fixtures");
 export const GOLDEN_DIR = path.join(FIXTURES_DIR, "golden-data");
-export const PARITY_TMP_ROOT = fs.existsSync("/usr/lib/persist/peer")
-	? "/usr/lib/persist/peer/scratch"
-	: path.join(WORKTREE_ROOT, ".fresh-data");
 
 const FORBIDDEN_PORTS = new Set([3000, 3901]);
 const BOOT_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 120;
 const SIGKILL_AFTER_MS = 3_000;
+
+let spawnedPairCount = 0;
+
+export function getSpawnedPairCount(): number {
+	return spawnedPairCount;
+}
 
 export interface GateEnvOptions {
 	LH_DESKTOP_SERVER?: string;
@@ -36,6 +44,7 @@ export interface ServerInstance {
 	authFile: string;
 	logs: () => string;
 	clearLogs: () => void;
+	waitForLog: (pred: (logs: string) => boolean, timeoutMs?: number) => Promise<string>;
 	stop: () => Promise<{ elapsedMs: number; killedHard: boolean }>;
 }
 
@@ -114,31 +123,20 @@ interface EnvInput {
 }
 
 function buildAllowlistEnv(input: EnvInput): NodeJS.ProcessEnv {
-	const tmpDir = path.join(input.homeDir, "tmp");
-	const configHome = path.join(input.homeDir, ".config");
-	const dataHome = path.join(input.homeDir, ".local", "share");
-	const cacheHome = path.join(input.homeDir, ".cache");
-	for (const dir of [input.homeDir, tmpDir, configHome, dataHome, cacheHome]) {
-		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-	}
-	const env: NodeJS.ProcessEnv = {
-		NODE_ENV: "production",
-		HOSTNAME: "127.0.0.1",
-		PORT: String(input.port),
-		LH_DATA_DIR: input.dataDir,
-		LH_AUTH_FILE: input.authFile,
-		LH_IGNORE_ENV_KEYS: "1",
-		HOME: input.homeDir,
-		XDG_CONFIG_HOME: configHome,
-		XDG_DATA_HOME: dataHome,
-		XDG_CACHE_HOME: cacheHome,
-		TMPDIR: tmpDir,
-		PATH: input.binDir,
-	};
-	if (input.gate?.LH_DESKTOP_SERVER !== undefined) env.LH_DESKTOP_SERVER = input.gate.LH_DESKTOP_SERVER;
-	if (input.gate?.LH_DESKTOP_API_SECRET !== undefined) env.LH_DESKTOP_API_SECRET = input.gate.LH_DESKTOP_API_SECRET;
-	if (input.gate?.LH_ALLOWED_HOSTS !== undefined) env.LH_ALLOWED_HOSTS = input.gate.LH_ALLOWED_HOSTS;
-	return env;
+	return buildScratchChildEnv({
+		homeDir: input.homeDir,
+		dataDir: input.dataDir,
+		authFile: input.authFile,
+		pathEnv: input.binDir,
+		nodeEnv: "production",
+		extra: {
+			HOSTNAME: "127.0.0.1",
+			PORT: String(input.port),
+			LH_DESKTOP_SERVER: input.gate?.LH_DESKTOP_SERVER,
+			LH_DESKTOP_API_SECRET: input.gate?.LH_DESKTOP_API_SECRET,
+			LH_ALLOWED_HOSTS: input.gate?.LH_ALLOWED_HOSTS,
+		},
+	});
 }
 
 function probeReadiness(port: number, headers?: Record<string, string>): Promise<number> {
@@ -162,18 +160,61 @@ function probeReadiness(port: number, headers?: Record<string, string>): Promise
 	});
 }
 
-function createLogCollector(child: ChildProcess): { read: () => string; clear: () => void } {
+interface LogCollector {
+	read: () => string;
+	clear: () => void;
+	waitFor: (pred: (logs: string) => boolean, timeoutMs?: number) => Promise<string>;
+}
+
+function createLogCollector(child: ChildProcess, isExited: () => boolean): LogCollector {
 	const lines: string[] = [];
+	const waiters = new Set<() => void>();
+	const notify = () => {
+		for (const fn of [...waiters]) fn();
+	};
 	const append = (chunk: Buffer | string) => {
 		lines.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
 		if (lines.length > 400) lines.splice(0, lines.length - 400);
+		notify();
 	};
 	child.stdout?.on("data", append);
 	child.stderr?.on("data", append);
+	child.once("exit", notify);
 	return {
 		read: () => lines.join(""),
 		clear: () => { lines.length = 0; },
+		waitFor: (pred, timeoutMs = 10_000) => waitLogPredicate(() => lines.join(""), pred, isExited, waiters, timeoutMs),
 	};
+}
+
+function waitLogPredicate(
+	readLogs: () => string,
+	pred: (logs: string) => boolean,
+	isExited: () => boolean,
+	waiters: Set<() => void>,
+	timeoutMs: number,
+): Promise<string> {
+	const initial = readLogs();
+	if (pred(initial)) return Promise.resolve(initial);
+	if (isExited()) return Promise.reject(new Error(`Server exited before log condition:\n${initial.slice(-2000)}`));
+	return new Promise<string>((resolve, reject) => {
+		const finish = (err: Error | null, text: string) => {
+			clearTimeout(timer);
+			waiters.delete(check);
+			if (err) reject(err);
+			else resolve(text);
+		};
+		const check = () => {
+			const text = readLogs();
+			if (pred(text)) finish(null, text);
+			else if (isExited()) finish(new Error(`Server exited before log condition:\n${text.slice(-2000)}`), text);
+		};
+		const timer = setTimeout(() => {
+			waiters.delete(check);
+			reject(new Error(`Log wait timed out after ${timeoutMs}ms:\n${readLogs().slice(-2000)}`));
+		}, timeoutMs);
+		waiters.add(check);
+	});
 }
 
 function stopChildByPid(child: ChildProcess, isExited: () => boolean): Promise<{ elapsedMs: number; killedHard: boolean }> {
@@ -237,13 +278,16 @@ async function spawnSideOnce(spec: SpawnSideSpec): Promise<ServerInstance> {
 	if (!child.pid) throw new Error(`Failed to spawn ${spec.side} server`);
 	let exited = false;
 	child.once("exit", () => { exited = true; });
-	const collector = createLogCollector(child);
+	const collector = createLogCollector(child, () => exited);
 	let stopping: Promise<{ elapsedMs: number; killedHard: boolean }> | null = null;
 	const stop = () => {
 		stopping ??= stopChildByPid(child, () => exited);
 		return stopping;
 	};
 	try {
+		if (spec.side === "api") {
+			await collector.waitFor((s) => s.includes("Engine API server listening"), BOOT_TIMEOUT_MS);
+		}
 		const expected = spec.gate?.readyExpectedStatus ?? 200;
 		await waitUntilReady(port, expected, spec.gate?.readyHeaders, () => exited, collector.read);
 	} catch (err) {
@@ -258,6 +302,7 @@ async function spawnSideOnce(spec: SpawnSideSpec): Promise<ServerInstance> {
 		authFile,
 		logs: collector.read,
 		clearLogs: collector.clear,
+		waitForLog: collector.waitFor,
 		stop,
 	};
 }
@@ -272,10 +317,14 @@ async function spawnSideWithRetry(spec: SpawnSideSpec): Promise<ServerInstance> 
 	}
 }
 
+async function stopPairAndClean(next: ServerInstance, api: ServerInstance, runDir: string): Promise<void> {
+	await Promise.allSettled([next.stop(), api.stop()]);
+	if (process.env.PEER_KEEP_PARITY_RUN !== "1") fs.rmSync(runDir, { recursive: true, force: true });
+}
+
 export async function startParityPair(gate?: GateEnvOptions): Promise<ParityPair> {
-	fs.mkdirSync(PARITY_TMP_ROOT, { recursive: true, mode: 0o700 });
-	const runDir = fs.mkdtempSync(path.join(PARITY_TMP_ROOT, "parity-"));
-	fs.chmodSync(runDir, 0o700);
+	spawnedPairCount += 1;
+	const runDir = createScratchDir("parity-");
 	const binDir = path.join(runDir, "bin");
 	writeCliStubs(binDir);
 	seedDataCopy(path.join(runDir, "next-data"));
@@ -293,14 +342,15 @@ export async function startParityPair(gate?: GateEnvOptions): Promise<ParityPair
 	}
 	const next = nextSrv;
 	const api = apiSrv;
+	let stoppedAll: Promise<void> | null = null;
 	return {
 		runDir,
 		binDir,
 		next,
 		api,
-		stopAll: async () => {
-			await Promise.allSettled([next.stop(), api.stop()]);
-			if (process.env.PEER_KEEP_PARITY_RUN !== "1") fs.rmSync(runDir, { recursive: true, force: true });
+		stopAll: () => {
+			stoppedAll ??= stopPairAndClean(next, api, runDir);
+			return stoppedAll;
 		},
 	};
 }

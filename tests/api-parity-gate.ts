@@ -1,20 +1,28 @@
 import assert from "node:assert/strict";
 import * as http from "node:http";
+import type { RouteRecord } from "../src/api/types.ts";
 import { startParityPair, type GateEnvOptions, type ParityPair } from "./api-parity-servers.ts";
-import type { StubServer } from "./api-parity-stubs.ts";
-import { sendWire, type WireResponse } from "./api-parity-wire.ts";
-import { compareResponseHeaders, createParityHarness, type ParityHarness } from "./api-parity-compare.ts";
-import { CONCRETE_ROUTE_PATHS } from "./api-parity-routes-a.ts";
+import type { ServerSide } from "./api-parity-stubs.ts";
+import { normalizeRawHeaders, sendWire, type WireResponse } from "./api-parity-wire.ts";
+import {
+	compareResponseHeaders,
+	createParityHarness,
+	runParityRequest,
+	type ParityHarness,
+} from "./api-parity-compare.ts";
+import {
+	CONCRETE_ROUTE_PATHS,
+	DESKTOP_SECRET,
+	DOC_MARKDOWN_PATH,
+} from "./api-test-helpers.ts";
 
-const DESKTOP_SECRET = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 const ALL_SEVEN_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
-const DOC_PATH = "/api/plugins/document-one/documents/markdown";
 
 const MATCHER_PATHS_FROM_PROXY_TEST = [
-	DOC_PATH,
-	`${DOC_PATH}/`,
-	`${DOC_PATH}?request=1`,
-	`${DOC_PATH}/?request=1`,
+	DOC_MARKDOWN_PATH,
+	`${DOC_MARKDOWN_PATH}/`,
+	`${DOC_MARKDOWN_PATH}?request=1`,
+	`${DOC_MARKDOWN_PATH}/?request=1`,
 	"/api/plugins/document%2Done/documents/markdown",
 	"/api/plugins/%64ocument-one/documents/markdown/",
 	"/api",
@@ -27,10 +35,10 @@ const MATCHER_PATHS_FROM_PROXY_TEST = [
 	"/api/plugins/document-one/call",
 	"/api/plugins/document-one/documents",
 	"/api/plugins/document-one/documents/other",
-	`${DOC_PATH}/extra`,
-	`${DOC_PATH}ish`,
-	`${DOC_PATH}.json`,
-	`${DOC_PATH}.rsc`,
+	`${DOC_MARKDOWN_PATH}/extra`,
+	`${DOC_MARKDOWN_PATH}ish`,
+	`${DOC_MARKDOWN_PATH}.json`,
+	`${DOC_MARKDOWN_PATH}.rsc`,
 	"/api/plugins/document-one/other/documents/markdown",
 	"/api/plugins/documents/markdown",
 	"/api/graph/import",
@@ -47,6 +55,12 @@ const NON_API_LOOKALIKE_PATHS = [
 	"/api-other/plugins/document-one/documents/markdown",
 ];
 
+const ENCODED_MATCHER_PATHS = [
+	"/api/plugins/document%2Done/documents/markdown",
+	"/api/plugins/%64ocument-one/documents/markdown",
+	"/api/plugins/document-one/documents/%6Darkdown",
+] as const;
+
 function buildRefusalMatrixPaths(): string[] {
 	return [...new Set([...Object.values(CONCRETE_ROUTE_PATHS), ...MATCHER_PATHS_FROM_PROXY_TEST])];
 }
@@ -62,10 +76,7 @@ function collectPooledResponse(res: http.IncomingMessage, resolve: (r: WireRespo
 	res.on("data", (c: Buffer) => chunks.push(c));
 	res.on("end", () => {
 		const rawBody = Buffer.concat(chunks);
-		const outHeaders: Record<string, string> = {};
-		for (const [k, v] of Object.entries(res.headers)) {
-			if (v !== undefined) outHeaders[k.toLowerCase()] = Array.isArray(v) ? v.join(", ") : v;
-		}
+		const outHeaders = normalizeRawHeaders(res.rawHeaders);
 		resolve({ status: res.statusCode ?? 0, headers: outHeaders, rawBody, text: rawBody.toString("utf8"), prematureClose: false });
 	});
 }
@@ -165,81 +176,177 @@ async function checkPairRequest(
 	compareResponseHeaders(localHarness, nextRes.headers, apiRes.headers, { requestLabel: label });
 }
 
-async function runBrowserModeChecks(mainHarness: ParityHarness, stub: StubServer): Promise<void> {
-	const pair = await startParityPair();
-	const local = createParityHarness(pair, stub);
+interface GateModeSuiteSpec {
+	name: string;
+	gate?: GateEnvOptions;
+	refusedHeaders: (port: number) => Record<string, string>;
+	passingHeaders?: (port: number) => Record<string, string>;
+	runGateChecks: (mainHarness: ParityHarness, local: ParityHarness) => Promise<void>;
+}
+
+async function runBrowserGateChecks(mainHarness: ParityHarness, local: ParityHarness): Promise<void> {
+	await checkPairRequest(local, "browser pass localhost", 200, (p) => ({ Host: `localhost:${p}` }));
+	await checkPairRequest(local, "browser pass 127.0.0.1", 200, (p) => ({ Host: `127.0.0.1:${p}` }));
+	const chatJson = JSON.stringify({ title: "Gate Check" });
+	await checkPairRequest(local, "browser pass write no origin", 200, (p) => ({ Host: `127.0.0.1:${p}`, "Content-Type": "application/json" }), "POST", "/api/chats", chatJson);
+	await checkPairRequest(local, "browser pass write matching origin", 200, (p) => ({ Host: `127.0.0.1:${p}`, Origin: `http://127.0.0.1:${p}`, "Content-Type": "application/json" }), "POST", "/api/chats", chatJson);
+	await checkPairRequest(local, "browser refuse cross-site sec-fetch-site", 403, (p) => ({ Host: `127.0.0.1:${p}`, "sec-fetch-site": "cross-site" }), "POST", "/api/chats", chatJson);
+	await checkPairRequest(local, "browser refuse mismatched origin", 403, (p) => ({ Host: `127.0.0.1:${p}`, Origin: "http://evil.example" }), "POST", "/api/chats", chatJson);
+	await runRefusalMatrixForMode(mainHarness, "browser", local.pair, () => ({ Host: "evil.example" }));
+}
+
+async function runAllowedHostsGateChecks(mainHarness: ParityHarness, local: ParityHarness): Promise<void> {
+	await checkPairRequest(local, "allowed-hosts pass peer.test", 200, (p) => ({ Host: `peer.test:${p}` }));
+	await checkPairRequest(
+		local,
+		"allowed-hosts pass write peer.test",
+		200,
+		(p) => ({ Host: `peer.test:${p}`, Origin: `http://peer.test:${p}`, "Content-Type": "application/json" }),
+		"POST",
+		"/api/chats",
+		JSON.stringify({ title: "Allowed Host Write" }),
+	);
+	await runRefusalMatrixForMode(mainHarness, "allowed-hosts", local.pair, () => ({ Host: "other.test" }));
+}
+
+async function runDesktopSecretGateChecks(mainHarness: ParityHarness, local: ParityHarness): Promise<void> {
+	await checkPairRequest(local, "desktop pass exact secret", 200, (p) => ({ Host: `127.0.0.1:${p}`, "x-learnharness-desktop": DESKTOP_SECRET }));
+	await checkPairRequest(local, "desktop pass doc route OPTIONS", 204, (p) => ({ Host: `127.0.0.1:${p}`, "x-learnharness-desktop": DESKTOP_SECRET }), "OPTIONS", DOC_MARKDOWN_PATH);
+	await checkPairRequest(local, "desktop refuse wrong secret", 403, (p) => ({ Host: `127.0.0.1:${p}`, "x-learnharness-desktop": "0".repeat(64) }));
+	await runRefusalMatrixForMode(mainHarness, "desktop-secret", local.pair, (p) => ({ Host: `127.0.0.1:${p}` }));
+}
+
+async function runDesktopNoSecretGateChecks(mainHarness: ParityHarness, local: ParityHarness): Promise<void> {
+	await checkPairRequest(local, "desktop-nosecret refuse even with header", 403, (p) => ({ Host: `127.0.0.1:${p}`, "x-learnharness-desktop": DESKTOP_SECRET }));
+	await runRefusalMatrixForMode(mainHarness, "desktop-nosecret", local.pair, (p) => ({ Host: `127.0.0.1:${p}` }));
+}
+
+const GATE_MODE_SPECS: readonly GateModeSuiteSpec[] = [
+	{
+		name: "browser",
+		refusedHeaders: () => ({ Host: "evil.example" }),
+		passingHeaders: (p) => ({ Host: `127.0.0.1:${p}` }),
+		runGateChecks: runBrowserGateChecks,
+	},
+	{
+		name: "allowed-hosts",
+		gate: { LH_ALLOWED_HOSTS: "peer.test", readyHeaders: { Host: "peer.test" } },
+		refusedHeaders: () => ({ Host: "other.test" }),
+		passingHeaders: (p) => ({ Host: `peer.test:${p}` }),
+		runGateChecks: runAllowedHostsGateChecks,
+	},
+	{
+		name: "desktop-secret",
+		gate: { LH_DESKTOP_SERVER: "1", LH_DESKTOP_API_SECRET: DESKTOP_SECRET, readyHeaders: { "x-learnharness-desktop": DESKTOP_SECRET } },
+		refusedHeaders: (p) => ({ Host: `127.0.0.1:${p}` }),
+		passingHeaders: (p) => ({ Host: `127.0.0.1:${p}`, "x-learnharness-desktop": DESKTOP_SECRET }),
+		runGateChecks: runDesktopSecretGateChecks,
+	},
+	{
+		name: "desktop-nosecret",
+		gate: { LH_DESKTOP_SERVER: "1", readyExpectedStatus: 403 },
+		refusedHeaders: (p) => ({ Host: `127.0.0.1:${p}`, "x-learnharness-desktop": DESKTOP_SECRET }),
+		runGateChecks: runDesktopNoSecretGateChecks,
+	},
+];
+
+async function runEncodedChecksOnHarness(
+	mainHarness: ParityHarness,
+	local: ParityHarness,
+	mode: GateModeSuiteSpec,
+): Promise<void> {
+	for (const p of ENCODED_MATCHER_PATHS) {
+		const reqFn = (_side: ServerSide, port: number) => ({ method: "POST", path: p, headers: mode.refusedHeaders(port) });
+		await runParityRequest(local, { label: `matcher-encoded-paths [${mode.name}] refused POST ${p}`, expectedStatus: 403, request: reqFn });
+	}
+	if (!mode.passingHeaders) return;
+	const passHdrs = mode.passingHeaders;
+	for (const p of ENCODED_MATCHER_PATHS.slice(0, 2)) {
+		await runParityRequest(local, {
+			label: `matcher-encoded-paths [${mode.name}] pass OPTIONS ${p}`,
+			expectedStatus: 204,
+			request: (_side, port) => ({ method: "OPTIONS", path: p, headers: passHdrs(port) }),
+		});
+	}
+	const staticEncPath = ENCODED_MATCHER_PATHS[2];
+	const [nextRes, apiRes] = await Promise.all([
+		sendWire(local.pair.next.port, { method: "OPTIONS", path: staticEncPath, headers: passHdrs(local.pair.next.port) }),
+		sendWire(local.pair.api.port, { method: "OPTIONS", path: staticEncPath, headers: passHdrs(local.pair.api.port) }),
+	]);
+	assert.equal(nextRes.status, 404);
+	assert.equal(apiRes.status, 404);
+	mainHarness.recordObservation({
+		ruleId: "unknown-api-path-404",
+		request: `OPTIONS ${staticEncPath} (${mode.name} pass)`,
+		nextSummary: "status=404 HTML _not-found",
+		apiSummary: "status=404 empty body",
+	});
+}
+
+interface SharedGateOutcome {
+	encodedError: unknown;
+	gateError: unknown;
+}
+
+const sharedOutcomes = new WeakMap<ParityHarness, Promise<SharedGateOutcome>>();
+
+async function executeSharedModeOnHarness(
+	mainHarness: ParityHarness,
+	local: ParityHarness,
+	spec: GateModeSuiteSpec,
+	outcome: SharedGateOutcome,
+): Promise<void> {
 	try {
-		await checkPairRequest(local, "browser pass localhost", 200, (p) => ({ Host: `localhost:${p}` }));
-		await checkPairRequest(local, "browser pass 127.0.0.1", 200, (p) => ({ Host: `127.0.0.1:${p}` }));
-		const chatJson = JSON.stringify({ title: "Gate Check" });
-		await checkPairRequest(local, "browser pass write no origin", 200, (p) => ({ Host: `127.0.0.1:${p}`, "Content-Type": "application/json" }), "POST", "/api/chats", chatJson);
-		await checkPairRequest(local, "browser pass write matching origin", 200, (p) => ({ Host: `127.0.0.1:${p}`, Origin: `http://127.0.0.1:${p}`, "Content-Type": "application/json" }), "POST", "/api/chats", chatJson);
-		await checkPairRequest(local, "browser refuse cross-site sec-fetch-site", 403, (p) => ({ Host: `127.0.0.1:${p}`, "sec-fetch-site": "cross-site" }), "POST", "/api/chats", chatJson);
-		await checkPairRequest(local, "browser refuse mismatched origin", 403, (p) => ({ Host: `127.0.0.1:${p}`, Origin: "http://evil.example" }), "POST", "/api/chats", chatJson);
-		await runRefusalMatrixForMode(mainHarness, "browser", pair, () => ({ Host: "evil.example" }));
+		await runEncodedChecksOnHarness(mainHarness, local, spec);
+	} catch (err) {
+		outcome.encodedError ??= err;
+	}
+	try {
+		await spec.runGateChecks(mainHarness, local);
+	} catch (err) {
+		outcome.gateError ??= err;
+	}
+	if (local !== mainHarness) {
 		for (const obs of local.observed) mainHarness.recordObservation(obs);
-	} finally {
-		await pair.stopAll();
 	}
 }
 
-async function runAllowedHostsModeChecks(mainHarness: ParityHarness, stub: StubServer): Promise<void> {
-	const gate: GateEnvOptions = { LH_ALLOWED_HOSTS: "peer.test", readyHeaders: { Host: "peer.test" } };
-	const pair = await startParityPair(gate);
-	const local = createParityHarness(pair, stub);
-	try {
-		await checkPairRequest(local, "allowed-hosts pass peer.test", 200, (p) => ({ Host: `peer.test:${p}` }));
-		await checkPairRequest(
-			local,
-			"allowed-hosts pass write peer.test",
-			200,
-			(p) => ({ Host: `peer.test:${p}`, Origin: `http://peer.test:${p}`, "Content-Type": "application/json" }),
-			"POST",
-			"/api/chats",
-			JSON.stringify({ title: "Allowed Host Write" }),
-		);
-		await runRefusalMatrixForMode(mainHarness, "allowed-hosts", pair, () => ({ Host: "other.test" }));
-		for (const obs of local.observed) mainHarness.recordObservation(obs);
-	} finally {
-		await pair.stopAll();
+async function runSharedGateSuitesOnce(
+	mainHarness: ParityHarness,
+	routes: readonly RouteRecord[],
+): Promise<SharedGateOutcome> {
+	const outcome: SharedGateOutcome = { encodedError: null, gateError: null };
+	for (const spec of GATE_MODE_SPECS) {
+		if (!spec.gate) {
+			await executeSharedModeOnHarness(mainHarness, mainHarness, spec, outcome);
+			continue;
+		}
+		const pair = await startParityPair(spec.gate);
+		try {
+			const local = createParityHarness(pair, mainHarness.stub, routes);
+			await executeSharedModeOnHarness(mainHarness, local, spec, outcome);
+		} finally {
+			await pair.stopAll();
+		}
 	}
+	return outcome;
 }
 
-async function runDesktopSecretModeChecks(mainHarness: ParityHarness, stub: StubServer): Promise<void> {
-	const gate: GateEnvOptions = {
-		LH_DESKTOP_SERVER: "1",
-		LH_DESKTOP_API_SECRET: DESKTOP_SECRET,
-		readyHeaders: { "x-learnharness-desktop": DESKTOP_SECRET },
-	};
-	const pair = await startParityPair(gate);
-	const local = createParityHarness(pair, stub);
-	try {
-		await checkPairRequest(local, "desktop pass exact secret", 200, (p) => ({ Host: `127.0.0.1:${p}`, "x-learnharness-desktop": DESKTOP_SECRET }));
-		await checkPairRequest(local, "desktop pass doc route OPTIONS", 204, (p) => ({ Host: `127.0.0.1:${p}`, "x-learnharness-desktop": DESKTOP_SECRET }), "OPTIONS", DOC_PATH);
-		await checkPairRequest(local, "desktop refuse wrong secret", 403, (p) => ({ Host: `127.0.0.1:${p}`, "x-learnharness-desktop": "0".repeat(64) }));
-		await runRefusalMatrixForMode(mainHarness, "desktop-secret", pair, (p) => ({ Host: `127.0.0.1:${p}` }));
-		for (const obs of local.observed) mainHarness.recordObservation(obs);
-	} finally {
-		await pair.stopAll();
+function ensureSharedGateSuites(mainHarness: ParityHarness, routes: readonly RouteRecord[]): Promise<SharedGateOutcome> {
+	let cached = sharedOutcomes.get(mainHarness);
+	if (!cached) {
+		cached = runSharedGateSuitesOnce(mainHarness, routes);
+		sharedOutcomes.set(mainHarness, cached);
 	}
+	return cached;
 }
 
-async function runDesktopNoSecretModeChecks(mainHarness: ParityHarness, stub: StubServer): Promise<void> {
-	const gate: GateEnvOptions = { LH_DESKTOP_SERVER: "1", readyExpectedStatus: 403 };
-	const pair = await startParityPair(gate);
-	const local = createParityHarness(pair, stub);
-	try {
-		await checkPairRequest(local, "desktop-nosecret refuse even with header", 403, (p) => ({ Host: `127.0.0.1:${p}`, "x-learnharness-desktop": DESKTOP_SECRET }));
-		await runRefusalMatrixForMode(mainHarness, "desktop-nosecret", pair, (p) => ({ Host: `127.0.0.1:${p}` }));
-		for (const obs of local.observed) mainHarness.recordObservation(obs);
-	} finally {
-		await pair.stopAll();
-	}
+export async function runSharedEncodedPathParity(mainHarness: ParityHarness, routes: readonly RouteRecord[]): Promise<void> {
+	const outcome = await ensureSharedGateSuites(mainHarness, routes);
+	if (outcome.encodedError !== null) throw outcome.encodedError;
 }
 
-export async function runAllGateModesParity(mainHarness: ParityHarness): Promise<void> {
-	await runBrowserModeChecks(mainHarness, mainHarness.stub);
-	await runAllowedHostsModeChecks(mainHarness, mainHarness.stub);
-	await runDesktopSecretModeChecks(mainHarness, mainHarness.stub);
-	await runDesktopNoSecretModeChecks(mainHarness, mainHarness.stub);
+export async function runAllGateModesParity(mainHarness: ParityHarness, routes: readonly RouteRecord[]): Promise<void> {
+	const outcome = await ensureSharedGateSuites(mainHarness, routes);
+	if (outcome.gateError !== null) throw outcome.gateError;
 }

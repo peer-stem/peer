@@ -9,6 +9,8 @@ interface ParsedLogRecord {
 	level: string;
 	message: string;
 	fields?: Record<string, unknown>;
+	truncated?: boolean;
+	originalBytes?: number;
 }
 
 class ControlledStream extends EventEmitter {
@@ -207,4 +209,40 @@ test("createLogger survives EPIPE stream errors without throwing, hanging flush,
 	});
 	await flushPromise;
 	assert.equal(stream.listenerCount("drain"), 0, "temporary drain listener cleaned up on error");
+});
+
+test("createLogger summarizes typed arrays and caps nesting depth and oversized lines", () => {
+	const stream = new ControlledStream();
+	const logger = createLogger({ level: "info", stream: stream as unknown as NodeJS.WritableStream });
+	const bigBuffer = Buffer.alloc(1024 * 1024, 0x41);
+	const view = new Uint16Array(16);
+	const rawAb = new ArrayBuffer(64);
+	const deep = { l1: { l2: { l3: { l4: { secret: "too-deep" } } } } };
+
+	logger.error("binary-and-depth", {
+		buf: bigBuffer,
+		typed: view,
+		ab: rawAb,
+		deep,
+		longText: "x".repeat(6000),
+	});
+
+	const wide: Record<string, string> = {};
+	for (let i = 0; i < 10; i++) wide[`k${i}`] = "y".repeat(3500);
+	logger.warn("oversized-line", wide);
+
+	const records = stream.records();
+	assert.equal(records.length, 2);
+	const firstFields = records[0]!.fields!;
+	assert.equal(firstFields.buf, "[Buffer 1048576 bytes]");
+	assert.equal(firstFields.typed, "[Uint16Array 32 bytes]");
+	assert.equal(firstFields.ab, "[ArrayBuffer 64 bytes]");
+	const l2 = ((firstFields.deep as Record<string, unknown>).l1 as Record<string, unknown>).l2 as Record<string, unknown>;
+	assert.equal(l2.l3, "[MaxDepth]");
+	assert.match(String(firstFields.longText), /\.\.\.\[truncated 1904 chars\]$/);
+
+	const second = records[1]!;
+	assert.equal(second.truncated, true);
+	assert.ok((second.originalBytes ?? 0) > 16384);
+	assert.ok(Buffer.byteLength(stream.chunks[1]!, "utf8") <= 16384);
 });

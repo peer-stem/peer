@@ -8,6 +8,7 @@ const METHODS: ReadonlySet<string> = new Set<Method>(["GET", "HEAD", "POST", "PU
 export interface RouterOptions {
 	fallback?: Dispatch;
 	onError?: (error: unknown, request: Request) => void;
+	onRefusal?: (method: string, pathname: string) => void;
 }
 
 type PatternSegment =
@@ -38,7 +39,7 @@ export function bodyLimit(pathname: string): number | null {
 		const decoded = decodeURIComponent(pathname);
 		return EXEMPT_RE.test(decoded) ? null : MAX_IMPORT_BODY_BYTES;
 	} catch {
-		return null;
+		return MAX_IMPORT_BODY_BYTES;
 	}
 }
 
@@ -210,7 +211,10 @@ export function createRouter(records: readonly RouteRecord[], options?: RouterOp
 		const { pathname } = new URL(request.url);
 		if (pathname !== "/api" && !pathname.startsWith("/api/")) return fallback(request);
 		const refusal = apiRequestRefusal(request);
-		if (refusal) return refusalResponse(refusal);
+		if (refusal) {
+			options?.onRefusal?.(request.method, pathname);
+			return refusalResponse(refusal);
+		}
 		const match = findMatch(compiled, pathname);
 		if (match.kind === "none") return new Response(null, { status: 404 });
 		if (match.kind === "bad-param") return new Response(null, { status: 400 });

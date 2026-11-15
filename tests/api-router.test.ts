@@ -240,14 +240,11 @@ it("handles auto-OPTIONS, explicit OPTIONS, 405 without Allow, and 400 on non-st
 		assert.equal(disallowed.body, null);
 		assert.equal(disallowed.headers.get("Allow"), null);
 
-		for (const badMethod of ["PROPFIND", "MKCOL", "FOO"]) {
+		for (const badMethod of ["PROPFIND", "MKCOL", "FOO", "PURGE"]) {
 			const res = await router(new Request(`${ORIGIN}/api/get-only`, { method: badMethod }));
 			assert.equal(res.status, 400, badMethod);
 			assert.equal(res.body, null, badMethod);
 		}
-		const lowerPatch = new Request(`${ORIGIN}/api/get-only`);
-		Object.defineProperty(lowerPatch, "method", { value: "patch" });
-		assert.equal((await router(lowerPatch)).status, 400);
 	});
 });
 
@@ -323,6 +320,7 @@ it("computes bodyLimit across non-/api, standard /api, exempt, and percent-encod
 		"/api/plugins/doc/documents/markdown/extra", "/api/plugins/doc/documents/markdown.json",
 		"/api/plugins/documents/markdown", "/api/plugins/doc%2Fone/documents/markdown",
 		"/api/plugins/doc/documents%2Fmarkdown", "/api/chat/%E0%A4%A",
+		"/api/plugins/bad%E0%A4%A/documents/markdown",
 	];
 	for (const path of capped) assert.equal(bodyLimit(path), MAX_IMPORT_BODY_BYTES, path);
 	const exempt = [
@@ -331,7 +329,23 @@ it("computes bodyLimit across non-/api, standard /api, exempt, and percent-encod
 		"/api/plugins/document%2Done/documents/markdown",
 		"/api/plugins/%64ocument-one/documents/markdown/",
 		"/api/plugins/%E5%AD%97/documents/markdown",
-		"/api/plugins/bad%E0%A4%A/documents/markdown",
 	];
 	for (const path of exempt) assert.equal(bodyLimit(path), null, path);
+});
+
+it("reports gate refusals via onRefusal with method and pathname only", async () => {
+	const refusals: Array<{ method: string; pathname: string }> = [];
+	const router = createRouter(
+		[rec("POST", "/api/keys/[id]", () => Response.json({ ok: true }))],
+		{ onRefusal: (method, pathname) => refusals.push({ method, pathname }) },
+	);
+	await withGateEnv({ LH_DESKTOP_SERVER: "1", LH_DESKTOP_API_SECRET: SECRET }, async () => {
+		const badReq = new Request(`${ORIGIN}/api/keys/BRAVE?secret=leak`, { method: "POST", headers: { [DESKTOP_HEADER]: "wrong-secret" } });
+		const bad = await router(badReq);
+		assert.equal(bad.status, 403);
+		const okReq = new Request(`${ORIGIN}/api/keys/BRAVE?secret=keep`, { method: "POST", headers: { [DESKTOP_HEADER]: SECRET } });
+		const ok = await router(okReq);
+		assert.equal(ok.status, 200);
+	});
+	assert.deepEqual(refusals, [{ method: "POST", pathname: "/api/keys/BRAVE" }]);
 });

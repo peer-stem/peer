@@ -38,6 +38,7 @@ export interface StubServer {
 	clearCalls: () => void;
 	setVoices: (voices: readonly { id: string; name: string }[]) => void;
 	setTtsMode: (mode: TtsStubMode) => void;
+	releaseTtsOverflow: (side: ServerSide) => void;
 	armTtsAbort: () => TtsAbortHandle;
 	armChatHold: () => ChatHoldHandle;
 	close: () => Promise<void>;
@@ -215,6 +216,7 @@ interface StubState {
 	calls: { next: UpstreamCall[]; api: UpstreamCall[] };
 	voices: { id: string; name: string }[];
 	ttsMode: TtsStubMode;
+	ttsOverflowRelease: Record<ServerSide, DeferredGate>;
 	ttsAbort: { started: DeferredGate; aborted: DeferredGate } | null;
 	chatHold: {
 		armed: boolean;
@@ -291,11 +293,16 @@ function waitWritableDrain(res: ServerResponse): Promise<void> {
 	});
 }
 
-async function streamOverCapWav(res: ServerResponse): Promise<void> {
+async function streamOverCapWav(res: ServerResponse, overflowGate: Promise<void>): Promise<void> {
 	res.writeHead(200, { "Content-Type": "audio/wav" });
 	const chunk = Buffer.alloc(65_536, 0x55);
 	chunk.set(FIXED_WAV.subarray(0, 44), 0);
-	for (let i = 0; i < 516; i++) {
+	for (let i = 0; i < 512; i++) {
+		if (res.destroyed || res.writableEnded) return;
+		if (!res.write(chunk)) await waitWritableDrain(res);
+	}
+	await Promise.race([overflowGate, new Promise<void>((done) => res.once("close", done))]);
+	for (let i = 0; i < 4; i++) {
 		if (res.destroyed || res.writableEnded) return;
 		if (!res.write(chunk)) await waitWritableDrain(res);
 	}
@@ -318,7 +325,7 @@ async function handleSpeechTts(
 		return;
 	}
 	if (state.ttsMode === "over-cap") {
-		await streamOverCapWav(res);
+		await streamOverCapWav(res, state.ttsOverflowRelease[side].promise);
 		return;
 	}
 	if (state.ttsMode === "hold-for-abort") {
@@ -394,6 +401,7 @@ export async function startStubServer(): Promise<StubServer> {
 		calls: { next: [], api: [] },
 		voices: [{ id: "alloy", name: "Alloy" }],
 		ttsMode: "normal",
+		ttsOverflowRelease: { next: createDeferred(), api: createDeferred() },
 		ttsAbort: null,
 		chatHold: makeFreshHoldState(),
 	};
@@ -447,7 +455,11 @@ function buildStubHandle(server: http.Server, sockets: Set<Socket>, state: StubS
 			state.calls.api.length = 0;
 		},
 		setVoices: (voices) => { state.voices = [...voices]; },
-		setTtsMode: (mode) => { state.ttsMode = mode; },
+		setTtsMode: (mode) => {
+			state.ttsMode = mode;
+			state.ttsOverflowRelease = { next: createDeferred(), api: createDeferred() };
+		},
+		releaseTtsOverflow: (side) => state.ttsOverflowRelease[side].resolve(),
 		armTtsAbort: () => {
 			const tracker = { started: createDeferred(), aborted: createDeferred() };
 			state.ttsAbort = tracker;
