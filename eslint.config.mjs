@@ -22,7 +22,7 @@ import importPlugin from "eslint-plugin-import";
 export default defineConfig([
 	// electron/** — the desktop shell: plain Node, no framework, outside the
 // import law (same rationale as scripts/).
-	globalIgnores([".next/**", "node_modules/**", "data/**", "next-env.d.ts", "scripts/**", "electron/**", "dist/**", "extern/**"]),
+	globalIgnores([".next/**", "node_modules/**", "data/**", "next-env.d.ts", "scripts/**", "electron/**", "dist/**", "extern/**", ".test-scratch/**"]),
 	{
 		files: ["**/*.{js,mjs,ts,tsx}"],
 		languageOptions: {
@@ -56,15 +56,15 @@ export default defineConfig([
 						},
 						{
 							target: "./src/core",
-							from: ["./src/agent", "./src/server", "./src/store"],
+							from: ["./src/agent", "./src/memory", "./src/server", "./src/store"],
 							message:
-								"Pure core never imports IO layers (agent/server/store): adapters implement core/ports.ts, and the composition root (src/server/stores.ts) passes them in (architecture: docs/architecture.md).",
+								"Pure core never imports IO layers (agent/memory/server/store): adapters implement core/ports.ts, and the composition root (src/server/stores.ts) passes them in (architecture: docs/architecture.md).",
 						},
 						{
 							target: "./src/agent",
-							from: ["./src/server", "./src/store"],
+							from: ["./src/memory", "./src/server", "./src/store"],
 							message:
-								"The agent layer receives its dependencies (storage ports via factories/closures) — it never imports the server layer or store adapters (architecture: docs/architecture.md).",
+								"The agent layer receives its dependencies (storage ports via factories/closures) — it never imports memory, the server layer, or store adapters (architecture: docs/architecture.md).",
 						},
 					],
 				},
