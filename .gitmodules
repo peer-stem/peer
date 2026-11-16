@@ -1,3 +1,6 @@
 [submodule "extern/cloudcanvas"]
 	path = extern/cloudcanvas
 	url = git@github.com:CloudsEcosys/cloudcanvas.git
+[submodule "extern/cloudcanvas-lib"]
+	path = extern/cloudcanvas-lib
+	url = git@github.com:CloudsEcosys/cloudcanvas-lib.git
