@@ -7,3 +7,6 @@
 [submodule "extern/lumberjack"]
 	path = extern/lumberjack
 	url = git@github.com:NeoTecDigital/LumberJack.git
+[submodule "extern/mfn"]
+	path = extern/mfn
+	url = git@github.com:NeoTecDigital/MFN.git
