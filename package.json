@@ -20,6 +20,7 @@
 		"lint": "eslint .",
 		"typecheck": "tsc --noEmit",
 		"substrate:build": "node scripts/build-substrate.mjs",
+		"lumberjack:addon": "node scripts/build-lumberjack-addon.mjs",
 		"plugins:setup": "node scripts/setup-plugins.mjs",
 		"plugins:build-authoring": "node scripts/build-plugin-authoring.mjs",
 		"plugins:build-core": "node scripts/build-core-plugins.mjs",
