@@ -1,130 +1,57 @@
 # peer: design
 
-Status: foundation draft, 2026-11-14; the owner's correction on where the interface runs added to §3 the same day;
-the owner's decisions of 2026-11-14 on the client's files, the CloudCanvas split, placement and contributions, and
-the execution plan's decisions (§3.1), recorded the same day. Points marked **open** are not decided.
+Status: foundation draft, 2026-11-14; updated 2026-11-16 with the owner's architectural shift to **CloudCanvas + LumberJack DAG + MFN 2.0 learned memory** (`.context/logs/plans/2026-11-16-lumberjack-mfn-cloudcanvas-integration-plan.md`).
 
 ## 1. Purpose
 
-`peer` is our fork of LearnHarness, an agent harness for learning: agents measure what a learner understands,
-plan a route to a goal, teach it step by step, and keep the result in a knowledge graph. We keep that engine and
-replace its interface with one built on CloudCanvas.
+`peer` is an autonomous learning environment derived from LearnHarness: agents probe what a learner understands, plan a multi-parent learning DAG toward a goal, teach and practice step by step, and persist knowledge, mastery, and associative context.
 
-The reason is what the interface can become. CloudCanvas treats the DOM as the runtime engine: an element is the
-unit, its state lives on it, and the browser owns its lifetime. An interface made of such elements can be
-described as data, which means the model can build parts of it: interactive graphs, drawn SVG, dashboards for
-the system, richer knowledge graphs and mappings.
+Instead of keeping raw JSON/JSONL files, 20k-token LLM compaction summaries, or 1:1 clones of upstream React screens, `peer` builds natively on three external foundations:
+
+1. **CloudCanvas (`CloudsEcosys/cloudcanvas` + `cloudcanvas-lib`)**: treats the DOM as the runtime engine (`Client = Host`), enabling both native views and model-authored interactive visual surfaces.
+2. **LumberJack (`NeoTecDigital/LumberJack`)**: replaces raw JSON/JSONL files with a persistent, multi-parent DAG forest (`Node`s, `Event`s, `Entry` records, `/objects` binary attachments, `slots`, and `ic_lj_stream_poll` mutation cursors).
+3. **MFN 2.0 (`NeoTecDigital/MFN`)**: replaces lossy LLM compaction summaries with spreading-activation learned memory (`turn.recall` and `turn.ingest` across IFR, DSR, ALM, CPE, and PSR) paired with a compact live turn tail.
 
 ## 2. Who it serves
 
-One learner on their own machine, running the desktop app with their own model access and local voice models.
+One learner on their own Linux desktop machine, running Electron with dedicated `peer`-owned LumberJack and MFN 2.0 runtimes, their own model providers, and local speech/embedding models.
 
-## 3. Decisions (confirmed by the owner, 2026-11-14)
+## 3. Core Decisions (confirmed by the owner, 2026-11-14 and 2026-11-16)
 
 | Topic | Decision |
 |---|---|
-| Repository | `peer-stem/peer`, a linked fork of `amosblomqvist/learnharness` |
-| Branches | `master` is our integration branch; `main` receives only our releases; upstream is followed through the `upstream` remote |
-| Scope of the rewrite | The interface and the server layer. No React and no Next.js in the result |
-| Logic | `src/{agent,core,server,store}` stays TypeScript, moves unchanged, and keeps merging upstream |
-| First release | Parity: every screen the current app has, shipped as the `peer` desktop app |
-| Desktop shell | Electron stays |
-| Order | Parity first. Model-built graphs and dashboards come after it |
-| Old interface | Keeps building and shipping from the fork until parity, then is deleted. The new client never contains React |
-| CloudCanvas source | Superseded 2026-11-14 by the split (next row). Was: `CloudsEcosys/cloudcanvas`, `main`, as a git submodule in `extern/cloudcanvas`, pinned at `c5e6e07` (v0.6.0) |
-| CloudCanvas baseline | peer builds on the current split: the engine `CloudsEcosys/cloudcanvas` (0.7.x) plus `CloudsEcosys/cloudcanvas-lib`, both pinned as submodules. CloudCanvas was split on 2026-11-14: the engine's `main` no longer contains the `ui/` kit; the widget kit, board components, archetypes and the board are in `cloudcanvas-lib` as `widget()` types created on a board. The commits to pin are not named yet (the owner is still pushing). Until sprint B0 pins them, `extern/cloudcanvas` stays at `c5e6e07` (v0.6.0) and is **to be moved** |
-| Client languages | Plain JavaScript for view code that talks to CloudCanvas; TypeScript for what shares types with `src/` |
-| Where new capability lives | The owner's placement rule: "if they are agnostic to our project they go in the cloudcanvas-lib unless they are core/fundamental to cloudcanvas as an 'engine' -- but if they are application specific they go in our abstraction/implementation". So: fundamental to the engine → `cloudcanvas`; agnostic to peer → `cloudcanvas-lib`; application-specific → peer. Replaces the earlier two-way split (CloudCanvas side or peer) |
-| CloudCanvas changes | Pull requests to the public repos (`CloudsEcosys/cloudcanvas-lib`, `CloudsEcosys/cloudcanvas`) from this project's own clones under `/usr/lib/persist/peer/work/`. The owner merges; peer then moves its pin in a commit of its own. The owner's `~/cloudcanvas` workspace is never touched |
-| Deadline | None |
-| Where the interface runs | The owner's words: "CloudCanvas is designed where the Client is the Host", and "cloudcanvas runs client side because it treats the DOM as the runtime engine". No server renders the interface; its files are handed out unchanged (row "The new client's own files"). The client is static native modules that run in the window, draw everything there and fetch all data. In CloudCanvas, "host" means the client side (a control's host element), so the Node server is never called host |
-| The Node server | The engine's API: the routes and streams the Next layer serves today, without Next, in `src/api` (§3.1). It also hands out the client's files unchanged (next row) |
-| Old interface during the migration | Stays on Next, untouched, until the removal phase. Phase 1 is accepted on route parity and the logic suite, not on the old interface running elsewhere |
-| The new client's own files | The process that answers the API hands the client's files out unchanged, same origin. Nothing is rendered server-side. In development they sit under Next's `public/`; the path `/client/` is **proposed**, not decided. This was "a Phase 2 decision" until the owner decided it on 2026-11-14 |
-
-### 3.1 Decided through the execution plan's approval (owner, 2026-11-14)
-
-The owner approved the execution plan on 2026-11-14; approving it decided these. `PLAN.md` carries the plan.
-
-| Point | Choice |
-|---|---|
-| Name of the API directory | `src/api` |
-| How the client reaches the engine | HTTP. The router's entry is a plain `Request → Response` function, so Electron's own channel stays possible later |
-| How the client's files reach the window | The process that answers the API hands them out unchanged, same origin. In development they sit under Next's `public/`, proposed path `/client/` |
-| Request bodies over about 27 MB | Keep Next's silent cut at 27,262,976 bytes for parity; tune later |
-| What the API server is compared against | Next's standalone `server.js`, which the app ships |
-| `PORT` | Required, no default |
-| Running TypeScript outside Next | `tsx` for development and tests; the production build tool is chosen in the cutover sprint (esbuild **proposed**, already in the lockfile) |
-| End-to-end driver | `puppeteer-core`, already a dependency (**proposed**; confirmed in sprint B1) |
-| Knowledge graph at parity | Reuse `components/graph-canvas.ts` (plain TypeScript, 1,753 lines) unchanged |
-| Old interface | Stays on Next, untouched, until Removal |
-| Agent models | Sonnet for research and review, Opus for design and development, Fable for coordination and the hardest items |
-| Pull request 3 | Approving the plan is the owner's word to merge it, after the plan's step 1 corrects its docs |
+| Repository & branches | `peer-stem/peer` (fork of `amosblomqvist/learnharness`). Feature branches merge via PR into `master`; `main` receives releases only |
+| Application direction (2026-11-16) | Build `peer` natively out of **CloudCanvas** and migrate the LearnHarness engine pieces that work (`Prober`, `Teacher`, `Practitioner`, `Extractor`, `Auditor`, `FSRS-6`, `graph-canvas.ts`, local speech, CLI providers). Supersedes the earlier 1:1 legacy React screen parity gate |
+| External submodules (`extern/`) | Four pinned submodules, never modified in-place: `extern/cloudcanvas` (`69076f7`, 0.7.1), `extern/cloudcanvas-lib` (`155271b`, 0.7.1), `extern/lumberjack` (`f4e8055`), and `extern/mfn` (`489ca2f`, MFN 2.0.0). Each pin moves in a commit of its own |
+| Database & DAG (`LumberJack`) | Dedicated `peer`-managed LumberJack forest under `/usr/lib/persist/peer/state/lumberjack` (`tiered` persistence). Replaces all raw JSON/JSONL files in `LH_DATA_DIR` except `0600` credential files |
+| Learned memory (`MFN 2.0`) | Dedicated `peer`-managed MFN 2.0 engine (`POST /v2/execute`) under `/usr/lib/persist/peer/state/mfn`. Keeps a compact exact live tail from LumberJack and maps older in-session + cross-session context via `turn.recall` and `turn.ingest`, retiring 20k LLM compaction |
+| Hardware guardrail (2026-11-16) | **CRITICAL**: Only **Nova/Vulkan** or **CPU-only** execution is permitted anywhere (`peer`, MFN, LumberJack, Ollama embedder, speech, builds). **CUDA and ROCm are strictly forbidden** — probing or loading either crashes the host computer |
+| Embedder | Local loopback Ollama (`http://127.0.0.1:11434`, `nomic-embed-text:latest`, 768d) pinned by 64-hex `model_digest` in `0600` `MFN_EMBEDDERS_FILE` under CPU or Nova/Vulkan, with `hash_v1` degraded recall + durable LumberJack outbox retry when offline |
+| Existing state & import (2026-11-16) | `peer` has **no pre-existing state** of its own. Provide an explicit read-only importer (`importLearnHarnessData`) to import upstream LearnHarness data directories (`chats/`, `graph/`, `images/`, Flashcards FSRS) into LumberJack + MFN on demand |
+| Where the interface runs | Client is the host: static native ES modules in the browser window (`src/client/`), handed out unchanged on the same origin by `src/api/static.ts`. Nothing renders server-side |
+| Engine API (`src/api`) | Standalone `node:http` + Web `Request -> Response` server (`PORT` required, no default), serving `/api/**` and static client assets without Next.js |
+| Placement rule | Fundamental to CloudCanvas engine -> `cloudcanvas`; project-agnostic widgets/board -> `cloudcanvas-lib`; `peer`-specific views, DAG stores, and MFN memory -> `peer` |
+| Storage & `/tmp` rule | Runtime state, native builds, and scratch directories live on SSD under `/usr/lib/persist/peer/{state,build,scratch}`. Never write to `/tmp` (`tmpfs` RAM) |
 
 ## 4. Principles
 
-1. **The DOM is the runtime.** No client framework state tree and no virtual tree. The server's records are
-   authoritative, client stores hold the working copy, and a view is a control that receives a plain model and
-   reports through callbacks.
-2. **One contract for every view.** A view never owns application state. **Superseded:** the contract stated
-   here, `create(host, callbacks)` returning `{ update(model), destroy() }`, came from the v0.6.0 `ui/` kit, which
-   the split removed from the engine. The contract is re-derived from `cloudcanvas-lib`'s `widget()` model in
-   sprint B1.
-3. **Additive until cutover.** New code goes in new directories. Nothing upstream owns is edited unless a phase
-   says so, so upstream merges stay cheap.
-4. **Nothing is written twice.** Modules that are already free of React are shared by both interfaces while both
-   exist, then moved.
-5. **Data, not code, from the model.** A model-built surface is a document the client checks whole and then
-   builds. It is never generated script.
-6. **The rules of the house apply.** Maintainability, then correctness, then efficiency; 500 lines per file,
-   50 per definition, three levels of indentation; tests with the code.
+1. **The DOM is the client runtime.** No React, Next.js, or virtual DOM in `src/client/`. Views are CloudCanvas controls/widgets receiving plain models and emitting intents via callbacks.
+2. **Graph-native state, not flat files.** Knowledge propositions, joint-premise derivation chains, lesson `PlanTree`s, sources, and learner mastery/FSRS schedules are first-class nodes and edges in LumberJack's multi-parent DAG.
+3. **Associative recall over lossy compaction.** Exact recent messages stay untouched for tool continuity and KV-cache stability; older and cross-session context is retrieved dynamically by MFN spreading activation (`turn.recall`) and reinforced on settlement (`turn.ingest`).
+4. **Hardware safety by construction.** Every child environment passes through `src/substrate/hardware-guard.ts` to scrub CUDA/ROCm variables before process spawn, and native binaries are verified free of CUDA/ROCm shared objects.
+5. **Data, not executable script, from the model.** Model-authored canvases and diagrams are validated data documents or sandboxed opaque-origin frames.
+6. **House engineering laws.** Maintainability -> Correctness -> Efficiency; max 500 lines/file, 50 lines/definition, 3 indentation levels; unit, integration, and end-to-end tests in `tests/`.
 
-## 5. Not goals of the migration (phases 1 to 5)
+## 5. Learner Capabilities Enabled by LumberJack + MFN
 
-- Changing the teaching engine, its prompts or its storage formats.
-- A hosted or multi-user version.
-- Replacing Electron.
-- Carrying any React, Next.js or Tailwind past the removal phase.
+The LumberJack multi-parent DAG + MFN 2.0 substrate directly supports the learner capabilities recorded on 2026-11-14:
 
-## 6. After the migration
-
-Wanted by the owner (2026-11-14), to be built once the migration is in. None of these is designed yet; each
-starts with its own Discovery. "Today" is what was found in the code on `master`, not a design.
-
-| Wanted | Today |
+| Capability | Substrate Home |
 |---|---|
-| **Onboarding in the app**: find the learner's areas of interest and assess their goals, with suggestions | First run only sets up models (`components/setup-dialog.tsx`). Nothing asks about interests or goals |
-| **A knowledge base about the learner**: goals, experience, interests, facts, memories (the list is not fixed) | None. The knowledge graph holds what was taught; upstream's README says it stores "the ideas and their connections, not ratings of your ability" |
-| **Visuals generated by the model for tests and assessment**: geometry, anything that needs a diagram, interactive puzzles | The model can draw SVG and build sandboxed demos for explanations (`src/agent/subagents/visual-maker.ts`, `demo-builder.ts`). Questions are text, plus the plugin question types (`plugins/coding-questions`, `plugins/drawing-pad`) |
-| **Linking similar and overlapping topics** by keyword and metadata, so that mathematics and computer science share what they share | Some similarity handling exists in the graph code (`src/core/proposition-candidates.ts`, `src/core/graph.ts`); its extent is not verified |
-| **Ongoing skills assessment and ranking**, with a metrics dashboard of progression and skill level by area | None, and it departs from upstream's stated position quoted above. The dashboard builds on Phase 6 |
-| **Thinking**: show what the model is thinking | The session view renders reasoning when a provider returns it (`components/chat.tsx`, the `reasoning` part). The Codex and Antigravity bindings in pull request 1 do not pass reasoning through |
-| **Masterclass mode**, beside single lessons. Single lessons stay as they work now, and cluster. Masterclass runs extended refinement rounds, not a single planning pass, and drafts an extended roadmap toward complete knowledge of a domain. Its assessment finds everything the learner wants to learn and where they sit in each sub-domain or niche of a school of thought, or across domains; it maps the pieces and sews together successions of lessons | A session's plan is written once: one `plan_init` call, "author-once" (`src/agent/tools/plan.ts`), as the minimal tree to one goal (`src/agent/prompts/teacher/10-planning.md`). Whether anything plans across sessions or groups them is not verified |
-| **Seams between domains**, alongside masterclass mode. Sets of connected topics that have been learned connect and group together in the graph. Where topics are related, even across domains, the system identifies the gaps and can test and teach the seam between the domains or teachings already created. The owner placed this last, after everything else | Not verified. The topic-linking row above names the similarity code that exists; nothing was found that detects gaps between domains |
-| **Mastery and mystery**. The system identifies strengths (areas of mastery) and gaps (areas of mystery), and how to build on existing topics to extend into target areas: the areas in the map that help bridge the gaps. It reinforces the strengths and eliminates the weaknesses | Not verified. The graph stores ideas and their connections; upstream's README says it does not rate ability. See the skills-assessment row |
-| **Chained learning across subjects**. The model looks at the other areas, topics and content the learner is working through and sees how they relate. The owner's example: working on machine learning while missing fundamental math, it uses the math teaching inside the machine learning and teaches both, placing what is learned in machine learning within what is missing in math, so the learner gains in both areas | Not verified. A session plans toward one goal (the masterclass row); nothing was found that relates sessions to each other |
-| **Learning style, self-graded confidence and communication style**. The model learns the individual's learning style, how they grade themselves in terms of confidence, and different styles of communication, if possible | Within one session the teacher chooses "Socratic or expository for each stretch, given the topic and his energy" (`src/agent/prompts/teacher/10-planning.md`), and a question can be answered "don't know" (`dontKnow` in `src/core/plugin-view-context.ts`). Nothing was found that keeps a learner's style or confidence across sessions; not verified beyond these two files |
+| Persistent learner profile (goals, interests, style, confidence) | LumberJack `learner/profile` node + MFN `tags: ["kind:learner"]` memories |
+| Mastery, mystery, and ongoing skill ranking | LumberJack `proposition` node metadata (`mastery`, `fsrs`) + multi-parent gap traversal |
+| Cross-subject linking, seams, and chained learning | LumberJack multi-parent `Parents` across sources/domains + MFN L5 `echo_of` & L3 Hebbian co-activation |
+| Masterclass multi-session roadmaps | LumberJack `plans/<id>/<node>` DAGs linked across sessions + MFN L5 theme centroids |
+| Model-generated assessment visuals & dashboards | CloudCanvas widget/board documents + LumberJack `/objects` SHA-256 attachments |
 
-The third and fifth depend on model-built canvases (Phase 6). The others do not depend on the interface and
-could be scheduled earlier; that ordering is **open** (§7). Proposed, not decided: masterclass mode builds on
-onboarding's assessment, the learner knowledge base and topic linking; whether its roadmap view needs Phase 6 is
-**open**.
-
-## 7. Open decisions
-
-Decided on 2026-11-14 and moved to §3: the placement rule (was open point 1's rule), model tiers (was 3), the
-knowledge graph at parity (was 5), how the client reaches the engine (was 7), how the client's files reach the
-window (was 8), the name `src/api` (was 9).
-
-| Open point | Falls due |
-|---|---|
-| **The commits to pin** for `extern/cloudcanvas` (0.7.x) and `extern/cloudcanvas-lib` | When the owner says the CloudCanvas push is finished; pinned in sprint B0 |
-| **The view contract**, re-derived from `cloudcanvas-lib`'s `widget()` model (§4, principle 2) | Sprint B1; the owner approves the contracts |
-| **Each capability CloudCanvas lacks, placed by the rule in §3.** From the superseded v0.6.0 kit discovery, to be re-checked in sprint B0: type definitions, rendering of half-streamed text and a Markdown block extension point were proposed for the CloudCanvas side; math, Mermaid and code highlighting as application blocks (peer) | B0 redoes the gap table; B1 sorts it by the rule into Stream L's list; the owner approves it at the end of B1 |
-| **The client's development path**: `/client/` under Next's `public/` is proposed | Sprint B1 (client build and delivery paths) |
-| **The end-to-end driver**: `puppeteer-core` proposed | Confirmed in sprint B1 |
-| **The production build tool**: esbuild proposed | The cutover sprint (C) |
-| **Panels and board save/load.** Before the split they existed only in `CloudsEcosys/cc-main`; the board is now in `cloudcanvas-lib`, and whether save/load came with it is to be re-checked in sprint B0. Dashboards after parity probably need them | Re-checked in B0; decided before Phase 6 (E) |
-| **Effort for each work item**: proposed in pdl | Not scheduled in the plan |
-| **The fork's default branch** on GitHub is still `main`; pull requests name `master` explicitly | Not scheduled in the plan |
-| **When the items in §6 are scheduled**, and which of them may start before parity. The plan's stream E lists model-built canvases, then the §6 points, each opening with its own Discovery | Not scheduled in the plan |
+Signature: Google gemini-4-carbon high - 04da2a6d-9328-4ad4-b892-398e4c39b74c
