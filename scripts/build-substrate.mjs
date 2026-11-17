@@ -145,10 +145,13 @@ function buildLumberJack(env) {
 	run("go", ["build", "-C", LJ_SRC, "-buildmode=c-archive", "-trimpath", "-o", archivePath, "./ffi"], env);
 	fs.copyFileSync(path.join(LJ_SRC, "ffi", "lumberjack.h"), path.join(LJ_OUT, "lumberjack.h"));
 	verifyLumberJackArchive(archivePath, env);
+	run(process.execPath, [path.join(REPO_ROOT, "scripts", "build-lumberjack-addon.mjs")], env);
 	return {
 		commit: run("git", ["-C", LJ_SRC, "rev-parse", "HEAD"], env, REPO_ROOT, true).trim(),
 		archiveSha256: sha256File(archivePath),
 		headerSha256: sha256File(path.join(LJ_OUT, "lumberjack.h")),
+		peerArchiveSha256: sha256File(path.join(LJ_OUT, "liblumberjack_peer.a")),
+		peerAddonSha256: sha256File(path.join(LJ_OUT, "lumberjack_peer.node")),
 	};
 }
 
