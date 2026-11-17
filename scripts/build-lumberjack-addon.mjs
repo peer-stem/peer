@@ -3,6 +3,10 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	FORBIDDEN_GPU_LIBRARY_PATTERN,
+	isForbiddenGpuEnvKey,
+} from "../src/substrate/gpu-policy.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PERSIST_ROOT = process.env.PEER_PERSIST_ROOT ?? "/usr/lib/persist/peer";
@@ -13,15 +17,12 @@ const SCRATCH_TMP = path.join(PERSIST_ROOT, "scratch", `build-lj-addon-${process
 const GO_EXT_DIR = path.join(REPO_ROOT, "src", "native", "lumberjack-peer");
 const NAPI_SRC = path.join(REPO_ROOT, "src", "native", "lumberjack_napi.c");
 
-const GPU_PREFIXES = ["CUDA_", "NVIDIA_", "NVCC_", "NCCL_", "ROCR_", "ROCM_", "HIP_", "HSA_", "MIOPEN_"];
-const BLOCKED_LIB_RE =
-	/\b(libcuda|libcudart|libcublas|libcurand|libcufft|libcusparse|libcusolver|libcudnn|libnvrtc|libnccl|libamdhip64|libhsa-runtime64|librocblas|libhipblas|libmiopen|librocm)[\w.-]*\.so\b/i;
-
 function createCleanEnv() {
 	const env = {};
 	for (const [key, val] of Object.entries(process.env)) {
-		if (typeof val !== "string") continue;
-		if (GPU_PREFIXES.some((prefix) => key.toUpperCase().startsWith(prefix))) continue;
+		if (typeof val !== "string" || isForbiddenGpuEnvKey(key)) {
+			continue;
+		}
 		env[key] = val;
 	}
 	Object.assign(env, {
@@ -33,6 +34,8 @@ function createCleanEnv() {
 		OLLAMA_LLM_LIBRARY: "cpu",
 		TMPDIR: SCRATCH_TMP,
 		GOCACHE: path.join(CACHE_DIR, "gocache"),
+		GOMODCACHE: path.join(CACHE_DIR, "gomodcache"),
+		GOPATH: path.join(CACHE_DIR, "gopath"),
 		CGO_ENABLED: "1",
 		GOTOOLCHAIN: "local",
 		GOOS: "linux",
@@ -99,7 +102,7 @@ function main() {
 		console.log("[lumberjack-addon] Compiling C11 N-API addon lumberjack_peer.node...");
 		compileAddonSharedLib(nodeInc, addonPath, archivePath, env);
 		const lddOut = execFileSync("ldd", [addonPath], { env, encoding: "utf8" });
-		const bad = BLOCKED_LIB_RE.exec(lddOut);
+		const bad = FORBIDDEN_GPU_LIBRARY_PATTERN.exec(lddOut);
 		if (bad) {
 			throw new Error(`Forbidden GPU library ${bad[0]} linked into ${addonPath}`);
 		}

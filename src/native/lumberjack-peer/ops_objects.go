@@ -95,7 +95,7 @@ func handleDeleteNode(host extension.Host, payload json.RawMessage) (any, C.lj_s
 			return nil
 		}
 		deleted = true
-		unlinkFromParents(tx, target)
+		unlinkNodeRelatives(tx, target)
 		tx.DeleteSlot(target.ID, peerSlotKey)
 		return nil
 	})
@@ -108,13 +108,23 @@ func handleDeleteNode(host extension.Host, payload json.RawMessage) (any, C.lj_s
 	return map[string]bool{"deleted": deleted}, C.LJ_OK, ""
 }
 
-func unlinkFromParents(tx extension.Tx, target *core.Node) {
+func unlinkNodeRelatives(tx extension.Tx, target *core.Node) {
 	for parentID := range target.Parents {
 		if p, ok := tx.NodeByID(parentID); ok && p != nil {
 			delete(p.Children, target.ID)
 		}
 	}
+	for childID, child := range target.Children {
+		if child != nil {
+			delete(child.Parents, target.ID)
+		}
+		if resolved, ok := tx.NodeByID(childID); ok && resolved != nil {
+			delete(resolved.Parents, target.ID)
+		}
+	}
 	delete(tx.Root().Children, target.ID)
+	target.Parents = map[string]string{}
+	target.Children = map[string]*core.Node{}
 }
 
 func handleSetEntries(host extension.Host, payload json.RawMessage) (any, C.lj_status_t, string) {

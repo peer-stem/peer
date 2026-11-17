@@ -77,20 +77,25 @@ function clampTimeoutMs(timeoutMs: number | undefined, fallback: number): number
 	return Math.max(1, Math.min(30_000, Math.floor(raw)));
 }
 
-function readHttpResponse(
+function attachResponseCollector(
 	res: http.IncomingMessage,
-	resolve: (val: { httpStatus: number; rawBody: string }) => void,
-	reject: (err: unknown) => void,
+	onResolve: (val: { httpStatus: number; rawBody: string }) => void,
+	onReject: (err: unknown) => void,
 ): void {
 	const chunks: Buffer[] = [];
 	res.on("data", (chunk: Buffer) => chunks.push(chunk));
-	res.on("end", () => {
-		resolve({
+	res.once("end", () => {
+		onResolve({
 			httpStatus: res.statusCode ?? 0,
 			rawBody: Buffer.concat(chunks).toString("utf8"),
 		});
 	});
-	res.once("error", reject);
+	res.once("error", onReject);
+	res.once("close", () => {
+		if (!res.complete) {
+			onReject(new MfnApiError({ httpStatus: 502, code: "protocol_error", message: "MFN response truncated before end", retryable: true }));
+		}
+	});
 }
 
 function postLoopbackExecute(
@@ -108,12 +113,33 @@ function postLoopbackExecute(
 		Connection: "close",
 	};
 	return new Promise((resolve, reject) => {
+		let settled = false;
+		let activeRes: http.IncomingMessage | null = null;
+		const finishResolve = (val: { httpStatus: number; rawBody: string }) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(deadlineTimer);
+			resolve(val);
+		};
+		const finishReject = (err: unknown) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(deadlineTimer);
+			reject(err);
+		};
 		const opts = { hostname: host, port, path: "/v2/execute", method: "POST", headers, agent: false };
-		const req = http.request(opts, (res) => readHttpResponse(res, resolve, reject));
-		req.setTimeout(timeoutMs + 1_000, () => {
-			req.destroy(new MfnApiError({ httpStatus: 504, code: "timeout", message: "MFN request timed out", retryable: true }));
+		const req = http.request(opts, (res) => {
+			activeRes = res;
+			attachResponseCollector(res, finishResolve, finishReject);
 		});
-		req.once("error", reject);
+		const deadlineTimer = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			activeRes?.destroy();
+			req.destroy();
+			reject(new MfnApiError({ httpStatus: 504, code: "timeout", message: "MFN request timed out", retryable: true }));
+		}, timeoutMs + 500);
+		req.once("error", finishReject);
 		req.end(bodyJson, "utf8");
 	});
 }
@@ -182,9 +208,7 @@ async function runExecute<TPayload, TComposite = unknown, TOutcome = unknown>(
 }
 
 function isPoolMissingError(err: unknown): boolean {
-	if (!(err instanceof MfnApiError)) {
-		return false;
-	}
+	if (!(err instanceof MfnApiError)) return false;
 	return (
 		err.httpStatus === 404 ||
 		err.code === "not_found" ||
@@ -199,9 +223,7 @@ async function ensureSinglePool(client: MfnClient, poolId: string, putPayload: M
 		const found = await client.execute("pool.get", {}, { poolId });
 		needsCreate = found.envelope.status === "partial";
 	} catch (err) {
-		if (!isPoolMissingError(err)) {
-			throw err;
-		}
+		if (!isPoolMissingError(err)) throw err;
 		needsCreate = true;
 	}
 	if (needsCreate) {
@@ -250,7 +272,7 @@ async function hydrateSingleHit(
 	client: MfnClient,
 	poolId: string,
 	hit: RawSearchHit,
-	timeoutMs?: number,
+	timeoutMs: number,
 ): Promise<LexicalSearchMatch | null> {
 	const memoryId = hit.memory_id as string;
 	const score = hit.score as number;
@@ -300,20 +322,56 @@ async function execTurnRecall(
 	return { httpStatus, status: envelope.status, result: envelope.result?.result ?? empty };
 }
 
+const GATEWAY_SAFE_CONCURRENCY = 3;
+
+function computeRemainingHydrationMs(hit: RawSearchHit, deadlineAt: number): number {
+	const remainingMs = deadlineAt - Date.now();
+	const needsRemotePeek = typeof hit.content !== "string" || hit.content.length === 0;
+	if (needsRemotePeek && remainingMs <= 0) {
+		throw new MfnApiError({
+			httpStatus: 504,
+			code: "timeout",
+			message: "MFN lexical search deadline exceeded",
+			retryable: true,
+		});
+	}
+	return Math.max(1, remainingMs);
+}
+
+async function hydrateHitsBounded(
+	client: MfnClient,
+	poolId: string,
+	hits: RawSearchHit[],
+	deadlineAt: number,
+): Promise<LexicalSearchMatch[]> {
+	const out: Array<LexicalSearchMatch | null> = new Array(hits.length).fill(null);
+	let cursor = 0;
+	const worker = async (): Promise<void> => {
+		while (cursor < hits.length) {
+			const idx = cursor++;
+			const hit = hits[idx];
+			if (hit) out[idx] = await hydrateSingleHit(client, poolId, hit, computeRemainingHydrationMs(hit, deadlineAt));
+		}
+	};
+	const workerCount = Math.min(GATEWAY_SAFE_CONCURRENCY, hits.length);
+	await Promise.all(Array.from({ length: workerCount }, () => worker()));
+	return out.filter((item): item is LexicalSearchMatch => item !== null);
+}
+
 async function execLexicalSearch(
 	client: MfnClient,
+	defaultTimeoutMs: number,
 	poolId: string,
 	payload: { query: string; tags?: string[]; top_k?: number; minimum_score?: number },
 	timeoutMs?: number,
 ): Promise<LexicalSearchMatch[]> {
+	const budgetMs = clampTimeoutMs(timeoutMs, defaultTimeoutMs);
+	const deadlineAt = Date.now() + budgetMs;
 	const topK = payload.top_k ?? 10;
-	const { envelope } = await client.execute<typeof payload, unknown, { hits?: RawSearchHit[] }>("memory.search", payload, { poolId, timeoutMs });
-	const out: LexicalSearchMatch[] = [];
-	for (const hit of mergeSearchHits(envelope, topK)) {
-		const hydrated = await hydrateSingleHit(client, poolId, hit, timeoutMs);
-		if (hydrated) out.push(hydrated);
-	}
-	return out;
+	const { envelope } = await client.execute<typeof payload, unknown, { hits?: RawSearchHit[] }>("memory.search", payload, { poolId, timeoutMs: budgetMs });
+	const merged = mergeSearchHits(envelope, topK);
+	if (merged.length === 0) return [];
+	return hydrateHitsBounded(client, poolId, merged, deadlineAt);
 }
 
 export class MfnClient {
@@ -361,6 +419,6 @@ export class MfnClient {
 	}
 
 	lexicalSearch(poolId: string, payload: { query: string; tags?: string[]; top_k?: number; minimum_score?: number }, timeoutMs?: number) {
-		return execLexicalSearch(this, poolId, payload, timeoutMs);
+		return execLexicalSearch(this, this.defaultTimeoutMs, poolId, payload, timeoutMs);
 	}
 }

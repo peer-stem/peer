@@ -5,6 +5,7 @@ import type {
 	GraphNode,
 	NotesSource,
 	Position,
+	ProvenancePoint,
 	SessionCheckpoint,
 } from "../../core/contracts.ts";
 import { emit } from "../../core/events.ts";
@@ -57,20 +58,68 @@ export interface LumberJackLearnerStore {
 	listDecks(): FlashcardDeckRecord[];
 }
 
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+	return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+const isString = (v: unknown): v is string => typeof v === "string";
+
+const isProvenancePoint = (v: unknown): v is ProvenancePoint =>
+	isPlainRecord(v) && isString(v.chatId) && isString(v.messageId);
+
+export const isGraphNode = (v: unknown): v is GraphNode =>
+	isPlainRecord(v) &&
+	isString(v.id) &&
+	isString(v.name) &&
+	isString(v.statement) &&
+	Array.isArray(v.aliases) &&
+	v.aliases.every(isString) &&
+	isString(v.createdAt) &&
+	Array.isArray(v.provenance) &&
+	v.provenance.every(isProvenancePoint);
+
+export const isGraphChain = (v: unknown): v is GraphChain =>
+	isPlainRecord(v) &&
+	isString(v.id) &&
+	Array.isArray(v.premises) &&
+	v.premises.length > 0 &&
+	v.premises.every(isString) &&
+	isString(v.conclusion) &&
+	Array.isArray(v.provenance) &&
+	v.provenance.every(isProvenancePoint) &&
+	isString(v.createdAt);
+
+export const isCheckpoint = (v: unknown): v is SessionCheckpoint =>
+	isPlainRecord(v) && isString(v.chatId) && isString(v.foldedAt);
+
+export const isCoverageEntry = (v: unknown): v is CoverageEntry =>
+	isPlainRecord(v) &&
+	isString(v.chatId) &&
+	isString(v.fp) &&
+	typeof v.tokens === "number" &&
+	Number.isFinite(v.tokens) &&
+	isString(v.foldedAt);
+
+export const isNotesSource = (v: unknown): v is NotesSource =>
+	isPlainRecord(v) && isString(v.id) && isString(v.filePath) && isString(v.importedAt);
+
+export const isPosition = (v: unknown): v is Position =>
+	isPlainRecord(v) && typeof v.x === "number" && Number.isFinite(v.x) && typeof v.y === "number" && Number.isFinite(v.y);
+
 function sanitizeSegment(raw: string): string {
 	return raw.replace(/[^A-Za-z0-9_.:-]/g, "_");
 }
 
 function readLedgers(forest: LumberJackForest): RootLedgerSlot {
 	const raw = forest.getRootSlot<Partial<RootLedgerSlot>>();
-	if (!raw || typeof raw !== "object") {
+	if (!isPlainRecord(raw)) {
 		return { nodes: [], chains: [], checkpoints: [], coverage: [] };
 	}
 	return {
-		nodes: Array.isArray(raw.nodes) ? raw.nodes : [],
-		chains: Array.isArray(raw.chains) ? raw.chains : [],
-		checkpoints: Array.isArray(raw.checkpoints) ? raw.checkpoints : [],
-		coverage: Array.isArray(raw.coverage) ? raw.coverage : [],
+		nodes: Array.isArray(raw.nodes) ? raw.nodes.filter(isGraphNode) : [],
+		chains: Array.isArray(raw.chains) ? raw.chains.filter(isGraphChain) : [],
+		checkpoints: Array.isArray(raw.checkpoints) ? raw.checkpoints.filter(isCheckpoint) : [],
+		coverage: Array.isArray(raw.coverage) ? raw.coverage.filter(isCoverageEntry) : [],
 	};
 }
 
@@ -79,6 +128,27 @@ function originParentPath(forest: LumberJackForest, chatOrSourceId: string): str
 	if (forest.getNode(`knowledge/sources/${clean}`)) return `knowledge/sources/${clean}`;
 	if (forest.getNode(`sessions/${clean}`)) return `sessions/${clean}`;
 	return null;
+}
+
+function extractProgressFields(raw: unknown): { mastery?: number; fsrs?: FsrsCardSchedule } {
+	if (!isPlainRecord(raw)) return {};
+	const out: { mastery?: number; fsrs?: FsrsCardSchedule } = {};
+	if (typeof raw.mastery === "number" && Number.isFinite(raw.mastery)) out.mastery = raw.mastery;
+	if (isPlainRecord(raw.fsrs)) out.fsrs = raw.fsrs as unknown as FsrsCardSchedule;
+	return out;
+}
+
+function readPropProgressNode(
+	forest: LumberJackForest,
+	nodeId: string,
+): { mastery?: number; fsrs?: FsrsCardSchedule } | null {
+	const seg = sanitizeSegment(nodeId);
+	const snap = forest.getNode(`learner/progress/${seg}`);
+	if (snap) {
+		return { ...extractProgressFields(snap.metadata), ...extractProgressFields(snap.slot) };
+	}
+	const legacy = extractProgressFields(forest.getNode(`knowledge/propositions/${seg}`)?.metadata);
+	return legacy.mastery !== undefined || legacy.fsrs !== undefined ? legacy : null;
 }
 
 function buildPropositionUpsert(forest: LumberJackForest, node: GraphNode): UpsertNodeInput {
@@ -91,6 +161,7 @@ function buildPropositionUpsert(forest: LumberJackForest, node: GraphNode): Upse
 		const p = originParentPath(forest, pt.chatId);
 		if (p) parents.push(p);
 	}
+	const progress = readPropProgressNode(forest, node.id);
 	return {
 		path: propPath,
 		type: "leaf",
@@ -102,6 +173,8 @@ function buildPropositionUpsert(forest: LumberJackForest, node: GraphNode): Upse
 			statement: node.statement,
 			aliases: [...aliases],
 			createdAt: (existing?.metadata?.createdAt as string | undefined) ?? node.createdAt,
+			...(progress?.mastery !== undefined ? { mastery: progress.mastery } : {}),
+			...(progress?.fsrs !== undefined ? { fsrs: progress.fsrs } : {}),
 		},
 	};
 }
@@ -124,9 +197,7 @@ function buildChainUpserts(assertion: GraphChain): UpsertNodeInput[] {
 }
 
 function extractCanvasPosition(meta?: Record<string, unknown>): Position | null {
-	const canvas = meta?.canvas as { x?: unknown; y?: unknown } | undefined;
-	if (!canvas || typeof canvas.x !== "number" || typeof canvas.y !== "number") return null;
-	return { x: canvas.x, y: canvas.y };
+	return isPosition(meta?.canvas) ? { x: meta.canvas.x, y: meta.canvas.y } : null;
 }
 
 function readCanvasPositions(forest: LumberJackForest): Record<string, Position> {
@@ -150,11 +221,11 @@ function writeCanvasPositions(forest: LumberJackForest, positions: Record<string
 		batch.push({
 			path: snap.path,
 			kind: "proposition",
-			metadata: { canvas: nextPos ? { x: nextPos.x, y: nextPos.y } : null },
+			metadata: { canvas: isPosition(nextPos) ? { x: nextPos.x, y: nextPos.y } : null },
 		});
 	}
 	for (const [nodeId, pos] of Object.entries(positions)) {
-		if (seen.has(nodeId)) continue;
+		if (seen.has(nodeId) || !isPosition(pos)) continue;
 		batch.push({
 			path: `knowledge/propositions/${sanitizeSegment(nodeId)}`,
 			type: "leaf",
@@ -189,13 +260,16 @@ function rebuildGraphDag(
 	if (batch.length > 0) forest.batchUpsertNodes(batch);
 }
 
+function mergeSourceRecord(prev: NotesSource | undefined, incoming: NotesSource): NotesSource {
+	if (!prev) return incoming;
+	const { extractions: _dropped, ...rest } = incoming;
+	return prev.extractions !== undefined ? { ...rest, extractions: prev.extractions } : rest;
+}
+
 function upsertSourceNode(forest: LumberJackForest, source: NotesSource): void {
 	const nodePath = `knowledge/sources/${sanitizeSegment(source.id)}`;
-	const prev = forest.getNode(nodePath)?.slot as NotesSource | undefined;
-	const merged: NotesSource = {
-		...source,
-		...(source.extractions ?? prev?.extractions ? { extractions: source.extractions ?? prev?.extractions } : {}),
-	};
+	const prevSlot = forest.getNode(nodePath)?.slot;
+	const merged = mergeSourceRecord(isNotesSource(prevSlot) ? prevSlot : undefined, source);
 	forest.upsertNode({
 		path: nodePath,
 		type: "leaf",
@@ -215,8 +289,8 @@ function deleteSourceNodes(forest: LumberJackForest, ids: ReadonlySet<string>): 
 
 function appendUsageToSource(forest: LumberJackForest, id: string, entry: ExtractionRunUsage): void {
 	const nodePath = `knowledge/sources/${sanitizeSegment(id)}`;
-	const existing = forest.getNode(nodePath)?.slot as NotesSource | undefined;
-	if (!existing) return;
+	const existing = forest.getNode(nodePath)?.slot;
+	if (!isNotesSource(existing)) return;
 	const list = existing.extractions ?? [];
 	if (list.some((e) => e.startedAt === entry.startedAt)) return;
 	forest.upsertNode({ path: nodePath, kind: "source", slot: { ...existing, extractions: [...list, entry] } });
@@ -233,10 +307,10 @@ function rewriteGraphLedgers(
 ): void {
 	const prevPositions = readCanvasPositions(forest);
 	const ledgers = readLedgers(forest);
-	if (next.nodes !== undefined) ledgers.nodes = [...next.nodes];
-	if (next.chains !== undefined) ledgers.chains = [...next.chains];
-	if (next.coverage !== undefined) ledgers.coverage = [...next.coverage];
-	if (next.checkpoints !== undefined) ledgers.checkpoints = [...next.checkpoints];
+	if (next.nodes !== undefined) ledgers.nodes = next.nodes.filter(isGraphNode);
+	if (next.chains !== undefined) ledgers.chains = next.chains.filter(isGraphChain);
+	if (next.coverage !== undefined) ledgers.coverage = next.coverage.filter(isCoverageEntry);
+	if (next.checkpoints !== undefined) ledgers.checkpoints = next.checkpoints.filter(isCheckpoint);
 	forest.setRootSlot(ledgers);
 	if (next.nodes !== undefined || next.chains !== undefined) {
 		rebuildGraphDag(forest, ledgers.nodes, ledgers.chains, prevPositions);
@@ -272,8 +346,7 @@ function syncSourceFolderDag(forest: LumberJackForest, org: SourceOrganization):
 function listStoredSources(forest: LumberJackForest): NotesSource[] {
 	const out: NotesSource[] = [];
 	for (const node of forest.listChildren("knowledge/sources")) {
-		const slot = node.slot as NotesSource | undefined;
-		if (slot && typeof slot.id === "string") out.push(slot);
+		if (isNotesSource(node.slot)) out.push(node.slot);
 	}
 	return out;
 }
@@ -283,27 +356,26 @@ function updatePropProgressNode(
 	nodeId: string,
 	progress: { mastery?: number; fsrs?: FsrsCardSchedule },
 ): void {
-	const meta: Record<string, unknown> = { nodeId };
-	if (progress.mastery !== undefined) meta.mastery = progress.mastery;
-	if (progress.fsrs !== undefined) meta.fsrs = progress.fsrs;
+	const seg = sanitizeSegment(nodeId);
+	const prev = readPropProgressNode(forest, nodeId) ?? {};
+	const merged: { mastery?: number; fsrs?: FsrsCardSchedule } = { ...prev };
+	if (progress.mastery !== undefined) merged.mastery = progress.mastery;
+	if (progress.fsrs !== undefined) merged.fsrs = progress.fsrs;
 	forest.upsertNode({
-		path: `knowledge/propositions/${sanitizeSegment(nodeId)}`,
+		path: `learner/progress/${seg}`,
 		type: "leaf",
-		kind: "proposition",
-		metadata: meta,
+		kind: "proposition_progress",
+		metadata: { nodeId, ...merged },
+		slot: merged,
 	});
-}
-
-function readPropProgressNode(
-	forest: LumberJackForest,
-	nodeId: string,
-): { mastery?: number; fsrs?: FsrsCardSchedule } | null {
-	const meta = forest.getNode(`knowledge/propositions/${sanitizeSegment(nodeId)}`)?.metadata;
-	if (!meta) return null;
-	const out: { mastery?: number; fsrs?: FsrsCardSchedule } = {};
-	if (typeof meta.mastery === "number") out.mastery = meta.mastery;
-	if (meta.fsrs && typeof meta.fsrs === "object") out.fsrs = meta.fsrs as FsrsCardSchedule;
-	return out;
+	if (readLedgers(forest).nodes.some((n) => sanitizeSegment(n.id) === seg)) {
+		forest.upsertNode({
+			path: `knowledge/propositions/${seg}`,
+			type: "leaf",
+			kind: "proposition",
+			metadata: { nodeId, ...merged },
+		});
+	}
 }
 
 function upsertDeckNode(forest: LumberJackForest, deck: FlashcardDeckRecord): void {
@@ -330,6 +402,7 @@ function listDeckNodes(forest: LumberJackForest): FlashcardDeckRecord[] {
 function buildGraphStore(forest: LumberJackForest): GraphStore {
 	return {
 		appendNode: (node) => {
+			if (!isGraphNode(node)) return;
 			const ledgers = readLedgers(forest);
 			ledgers.nodes.push(node);
 			forest.setRootSlot(ledgers);
@@ -337,6 +410,7 @@ function buildGraphStore(forest: LumberJackForest): GraphStore {
 		},
 		readNodes: () => readLedgers(forest).nodes,
 		appendChain: (assertion) => {
+			if (!isGraphChain(assertion)) return;
 			const ledgers = readLedgers(forest);
 			ledgers.chains.push(assertion);
 			forest.setRootSlot(ledgers);
@@ -345,11 +419,13 @@ function buildGraphStore(forest: LumberJackForest): GraphStore {
 		readCheckpoints: () => readLedgers(forest).checkpoints,
 		readChains: () => readLedgers(forest).chains,
 		appendCheckpoint: (checkpoint) => {
+			if (!isCheckpoint(checkpoint)) return;
 			const ledgers = readLedgers(forest);
 			ledgers.checkpoints.push(checkpoint);
 			forest.setRootSlot(ledgers);
 		},
 		appendCoverage: (entry) => {
+			if (!isCoverageEntry(entry)) return;
 			const ledgers = readLedgers(forest);
 			ledgers.coverage.push(entry);
 			forest.setRootSlot(ledgers);

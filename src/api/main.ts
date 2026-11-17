@@ -172,14 +172,17 @@ export function isMainModule(
 	return safeRealpath(fileURLToPath(metaUrl)) === safeRealpath(argv1);
 }
 
+export function formatForcedExitLine(timeoutMs = SHUTDOWN_TIMEOUT_MS): string {
+	return JSON.stringify({
+		timestamp: new Date().toISOString(),
+		level: "warn",
+		message: `[api] Forced process exit after ${timeoutMs}ms shutdown deadline.`,
+	});
+}
+
 async function exitGracefully(running: RunningApiServer | null): Promise<never> {
 	const forceExit = setTimeout(() => {
-		const line = JSON.stringify({
-			ts: new Date().toISOString(),
-			level: "warn",
-			msg: `[api] Forced process exit after ${SHUTDOWN_TIMEOUT_MS}ms shutdown deadline.`,
-		});
-		process.stderr.write(`${line}\n`);
+		process.stderr.write(`${formatForcedExitLine()}\n`);
 		process.exit(0);
 	}, SHUTDOWN_TIMEOUT_MS);
 	forceExit.unref();

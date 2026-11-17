@@ -3,40 +3,64 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { tinyPdf } from "./helpers/tiny-pdf.ts";
 import type { ServerSide } from "./api-parity-stubs.ts";
-import { connectWireStream, parseNdjsonStream, parseSseStream, sendWire, type LiveStreamHandle } from "./api-parity-wire.ts";
-import {
-	assertDataDirsEqual,
-	compareResponseHeaders,
-	normalizeJsonValue,
-	normalizeSseEvents,
-	runParityRequest,
-	type ParityHarness,
-} from "./api-parity-compare.ts";
-import {
-	GOLDEN_NODE_DELETE,
-	GOLDEN_TEACH_CHAT,
-	WORKTREE_ROOT,
-	encodeMultipartRequest,
-} from "./api-test-helpers.ts";
+import { connectWireStream, countOccurrences, parseNdjsonStream, parseSseStream, sendWire, type LiveStreamHandle } from "./api-parity-wire.ts";
+import { assertDataDirsEqual, compareResponseHeaders, normalizeJsonValue, normalizeSseEvents, runParityRequest, type ParityHarness } from "./api-parity-compare.ts";
+import { GOLDEN_NODE_DELETE, GOLDEN_TEACH_CHAT, WORKTREE_ROOT, encodeMultipartRequest } from "./api-test-helpers.ts";
 
 const GOLDEN_JOB_ID = "job_murepie2_9d791321";
 const GOLDEN_DEMO_STEER_ID = "steer_job_mv28454n_25dc3185";
 const GOLDEN_PROSE_MSG_ID = "msg_mv27s2zx_8c815926";
 const GOLDEN_KEEP_NODE_ID = "n_465398b5356a";
 
-export async function waitExtractionIdleOnBoth(h: ParityHarness, timeoutMs = 15_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		const [nextRes, apiRes] = await Promise.all([
-			sendWire(h.pair.next.port, { method: "GET", path: "/api/graph/status" }),
-			sendWire(h.pair.api.port, { method: "GET", path: "/api/graph/status" }),
-		]);
-		const nextRuns = (JSON.parse(nextRes.text) as { runs?: unknown[] }).runs ?? [];
-		const apiRuns = (JSON.parse(apiRes.text) as { runs?: unknown[] }).runs ?? [];
-		if (nextRuns.length === 0 && apiRuns.length === 0) return;
-		await new Promise((r) => setTimeout(r, 40));
+async function openNotifyEventsStream(port: number, timeoutMs: number): Promise<LiveStreamHandle> {
+	const conn = connectWireStream(port, { method: "GET", path: "/api/events" });
+	const pulseReq = { method: "DELETE", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body: "{}" };
+	const pulse = () => void sendWire(port, pulseReq).catch(() => {});
+	const pulser = setInterval(pulse, 80);
+	try {
+		if (!conn.headersArrived()) pulse();
+		return await conn.waitHeaders(timeoutMs);
+	} catch (err) {
+		conn.abort();
+		throw err;
+	} finally {
+		clearInterval(pulser);
 	}
-	throw new Error("Timed out waiting for extraction runs to drain on both servers");
+}
+
+async function waitPortIdleViaEvents(
+	port: number,
+	checkIdle: (port: number) => Promise<boolean>,
+	label: string,
+	timeoutMs: number,
+): Promise<void> {
+	if (await checkIdle(port)) return;
+	const deadline = Date.now() + timeoutMs;
+	const ev = await openNotifyEventsStream(port, Math.max(1, deadline - Date.now()));
+	try {
+		while (Date.now() < deadline) {
+			const seen = countOccurrences(ev.snapshotText(), "\n\n");
+			if (await checkIdle(port)) return;
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) break;
+			await ev.waitForCount("\n\n", seen + 1, remaining);
+		}
+	} finally {
+		ev.abort();
+	}
+	throw new Error(`Timed out waiting for ${label}`);
+}
+
+export async function waitExtractionIdleOnBoth(h: ParityHarness, timeoutMs = 15_000): Promise<void> {
+	const isIdle = async (port: number) => {
+		const res = await sendWire(port, { method: "GET", path: "/api/graph/status" });
+		return ((JSON.parse(res.text) as { runs?: unknown[] }).runs ?? []).length === 0;
+	};
+	const label = "extraction runs to drain on both servers";
+	await Promise.all([
+		waitPortIdleViaEvents(h.pair.next.port, isIdle, label, timeoutMs),
+		waitPortIdleViaEvents(h.pair.api.port, isIdle, label, timeoutMs),
+	]);
 }
 
 export async function waitChatSettledOnBoth(
@@ -44,33 +68,28 @@ export async function waitChatSettledOnBoth(
 	chatIds: Record<ServerSide, string>,
 	timeoutMs = 15_000,
 ): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		const [nextRes, apiRes] = await Promise.all([
-			sendWire(h.pair.next.port, { method: "GET", path: `/api/chats/${chatIds.next}` }),
-			sendWire(h.pair.api.port, { method: "GET", path: `/api/chats/${chatIds.api}` }),
-		]);
-		const n = JSON.parse(nextRes.text) as { turnInFlight?: boolean; compacting?: boolean };
-		const a = JSON.parse(apiRes.text) as { turnInFlight?: boolean; compacting?: boolean };
-		if (!n.turnInFlight && !n.compacting && !a.turnInFlight && !a.compacting) return;
-		await new Promise((r) => setTimeout(r, 40));
-	}
-	throw new Error("Timed out waiting for chat turn to settle on both servers");
+	const isSettled = (chatId: string) => async (port: number) => {
+		const res = await sendWire(port, { method: "GET", path: `/api/chats/${chatId}` });
+		const s = JSON.parse(res.text) as { turnInFlight?: boolean; compacting?: boolean };
+		return !s.turnInFlight && !s.compacting;
+	};
+	const label = "chat turn to settle on both servers";
+	await Promise.all([
+		waitPortIdleViaEvents(h.pair.next.port, isSettled(chatIds.next), label, timeoutMs),
+		waitPortIdleViaEvents(h.pair.api.port, isSettled(chatIds.api), label, timeoutMs),
+	]);
 }
 
-async function waitSideChatsSettledOnBoth(h: ParityHarness, chatId: string, timeoutMs = 15_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		const [nextRes, apiRes] = await Promise.all([
-			sendWire(h.pair.next.port, { method: "GET", path: `/api/chats/${chatId}/side-chats` }),
-			sendWire(h.pair.api.port, { method: "GET", path: `/api/chats/${chatId}/side-chats` }),
-		]);
-		const nAns = (JSON.parse(nextRes.text) as { answering?: Record<string, string> }).answering ?? {};
-		const aAns = (JSON.parse(apiRes.text) as { answering?: Record<string, string> }).answering ?? {};
-		if (Object.keys(nAns).length === 0 && Object.keys(aAns).length === 0) return;
-		await new Promise((r) => setTimeout(r, 40));
-	}
-	throw new Error("Timed out waiting for side-chat answer to settle on both servers");
+export async function waitSideChatsSettledOnBoth(h: ParityHarness, chatId: string, timeoutMs = 15_000): Promise<void> {
+	const isIdle = async (port: number) => {
+		const res = await sendWire(port, { method: "GET", path: `/api/chats/${chatId}/side-chats` });
+		return Object.keys((JSON.parse(res.text) as { answering?: Record<string, string> }).answering ?? {}).length === 0;
+	};
+	const label = "side-chat answer to settle on both servers";
+	await Promise.all([
+		waitPortIdleViaEvents(h.pair.next.port, isIdle, label, timeoutMs),
+		waitPortIdleViaEvents(h.pair.api.port, isIdle, label, timeoutMs),
+	]);
 }
 
 async function runActivityAndJobsSuite(h: ParityHarness): Promise<void> {
@@ -244,6 +263,7 @@ async function runChatItemMutations(
 	teachIds: Record<ServerSide, string>,
 	dispIds: Record<ServerSide, string>,
 ): Promise<void> {
+	const jsonHeaders = { "Content-Type": "application/json" };
 	await runParityRequest(h, {
 		label: "row 8 GET /api/chats/[id]",
 		pattern: "/api/chats/[id]",
@@ -255,24 +275,15 @@ async function runChatItemMutations(
 		pattern: "/api/chats/[id]",
 		isWrite: true,
 		expectedStatus: 200,
-		request: (side) => ({
-			method: "PUT",
-			path: `/api/chats/${teachIds[side]}`,
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ title: "Renamed Parity Session" }),
-		}),
+		request: (side) => ({ method: "PUT", path: `/api/chats/${teachIds[side]}`, headers: jsonHeaders, body: JSON.stringify({ title: "Renamed Parity Session" }) }),
 	});
+	const settingsBody = JSON.stringify({ model: { provider: "custom", id: "stub-model" }, thinkingLevel: "off" });
 	await runParityRequest(h, {
 		label: "row 9 PUT /api/chats/[id]/settings",
 		pattern: "/api/chats/[id]/settings",
 		isWrite: true,
 		expectedStatus: 200,
-		request: (side) => ({
-			method: "PUT",
-			path: `/api/chats/${teachIds[side]}/settings`,
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ model: { provider: "custom", id: "stub-model" }, thinkingLevel: "off" }),
-		}),
+		request: (side) => ({ method: "PUT", path: `/api/chats/${teachIds[side]}/settings`, headers: jsonHeaders, body: settingsBody }),
 	});
 	await runParityRequest(h, {
 		label: "row 8 DELETE /api/chats/[id]?mode=preserve-graph",
@@ -284,17 +295,13 @@ async function runChatItemMutations(
 }
 
 async function runChatSubroutesAndTurnSuite(h: ParityHarness, teachIds: Record<ServerSide, string>): Promise<void> {
+	const uiBody = JSON.stringify({ input: { messageId: GOLDEN_DEMO_STEER_ID, inverted: true } });
 	await runParityRequest(h, {
 		label: "row 4 POST /api/chats/[id]/artifact-ui",
 		pattern: "/api/chats/[id]/artifact-ui",
 		isWrite: true,
 		expectedStatus: 200,
-		request: {
-			method: "POST",
-			path: `/api/chats/${GOLDEN_TEACH_CHAT}/artifact-ui`,
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ input: { messageId: GOLDEN_DEMO_STEER_ID, inverted: true } }),
-		},
+		request: { method: "POST", path: `/api/chats/${GOLDEN_TEACH_CHAT}/artifact-ui`, headers: { "Content-Type": "application/json" }, body: uiBody },
 	});
 	await runParityRequest(h, {
 		label: "row 6 GET /api/chats/[id]/images/[snapshotId] (missing)",

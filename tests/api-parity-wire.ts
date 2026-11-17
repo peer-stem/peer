@@ -35,6 +35,7 @@ export interface LiveStreamHandle {
 	waitForCount: (needle: string, minCount: number, timeoutMs?: number) => Promise<string>;
 	readRest: (timeoutMs?: number) => Promise<{ rawBody: Buffer; prematureClose: boolean }>;
 	snapshotText: () => string;
+	hasEnded: () => boolean;
 	abort: () => void;
 }
 
@@ -204,13 +205,16 @@ function notifyWaiters(state: StreamBufferState): void {
 }
 
 function waitStreamCondition(state: StreamBufferState, pred: () => boolean, timeoutMs = 15_000): Promise<void> {
-	if (pred() || state.ended) return Promise.resolve();
+	if (pred()) return Promise.resolve();
+	if (state.ended) return Promise.reject(new Error("Stream ended before condition was met"));
 	return new Promise<void>((resolve, reject) => {
 		const check = () => {
-			if (!pred() && !state.ended) return;
+			const matched = pred();
+			if (!matched && !state.ended) return;
 			clearTimeout(timer);
 			state.notify.delete(check);
-			resolve();
+			if (matched) resolve();
+			else reject(new Error("Stream ended before condition was met"));
 		};
 		const timer = setTimeout(() => {
 			state.notify.delete(check);
@@ -220,7 +224,7 @@ function waitStreamCondition(state: StreamBufferState, pred: () => boolean, time
 	});
 }
 
-function countOccurrences(haystack: string, needle: string): number {
+export function countOccurrences(haystack: string, needle: string): number {
 	return needle.length === 0 ? 0 : haystack.split(needle).length - 1;
 }
 
@@ -254,6 +258,7 @@ function makeStreamWaiters(
 			return { rawBody: Buffer.concat(state.chunks), prematureClose: state.premature };
 		},
 		snapshotText: readText,
+		hasEnded: () => state.ended,
 		abort: () => {
 			res.destroy();
 			req.destroy();

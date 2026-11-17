@@ -4,10 +4,17 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { importLearnHarnessData } from "../src/store/import-learnharness.ts";
+import { DEFAULT_ADDON_PATH } from "../src/store/lumberjack/binding.ts";
 import { createLumberJackStores } from "../src/store/lumberjack/index.ts";
 
 const PERSIST_ROOT = process.env.PEER_PERSIST_ROOT ?? "/usr/lib/persist/peer";
-const SCRATCH_ROOT = path.join(PERSIST_ROOT, "scratch");
+const SCRATCH_ROOT = process.env.PEER_TEST_SCRATCH ?? path.join(PERSIST_ROOT, "scratch");
+const SKIP_GUARD = {
+	skip:
+		!fs.existsSync(DEFAULT_ADDON_PATH) && process.env.PEER_REQUIRE_SUBSTRATE !== "1"
+			? "lumberjack_peer.node not built"
+			: false,
+};
 
 function walkTree(root: string, dir: string, out: Record<string, { sha256: string; mtimeMs: number }>): void {
 	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -49,9 +56,21 @@ const IMPORT_SIDE_CHATS = [
 
 const SIGMA_FSRS_PROP = {
 	id: "n_sigma",
-	schedule: { due: 1760000000000, stability: 4.5, difficulty: 3.2, reps: 3, lapses: 0, state: 2 },
+	schedule: {
+		due: 1760000000000,
+		stability: 4.5,
+		difficulty: 3.2,
+		reps: 3,
+		lapses: 0,
+		state: 2,
+		last_review: 1759000000000,
+	},
 	cues: [{ id: "cue_1", question: "Define sigma algebra", answer: "Closed under complement & countable union" }],
 };
+
+const SAMPLE_REVIEWS = [
+	{ id: "rev_1", propositionId: "n_sigma", cueId: "cue_1", rating: 3, at: 1759000000000 },
+];
 
 function seedGraphFixtures(srcDir: string): void {
 	const sourcesMap = {
@@ -93,7 +112,10 @@ function seedGraphFixtures(srcDir: string): void {
 		provenance: [{ chatId: "chat_imp_1", messageId: "msg_a1" }],
 	});
 	fs.writeFileSync(path.join(srcDir, "graph", "chains.jsonl"), `${chainLine}\n`);
-	fs.writeFileSync(path.join(srcDir, "graph", "positions.json"), JSON.stringify({ n_lebesgue: { x: 42, y: 84 } }));
+	fs.writeFileSync(
+		path.join(srcDir, "graph", "positions.json"),
+		JSON.stringify({ positions: { n_lebesgue: { x: 42, y: 84 } }, updatedAt: "2026-11-01T00:04:30Z" }),
+	);
 }
 
 function seedLearnHarnessFixture(srcDir: string): { imgSha: string } {
@@ -129,7 +151,7 @@ function seedLearnHarnessFixture(srcDir: string): { imgSha: string } {
 		revision: 1,
 		decks: [{ id: "deck_measure", name: "Measure Deck", propositionIds: ["n_sigma"] }],
 		propositions: { n_sigma: SIGMA_FSRS_PROP },
-		reviews: [],
+		reviews: SAMPLE_REVIEWS,
 		batches: [],
 	};
 	fs.writeFileSync(path.join(srcDir, "core-plugin-data", "flashcards", "flashcards.json"), JSON.stringify(fcJson));
@@ -145,6 +167,7 @@ function verifyImportRoundtrip(
 	const stores = createLumberJackStores(forestDir);
 	try {
 		const first = importLearnHarnessData(srcDir, stores);
+		assert.equal(first.corruptFilesSkipped, 0);
 		assert.equal(first.settingsImported, true);
 		assert.equal(first.promptsImported, 1);
 		assert.equal(first.sourcesImported, 1);
@@ -156,13 +179,18 @@ function verifyImportRoundtrip(
 		assert.equal(first.objectsDeduplicated, 1);
 		assert.equal(first.flashcardDecksImported, 1);
 		assert.equal(first.flashcardCardsImported, 1);
-
 		assert.deepEqual(snapshotDirectoryTree(srcDir), beforeSnap, "sourceDir must stay strictly untouched");
+
+		const positions = stores.graphStore.readPositions();
+		assert.equal("positions" in positions, false);
+		assert.equal("updatedAt" in positions, false);
+		assert.deepEqual(positions, { n_lebesgue: { x: 42, y: 84 } });
+		const reviewsSlot = stores.forest.getNode("learner/flashcard-reviews")?.slot as { reviews?: unknown[] } | undefined;
+		assert.deepEqual(reviewsSlot?.reviews, SAMPLE_REVIEWS);
 
 		const chat = stores.chatStore.getChat("chat_imp_1");
 		assert.equal(chat?.title, "Integration Lesson");
 		assert.ok(chat?.imageSnapshots?.[imgSha]);
-		assert.deepEqual(stores.graphStore.readPositions(), { n_lebesgue: { x: 42, y: 84 } });
 		assert.equal(stores.learnerStore.listDecks().length, 1);
 		assert.equal(stores.learnerStore.readPropositionProgress("n_sigma")?.fsrs?.stability, 4.5);
 
@@ -171,14 +199,14 @@ function verifyImportRoundtrip(
 		assert.equal(second.chainsImported, 0);
 		assert.equal(second.objectsStored, 0);
 		assert.equal(second.objectsDeduplicated, 2);
-		assert.equal(stores.graphStore.readNodes().length, 3);
-		assert.equal(stores.graphStore.readChains().length, 1);
+		const afterSlot = stores.forest.getNode("learner/flashcard-reviews")?.slot as { reviews?: unknown[] } | undefined;
+		assert.equal(afterSlot?.reviews?.length, 1);
 	} finally {
 		stores.close();
 	}
 }
 
-test("importLearnHarnessData imports read-only, preserves DAG/FSRS/objects, and is idempotent", () => {
+test("importLearnHarnessData imports real positions.json, preserves flashcard reviews, and is idempotent", SKIP_GUARD, () => {
 	fs.mkdirSync(SCRATCH_ROOT, { recursive: true, mode: 0o755 });
 	const base = path.join(SCRATCH_ROOT, `s1-import-${process.pid}-${randomBytes(4).toString("hex")}`);
 	const srcDir = path.join(base, "lh-source");
@@ -189,6 +217,101 @@ test("importLearnHarnessData imports read-only, preserves DAG/FSRS/objects, and 
 		const { imgSha } = seedLearnHarnessFixture(srcDir);
 		const beforeSnap = snapshotDirectoryTree(srcDir);
 		verifyImportRoundtrip(srcDir, forestDir, imgSha, beforeSnap);
+	} finally {
+		fs.rmSync(base, { recursive: true, force: true });
+	}
+});
+
+function seedFaultyFixture(srcDir: string, outsideChatPath: string): void {
+	for (const rel of ["chats", "graph", "core-plugin-data/flashcards"]) {
+		fs.mkdirSync(path.join(srcDir, rel), { recursive: true });
+	}
+	const validChat = {
+		version: 1,
+		id: "chat_valid",
+		title: "Valid Chat",
+		createdAt: "2026-11-02T00:00:00Z",
+		updatedAt: "2026-11-02T00:01:00Z",
+		messages: [{ id: "m1", role: "user", content: "Still works", timestamp: 1 }],
+	};
+	fs.writeFileSync(path.join(srcDir, "chats", "chat_valid.json"), JSON.stringify(validChat));
+	fs.writeFileSync(path.join(srcDir, "chats", "corrupt.json"), "{corrupt-json-payload");
+	fs.symlinkSync(outsideChatPath, path.join(srcDir, "chats", "symlink_chat.json"));
+
+	const validNode = JSON.stringify({
+		id: "n_sigma",
+		name: "Sigma Algebra",
+		statement: "Closed under complement",
+		aliases: [],
+		createdAt: "2026-11-02T00:00:00Z",
+		provenance: [{ chatId: "chat_valid", messageId: "m1" }],
+	});
+	const wrongShapeNode = JSON.stringify({ id: "n_bad_shape_only" });
+	fs.writeFileSync(path.join(srcDir, "graph", "nodes.jsonl"), `${validNode}\n{broken-jsonl\n${wrongShapeNode}\n`);
+
+	const fcJson = {
+		version: 1,
+		revision: 1,
+		decks: [{ id: "deck_m", name: "Measure Deck", propositionIds: ["n_sigma"] }],
+		propositions: { n_sigma: SIGMA_FSRS_PROP },
+		reviews: SAMPLE_REVIEWS,
+	};
+	fs.writeFileSync(path.join(srcDir, "core-plugin-data", "flashcards", "flashcards.json"), JSON.stringify(fcJson));
+}
+
+const NEWER_SIGMA_FSRS = {
+	due: 1770000000000,
+	stability: 12.5,
+	difficulty: 2.1,
+	reps: 9,
+	lapses: 0,
+	state: 2,
+	last_review: 1768000000000,
+};
+
+function verifyFaultyImport(srcDir: string, linkDir: string, forestDir: string): void {
+	const stores = createLumberJackStores(forestDir);
+	try {
+		assert.throws(() => importLearnHarnessData(linkDir, stores));
+		stores.learnerStore.updatePropositionProgress("n_sigma", { mastery: 0.95, fsrs: NEWER_SIGMA_FSRS });
+		const report = importLearnHarnessData(srcDir, stores);
+		assert.equal(report.corruptFilesSkipped >= 4, true);
+		assert.equal(report.chatsImported, 1);
+		assert.equal(stores.chatStore.getChat("chat_valid")?.title, "Valid Chat");
+		assert.equal(stores.chatStore.getChat("chat_outside"), null);
+		assert.deepEqual(stores.graphStore.readNodes().map((n) => n.id), ["n_sigma"]);
+
+		const progress = stores.learnerStore.readPropositionProgress("n_sigma");
+		assert.equal(progress?.mastery, 0.95);
+		assert.equal(progress?.fsrs?.reps, 9);
+		assert.equal(progress?.fsrs?.stability, 12.5);
+	} finally {
+		stores.close();
+	}
+}
+
+test("importLearnHarnessData skips corrupt JSON/JSONL and symlinks cleanly and protects newer FSRS schedules", SKIP_GUARD, () => {
+	fs.mkdirSync(SCRATCH_ROOT, { recursive: true, mode: 0o755 });
+	const base = path.join(SCRATCH_ROOT, `s1-faulty-${process.pid}-${randomBytes(4).toString("hex")}`);
+	const srcDir = path.join(base, "lh-source");
+	const linkDir = path.join(base, "lh-link");
+	const forestDir = path.join(base, "peer-forest");
+	const outsideChat = path.join(base, "outside-chat.json");
+	fs.mkdirSync(srcDir, { recursive: true, mode: 0o700 });
+	fs.mkdirSync(forestDir, { recursive: true, mode: 0o700 });
+	const escaped = {
+		version: 1,
+		id: "chat_outside",
+		title: "Escaped",
+		createdAt: "2026-11-02T00:00:00Z",
+		updatedAt: "2026-11-02T00:00:00Z",
+		messages: [],
+	};
+	fs.writeFileSync(outsideChat, JSON.stringify(escaped));
+	fs.symlinkSync(srcDir, linkDir);
+	seedFaultyFixture(srcDir, outsideChat);
+	try {
+		verifyFaultyImport(srcDir, linkDir, forestDir);
 	} finally {
 		fs.rmSync(base, { recursive: true, force: true });
 	}

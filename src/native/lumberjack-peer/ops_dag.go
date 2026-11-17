@@ -166,7 +166,28 @@ func snapshotNode(tx extension.ReadTx, n *core.Node, pathStr string) nodeSnapsho
 	}
 }
 
+func validateUpsertInput(in upsertNodeInput) error {
+	if _, err := cleanSegments(in.Path); err != nil {
+		return err
+	}
+	if in.Type != "" && in.Type != "leaf" && in.Type != "branch" {
+		return fmt.Errorf("invalid node type %q", in.Type)
+	}
+	for _, pPath := range in.ParentPaths {
+		if _, err := cleanSegments(pPath); err != nil {
+			return err
+		}
+	}
+	if len(in.Slot) > 0 && !json.Valid(in.Slot) {
+		return fmt.Errorf("invalid slot json for %q", in.Path)
+	}
+	return nil
+}
+
 func applyUpsertInTx(tx extension.Tx, in upsertNodeInput) (*core.Node, error) {
+	if err := validateUpsertInput(in); err != nil {
+		return nil, err
+	}
 	node, err := ensurePathNode(tx.Root(), in.Path, in.Type == "branch")
 	if err != nil {
 		return nil, err
@@ -246,6 +267,11 @@ func handleUpsertNode(host extension.Host, payload json.RawMessage) (any, C.lj_s
 }
 
 func applyBatchInTx(tx extension.Tx, nodes []upsertNodeInput) error {
+	for _, item := range nodes {
+		if err := validateUpsertInput(item); err != nil {
+			return err
+		}
+	}
 	for _, item := range nodes {
 		if _, err := applyUpsertInTx(tx, item); err != nil {
 			return err

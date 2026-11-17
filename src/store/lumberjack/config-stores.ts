@@ -13,10 +13,15 @@ import { isValidSegmentPath } from "../../core/prompt-segments.ts";
 import { sanitizeUserSettings, type UserSettings } from "../../core/settings.ts";
 import { isBuiltinThemeId, isThemeId, sanitizeThemeFile, type Theme, type ThemeFile } from "../../core/themes.ts";
 import type { LumberJackForest } from "./binding.ts";
+import {
+	assertFinitePlainJson,
+	assertSafePluginRecordId,
+	validatePluginAgentRecord,
+	validatePluginTaskRecord,
+} from "./plugin-validators.ts";
 
 const FILE_ACCESS_ERROR =
 	"File-access configuration cannot be read reliably. Learner-file access is blocked. Repair File access in Settings → Agent → Tools.";
-const SAFE_PLUGIN_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 function fileAccessFromRaw(raw: unknown): FileAccessSettingsResult {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: FILE_ACCESS_ERROR };
@@ -142,17 +147,14 @@ export function createLumberJackPromptOverrideStore(forest: LumberJackForest): P
 	};
 }
 
-function assertSafePluginRecordId(id: string, label: string): void {
-	if (!SAFE_PLUGIN_ID.test(id)) {
-		throw new Error(`Invalid ${label} id: ${id}`);
-	}
-}
-
-function listPluginSlots<T extends { id: string }>(forest: LumberJackForest, base: string): T[] {
+function listValidatedPluginSlots<T extends { id: string }>(
+	forest: LumberJackForest,
+	base: string,
+	validator: (value: unknown, expectedId: string) => T,
+): T[] {
 	const out: T[] = [];
 	for (const node of forest.listChildren(base)) {
-		const slot = node.slot as T | undefined;
-		if (slot) out.push(slot);
+		out.push(validator(node.slot, node.name));
 	}
 	return out.sort((a, b) => a.id.localeCompare(b.id));
 }
@@ -163,12 +165,15 @@ export function createLumberJackPluginAgentStore(forest: LumberJackForest, plugi
 	return {
 		get(id: string): PluginAgentRecord | null {
 			assertSafePluginRecordId(id, "plugin agent");
-			return (forest.getNode(`${base}/${id}`)?.slot as PluginAgentRecord | undefined) ?? null;
+			const snap = forest.getNode(`${base}/${id}`);
+			if (!snap || snap.slot === undefined) return null;
+			return validatePluginAgentRecord(snap.slot, id);
 		},
-		list: () => listPluginSlots<PluginAgentRecord>(forest, base),
+		list: () => listValidatedPluginSlots(forest, base, validatePluginAgentRecord),
 		save(record: PluginAgentRecord): void {
-			assertSafePluginRecordId(record.id, "plugin agent");
-			forest.upsertNode({ path: `${base}/${record.id}`, type: "leaf", kind: "plugin_agent", slot: record });
+			assertSafePluginRecordId(record?.id, "plugin agent");
+			const valid = validatePluginAgentRecord(JSON.parse(JSON.stringify(record)), record.id);
+			forest.upsertNode({ path: `${base}/${record.id}`, type: "leaf", kind: "plugin_agent", slot: valid });
 		},
 	};
 }
@@ -179,12 +184,16 @@ export function createLumberJackPluginTaskStore(forest: LumberJackForest, plugin
 	return {
 		get(id: string): PluginTaskRecord | null {
 			assertSafePluginRecordId(id, "plugin task");
-			return (forest.getNode(`${base}/${id}`)?.slot as PluginTaskRecord | undefined) ?? null;
+			const snap = forest.getNode(`${base}/${id}`);
+			if (!snap || snap.slot === undefined) return null;
+			return validatePluginTaskRecord(snap.slot, id);
 		},
-		list: () => listPluginSlots<PluginTaskRecord>(forest, base),
+		list: () => listValidatedPluginSlots(forest, base, validatePluginTaskRecord),
 		save(record: PluginTaskRecord): void {
-			assertSafePluginRecordId(record.id, "plugin task");
-			forest.upsertNode({ path: `${base}/${record.id}`, type: "leaf", kind: "plugin_task", slot: record });
+			assertSafePluginRecordId(record?.id, "plugin task");
+			assertFinitePlainJson(record);
+			const valid = validatePluginTaskRecord(JSON.parse(JSON.stringify(record)), record.id);
+			forest.upsertNode({ path: `${base}/${record.id}`, type: "leaf", kind: "plugin_task", slot: valid });
 		},
 	};
 }

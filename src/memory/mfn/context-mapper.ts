@@ -2,31 +2,21 @@ import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai"
 import { citationsToReadableText } from "../../core/citations.ts";
 import { compactionCutIndex, planTreeToText } from "../../core/compaction.ts";
 import type { PlanTree } from "../../core/contracts/plan.ts";
-import {
-	sendToUserText,
-	type LhMarkerMessage,
-	type LhMessage,
-} from "../../core/native-messages.ts";
+import { sendToUserText, type LhMarkerMessage, type LhMessage } from "../../core/native-messages.ts";
 import { QUESTION_TOOLS } from "../../core/pending.ts";
 import { MfnApiError, type MfnClient } from "./client.ts";
 import { isValidCallerMemoryId, messageMemoryId, mintUuidV7 } from "./ids.ts";
 import { isRetryableMfnError, type MfnIngestOutbox } from "./outbox.ts";
 import type {
-	LexicalSearchMatch,
-	RecalledAnticipations,
-	RecalledMemory,
-	RecalledTheme,
-	TurnIngestDelivered,
-	TurnIngestMemory,
-	TurnIngestPayload,
-	TurnRecallLimits,
-	TurnRecallPayload,
+	LexicalSearchMatch, MfnMemoryPutPayload, RecalledAnticipations, RecalledMemory, RecalledTheme,
+	TurnIngestDelivered, TurnIngestMemory, TurnIngestPayload, TurnRecallLimits, TurnRecallPayload,
 } from "./types.ts";
 
 export const LIVE_TAIL_DEFAULT_TOKENS = 5_000;
 
 const TOOL_TEXT_CAP = 2_000;
 const CONTROL_RE = /[\x00-\x1f\x7f]/g;
+const LEXICAL_RETRY_DELAYS_MS = [30, 60] as const;
 
 export interface PrepareTurnContextOptions {
 	client: MfnClient;
@@ -70,14 +60,13 @@ export interface IngestSettledTurnResult {
 	ingestedBatches: number;
 	queuedBatches: number;
 	lexicalWrites: number;
+	queuedLexicalWrites: number;
 	flushedFromOutbox: number;
 	memoryIds: string[];
 }
 
 function utf8Slice(text: string, maxBytes: number): string {
-	if (Buffer.byteLength(text, "utf8") <= maxBytes) {
-		return text;
-	}
+	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
 	let used = 0;
 	let out = "";
 	for (const ch of text) {
@@ -116,9 +105,7 @@ function isSkippedMarker(message: LhMessage): boolean {
 }
 
 function extractAssistantText(assistant: AssistantMessage): string {
-	if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {
-		return "";
-	}
+	if (assistant.stopReason === "error" || assistant.stopReason === "aborted") return "";
 	const parts: string[] = [];
 	for (const block of assistant.content) {
 		if (block.type === "text" && block.text.trim()) {
@@ -138,9 +125,7 @@ function extractMessageText(message: LhMessage): string {
 		const texts = message.content.filter((b) => b.type === "text").map((b) => citationsToReadableText(b.text));
 		return texts.join("\n").trim();
 	}
-	if (message.role === "assistant") {
-		return extractAssistantText(message as AssistantMessage);
-	}
+	if (message.role === "assistant") return extractAssistantText(message as AssistantMessage);
 	if (message.role === "toolResult") {
 		const res = message as ToolResultMessage;
 		if (!res.isError && res.details === null && (QUESTION_TOOLS as readonly string[]).includes(res.toolName)) return "";
@@ -162,10 +147,7 @@ function collectTailMemoryIds(chatId: string, liveTail: readonly LhMessage[]): {
 			newestFirst.push(memId);
 		}
 	}
-	return {
-		windowIds: newestFirst.slice(0, 64),
-		excludeIds: newestFirst.slice(0, 256),
-	};
+	return { windowIds: newestFirst.slice(0, 64), excludeIds: newestFirst.slice(0, 256) };
 }
 
 function selectRecallQuery(messages: readonly LhMessage[]): { text: string; context: string | null } | null {
@@ -178,8 +160,7 @@ function selectRecallQuery(messages: readonly LhMessage[]): { text: string; cont
 	const primary = utf8Slice(texts[0]!, 8_192);
 	if (!primary) return null;
 	const ctxJoined = texts.slice(1).reverse().join("\n");
-	const context = ctxJoined ? utf8Slice(ctxJoined, 2_048) : null;
-	return { text: primary, context };
+	return { text: primary, context: ctxJoined ? utf8Slice(ctxJoined, 2_048) : null };
 }
 
 function formatMfnSections(input: {
@@ -190,9 +171,7 @@ function formatMfnSections(input: {
 	anticipations: RecalledAnticipations;
 }): string | null {
 	const sections: string[] = [];
-	if (input.planText) {
-		sections.push(`## Plan dependency tree\n${input.planText}`);
-	}
+	if (input.planText) sections.push(`## Plan dependency tree\n${input.planText}`);
 	if (input.memories.length > 0 || input.supplements.length > 0) {
 		const lines = input.memories.map((m) => `- [${m.memory_id}] (activation ${m.activation.total.toFixed(3)}): ${m.content}`);
 		for (const sup of input.supplements) {
@@ -209,10 +188,46 @@ function formatMfnSections(input: {
 		...input.anticipations.entities.map((e) => `- [entity] ${e.label} (confidence ${e.confidence.toFixed(2)})`),
 		...input.anticipations.topics.map((t) => `- [topic] ${t.label} (confidence ${t.confidence.toFixed(2)})`),
 	];
-	if (antLines.length > 0) {
-		sections.push(`## Context anticipations (L4)\n${antLines.join("\n")}`);
-	}
+	if (antLines.length > 0) sections.push(`## Context anticipations (L4)\n${antLines.join("\n")}`);
 	return sections.length > 0 ? sections.join("\n\n") : null;
+}
+
+function extractMfnErrorCode(err: unknown, fallback: string): string {
+	if (err instanceof MfnApiError) return err.code;
+	if (err && typeof err === "object" && "code" in err) {
+		const raw = (err as { code?: unknown }).code;
+		if (typeof raw === "string" && raw.length > 0) return raw;
+	}
+	return fallback;
+}
+
+async function runLexicalSupplement(
+	opts: PrepareTurnContextOptions,
+	queryText: string,
+	excludeSet: ReadonlySet<string>,
+	recalledIds: ReadonlySet<string>,
+	degraded: string[],
+): Promise<LexicalSearchMatch[]> {
+	try {
+		const hits = await opts.client.lexicalSearch(opts.lexicalPoolId, {
+			query: queryText,
+			top_k: opts.limits?.top_k ?? 8,
+		});
+		return hits.filter((h) => !excludeSet.has(h.memory_id) && !recalledIds.has(h.memory_id));
+	} catch (err) {
+		const code = extractMfnErrorCode(err, "lexical_search_error");
+		console.warn(`[mfn] lexicalSearch fallback degraded (${code}):`, err);
+		if (!degraded.includes(code)) degraded.push(code);
+		return [];
+	}
+}
+
+interface RecallBundle {
+	memories: RecalledMemory[];
+	supplements: LexicalSearchMatch[];
+	themes: RecalledTheme[];
+	anticipations: RecalledAnticipations;
+	degraded: string[];
 }
 
 async function queryRecallAndFallback(
@@ -220,13 +235,7 @@ async function queryRecallAndFallback(
 	query: { text: string; context: string | null },
 	windowIds: string[],
 	excludeIds: string[],
-): Promise<{
-	memories: RecalledMemory[];
-	supplements: LexicalSearchMatch[];
-	themes: RecalledTheme[];
-	anticipations: RecalledAnticipations;
-	degraded: string[];
-}> {
+): Promise<RecallBundle> {
 	const excludeSet = new Set(excludeIds);
 	const recallPayload: TurnRecallPayload = {
 		query,
@@ -241,6 +250,7 @@ async function queryRecallAndFallback(
 	let themes: RecalledTheme[] = [];
 	let anticipations: RecalledAnticipations = { actors: [], entities: [], topics: [] };
 	let degraded: string[] = [];
+	let embedderDegraded = false;
 	try {
 		const recalled = await opts.client.turnRecall(opts.mainPoolId, recallPayload);
 		const seen = new Set<string>(excludeSet);
@@ -248,17 +258,16 @@ async function queryRecallAndFallback(
 		themes = recalled.result.themes ?? [];
 		anticipations = recalled.result.anticipations ?? anticipations;
 		degraded = [...(recalled.result.degraded ?? [])];
+		embedderDegraded = degraded.includes("embedder_unavailable") || degraded.includes("embedder");
 	} catch (err) {
-		if (!isRetryableMfnError(err)) throw err;
-		degraded = [err instanceof MfnApiError ? err.code : "embedder_unavailable"];
+		const code = extractMfnErrorCode(err, "recall_error");
+		console.warn(`[mfn] turn.recall degraded (${code}):`, err);
+		degraded = [code];
+		embedderDegraded = err instanceof MfnApiError && (err.code === "embedder_unavailable" || err.code === "embedder");
 	}
-	const needsLexical = degraded.includes("embedder_unavailable") || degraded.includes("embedder");
-	let supplements: LexicalSearchMatch[] = [];
-	if (needsLexical) {
-		const recalledIds = new Set(memories.map((m) => m.memory_id));
-		const hits = await opts.client.lexicalSearch(opts.lexicalPoolId, { query: query.text, top_k: opts.limits?.top_k ?? 8 });
-		supplements = hits.filter((h) => !excludeSet.has(h.memory_id) && !recalledIds.has(h.memory_id));
-	}
+	const supplements = embedderDegraded
+		? await runLexicalSupplement(opts, query.text, excludeSet, new Set(memories.map((m) => m.memory_id)), degraded)
+		: [];
 	return { memories, supplements, themes, anticipations, degraded };
 }
 
@@ -395,27 +404,76 @@ async function ingestSingleBatch(
 	}
 }
 
-async function writeLexicalBestEffort(
-	client: MfnClient,
-	lexicalPoolId: string,
-	items: readonly TurnIngestMemory[],
-): Promise<number> {
-	let writes = 0;
-	for (const item of items) {
-		const putBody = { memory_id: item.memory_id, content: item.content, tags: item.tags, metadata: item.metadata };
-		try {
-			await client.lexicalPut(lexicalPoolId, putBody);
-			writes++;
-		} catch (err) {
-			if (!isRetryableMfnError(err)) throw err;
+function sleepMs(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type LexicalAttemptOutcome = { status: "written" | "failed" } | { status: "retry"; errorCode: string };
+
+async function attemptLexicalPutOnce(
+	opts: IngestSettledTurnOptions,
+	putBody: MfnMemoryPutPayload,
+	opId: string,
+): Promise<LexicalAttemptOutcome> {
+	try {
+		await opts.client.lexicalPut(opts.lexicalPoolId, putBody, opId);
+		return { status: "written" };
+	} catch (err) {
+		const errorCode = extractMfnErrorCode(err, "transport_error");
+		if (!isRetryableMfnError(err)) {
+			console.warn(`[mfn] Non-retryable lexicalPut failure (${errorCode}):`, err);
+			return { status: "failed" };
 		}
+		return { status: "retry", errorCode };
 	}
-	return writes;
+}
+
+async function writeSingleLexicalItem(
+	opts: IngestSettledTurnOptions,
+	item: TurnIngestMemory,
+): Promise<"written" | "queued" | "failed"> {
+	const putBody: MfnMemoryPutPayload = {
+		memory_id: item.memory_id,
+		content: item.content,
+		tags: item.tags,
+		metadata: item.metadata,
+	};
+	const opId = mintUuidV7();
+	let errorCode = "transport_error";
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const res = await attemptLexicalPutOnce(opts, putBody, opId);
+		if (res.status !== "retry") return res.status;
+		errorCode = res.errorCode;
+		if (attempt < LEXICAL_RETRY_DELAYS_MS.length) await sleepMs(LEXICAL_RETRY_DELAYS_MS[attempt]!);
+	}
+	console.warn(`[mfn] lexicalPut exhausted 3 attempts (${errorCode}); queueing ${opId} in outbox`);
+	opts.outbox.enqueue({
+		kind: "lexical_put",
+		operationId: opId,
+		poolId: opts.lexicalPoolId,
+		lexicalPayload: putBody,
+		errorCode,
+	});
+	return "queued";
+}
+
+async function writeLexicalWithOutbox(
+	opts: IngestSettledTurnOptions,
+	items: readonly TurnIngestMemory[],
+): Promise<{ lexicalWrites: number; queuedLexicalWrites: number }> {
+	let lexicalWrites = 0;
+	let queuedLexicalWrites = 0;
+	for (const item of items) {
+		const outcome = await writeSingleLexicalItem(opts, item);
+		if (outcome === "written") lexicalWrites++;
+		else if (outcome === "queued") queuedLexicalWrites++;
+	}
+	return { lexicalWrites, queuedLexicalWrites };
 }
 
 export async function ingestSettledTurnWithMfn(opts: IngestSettledTurnOptions): Promise<IngestSettledTurnResult> {
 	const items = toIngestMemories(opts.chatId, opts.turnMessages, opts.sessionTags ?? []);
-	const lexicalWrites = await writeLexicalBestEffort(opts.client, opts.lexicalPoolId, items);
+	const { lexicalWrites, queuedLexicalWrites } = await writeLexicalWithOutbox(opts, items);
 	let ingestedBatches = 0;
 	let queuedBatches = 0;
 	let prevMemId = opts.predecessorMemoryId ?? null;
@@ -427,15 +485,12 @@ export async function ingestSettledTurnWithMfn(opts: IngestSettledTurnOptions): 
 		prevMemId = batch[batch.length - 1]!.memory_id;
 	}
 	let flushedFromOutbox = 0;
-	if (ingestedBatches > 0 && queuedBatches === 0 && opts.outbox.size() > 0) {
+	if (ingestedBatches > 0 && queuedBatches === 0 && queuedLexicalWrites === 0 && opts.outbox.size() > 0) {
 		const flushed = await opts.outbox.flush(opts.client);
 		flushedFromOutbox = flushed.flushed;
 	}
 	return {
-		ingestedBatches,
-		queuedBatches,
-		lexicalWrites,
-		flushedFromOutbox,
+		ingestedBatches, queuedBatches, lexicalWrites, queuedLexicalWrites, flushedFromOutbox,
 		memoryIds: items.map((m) => m.memory_id),
 	};
 }

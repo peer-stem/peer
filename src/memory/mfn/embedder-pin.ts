@@ -222,6 +222,14 @@ export function buildEmbeddersConfig(
 	return { format_version: 1, embedders };
 }
 
+function writeAllToFd(fd: number, content: string): void {
+	const buf = Buffer.from(content, "utf8");
+	let offset = 0;
+	while (offset < buf.length) {
+		offset += fs.writeSync(fd, buf, offset, buf.length - offset, offset);
+	}
+}
+
 export function writePrivateFile0600(filePath: string, content: string): void {
 	if (!path.isAbsolute(filePath) || filePath.split(path.sep).includes("..")) {
 		throw new Error(`Private file path must be clean and absolute: ${filePath}`);
@@ -233,11 +241,7 @@ export function writePrivateFile0600(filePath: string, content: string): void {
 		throw new Error(`Private parent path must be a real directory: ${parentDir}`);
 	}
 	fs.chmodSync(parentDir, 0o700);
-	const flags =
-		fs.constants.O_WRONLY |
-		fs.constants.O_CREAT |
-		fs.constants.O_TRUNC |
-		fs.constants.O_NOFOLLOW;
+	const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW;
 	const fd = fs.openSync(filePath, flags, 0o600);
 	try {
 		const stat = fs.fstatSync(fd);
@@ -245,7 +249,8 @@ export function writePrivateFile0600(filePath: string, content: string): void {
 			throw new Error(`Private file must be a single-link regular file: ${filePath}`);
 		}
 		fs.fchmodSync(fd, 0o600);
-		fs.writeFileSync(fd, content, "utf8");
+		fs.ftruncateSync(fd, 0);
+		writeAllToFd(fd, content);
 		fs.fsyncSync(fd);
 	} finally {
 		fs.closeSync(fd);

@@ -65,26 +65,23 @@ function scheduleSettledIngest(
 	});
 }
 
-export async function prepareMfnTurnBridge(input: MfnTurnBridgeInput): Promise<MfnTurnBridgeHandle> {
-	const runtime = getActiveMfnRuntime();
-	if (!runtime) {
-		return {
-			projectedMessages: input.agentMessages,
-			initialPersistBaseCount: input.stagedAutomatic ? input.priorMessages.length : input.agentMessages.length,
-			committedPersistBaseCount: input.agentMessages.length,
-			finish: () => undefined,
-		};
-	}
-	const prepared = await prepareTurnContextWithMfn({
-		client: runtime.client,
-		chatId: input.chatId,
-		messages: input.agentMessages,
-		tree: input.tree,
-		mainPoolId: runtime.mainPoolId,
-		lexicalPoolId: runtime.lexicalPoolId,
-		liveTailTokens: runtime.liveTailTokens,
-	});
-	const projected = prepared.agentMessages;
+function buildFallbackBridge(input: MfnTurnBridgeInput, scheduleOnFinish: boolean): MfnTurnBridgeHandle {
+	return {
+		projectedMessages: input.agentMessages,
+		initialPersistBaseCount: input.stagedAutomatic ? input.priorMessages.length : input.agentMessages.length,
+		committedPersistBaseCount: input.agentMessages.length,
+		finish: (stamped, isAborted, dispatched = true) => {
+			if (!scheduleOnFinish || isAborted || !dispatched) return;
+			scheduleSettledIngest(input.chatId, input.priorMessages, input.appends, stamped, []);
+		},
+	};
+}
+
+function buildProjectedBridge(
+	input: MfnTurnBridgeInput,
+	projected: LhMessage[],
+	recalledMemories: readonly RecalledMemory[],
+): MfnTurnBridgeHandle {
 	const stagedTailCount = input.stagedAutomatic ? input.appends.length : 0;
 	return {
 		projectedMessages: projected,
@@ -92,7 +89,27 @@ export async function prepareMfnTurnBridge(input: MfnTurnBridgeInput): Promise<M
 		committedPersistBaseCount: projected.length,
 		finish: (stamped, isAborted, dispatched = true) => {
 			if (isAborted || !dispatched) return;
-			scheduleSettledIngest(input.chatId, input.priorMessages, input.appends, stamped, prepared.recalledMemories);
+			scheduleSettledIngest(input.chatId, input.priorMessages, input.appends, stamped, recalledMemories);
 		},
 	};
+}
+
+export async function prepareMfnTurnBridge(input: MfnTurnBridgeInput): Promise<MfnTurnBridgeHandle> {
+	const runtime = getActiveMfnRuntime();
+	if (!runtime) return buildFallbackBridge(input, false);
+	try {
+		const prepared = await prepareTurnContextWithMfn({
+			client: runtime.client,
+			chatId: input.chatId,
+			messages: input.agentMessages,
+			tree: input.tree,
+			mainPoolId: runtime.mainPoolId,
+			lexicalPoolId: runtime.lexicalPoolId,
+			liveTailTokens: runtime.liveTailTokens,
+		});
+		return buildProjectedBridge(input, prepared.agentMessages, prepared.recalledMemories);
+	} catch (err) {
+		console.error(`[chat ${input.chatId}] MFN turn preparation failed; falling back to raw transcript:`, err);
+		return buildFallbackBridge(input, true);
+	}
 }

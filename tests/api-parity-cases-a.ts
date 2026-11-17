@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { connectWireStream, openWireStream, sendRawSocket, sendWire } from "./api-parity-wire.ts";
+import { connectWireStream, countOccurrences, openWireStream, sendRawSocket, sendWire } from "./api-parity-wire.ts";
 import { compareResponseHeaders, runParityRequest, type ParityHarness } from "./api-parity-compare.ts";
 import { GOLDEN_SIDE_THREAD, GOLDEN_TEACH_CHAT } from "./api-test-helpers.ts";
 import { openEventsWithPulse, pulseEventsBusOnBoth } from "./api-parity-routes-b.ts";
@@ -206,8 +206,15 @@ export async function caseCancelOnDisconnect(h: ParityHarness): Promise<void> {
 	assert.equal(h.pair.next.logs().includes("MaxListenersExceededWarning"), false, "Next leaked event listeners");
 	const { nextEv, apiEv } = await openEventsWithPulse(h.pair.next.port, h.pair.api.port);
 	try {
+		const nextBefore = countOccurrences(nextEv.snapshotText(), "sources-changed");
+		const apiBefore = countOccurrences(apiEv.snapshotText(), "sources-changed");
 		await pulseEventsBusOnBoth(h);
-		await Promise.all([nextEv.waitForText("sources-changed", 5_000), apiEv.waitForText("sources-changed", 5_000)]);
+		await Promise.all([
+			nextEv.waitForCount("sources-changed", nextBefore + 1, 5_000),
+			apiEv.waitForCount("sources-changed", apiBefore + 1, 5_000),
+		]);
+		assert.equal(nextEv.hasEnded(), false, "Next /api/events ended unexpectedly");
+		assert.equal(apiEv.hasEnded(), false, "API /api/events ended unexpectedly");
 	} finally {
 		nextEv.abort();
 		apiEv.abort();

@@ -4,6 +4,10 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	FORBIDDEN_GPU_LIBRARY_PATTERN,
+	isForbiddenGpuEnvKey,
+} from "../src/substrate/gpu-policy.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PERSIST_ROOT = process.env.PEER_PERSIST_ROOT ?? "/usr/lib/persist/peer";
@@ -44,9 +48,6 @@ const RUST_TARGETS = [
 	["mfn-telepathy", "mfn-gateway", "mfn-gateway"],
 ];
 
-const GPU_PREFIXES = ["CUDA_", "NVIDIA_", "NVCC_", "NCCL_", "ROCR_", "ROCM_", "HIP_", "HSA_", "MIOPEN_"];
-const BLOCKED_LIB_RE =
-	/\b(libcuda|libcudart|libcublas|libcurand|libcufft|libcusparse|libcusolver|libcudnn|libnvrtc|libnccl|libamdhip64|libhsa-runtime64|librocblas|libhipblas|libmiopen|librocm)[\w.-]*\.so\b/i;
 const COMPILER_OVERRIDES = new Set([
 	"RUSTFLAGS",
 	"CARGO_ENCODED_RUSTFLAGS",
@@ -67,8 +68,7 @@ function createBuildEnv() {
 		if (typeof value !== "string" || COMPILER_OVERRIDES.has(key)) {
 			continue;
 		}
-		const upper = key.toUpperCase();
-		if (GPU_PREFIXES.some((prefix) => upper.startsWith(prefix)) || key.startsWith("CARGO_PROFILE_RELEASE_")) {
+		if (isForbiddenGpuEnvKey(key) || key.startsWith("CARGO_PROFILE_RELEASE_")) {
 			continue;
 		}
 		env[key] = value;
@@ -82,6 +82,9 @@ function createBuildEnv() {
 		OLLAMA_LLM_LIBRARY: "cpu",
 		TMPDIR: SCRATCH_TMP,
 		GOCACHE: path.join(CACHE_DIR, "gocache"),
+		GOMODCACHE: path.join(CACHE_DIR, "gomodcache"),
+		GOPATH: path.join(CACHE_DIR, "gopath"),
+		CARGO_HOME: path.join(CACHE_DIR, "cargo-home"),
 		CGO_ENABLED: "1",
 		GOTOOLCHAIN: "local",
 		GOOS: "linux",
@@ -206,7 +209,7 @@ function verifyMfnBinaries(env) {
 	for (const name of ["ifr", "dsr", "alm", "cpe", "psr", "mfn-gateway"]) {
 		const binPath = path.join(MFN_BIN, name);
 		const lddOut = run("ldd", [binPath], env, REPO_ROOT, true);
-		const badMatch = BLOCKED_LIB_RE.exec(lddOut);
+		const badMatch = FORBIDDEN_GPU_LIBRARY_PATTERN.exec(lddOut);
 		if (badMatch) {
 			throw new Error(`Forbidden GPU library ${badMatch[0]} linked into ${binPath}`);
 		}

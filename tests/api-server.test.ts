@@ -4,13 +4,9 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import net, { type AddressInfo } from "node:net";
 import { test, type TestContext } from "node:test";
 import { MAX_IMPORT_BODY_BYTES } from "../lib/notes-import-limits.ts";
-import {
-	createApiHttpServer,
-	serveHttp,
-	type ApiHttpServer,
-	type CreateApiHttpServerOptions,
-} from "../src/api/server.ts";
+import { createApiHttpServer, serveHttp, type ApiHttpServer, type CreateApiHttpServerOptions } from "../src/api/server.ts";
 import type { Dispatch } from "../src/api/types.ts";
+import { openWireStream } from "./api-parity-wire.ts";
 
 interface BoundTestServer {
 	api: ApiHttpServer;
@@ -352,12 +348,7 @@ test("caps request body at exact 27,262,976-byte default limit, strips query fro
 	const exactPayload = Buffer.alloc(MAX_IMPORT_BODY_BYTES, 0x58);
 	const exactRes = await fetch(`${srv.url}/api/capped`, { method: "POST", body: exactPayload });
 	assert.equal(exactRes.status, 200);
-	assert.deepEqual(await exactRes.json(), {
-		len: MAX_IMPORT_BODY_BYTES,
-		contentLength: String(MAX_IMPORT_BODY_BYTES),
-		head: "XXXXXXXX",
-		tail: "XXXXXXXX",
-	});
+	assert.deepEqual(await exactRes.json(), { len: MAX_IMPORT_BODY_BYTES, contentLength: String(MAX_IMPORT_BODY_BYTES), head: "XXXXXXXX", tail: "XXXXXXXX" });
 	assert.equal(warnings.length, 0);
 
 	const oversized = Buffer.alloc(MAX_IMPORT_BODY_BYTES + 4096, 0x41);
@@ -365,20 +356,12 @@ test("caps request body at exact 27,262,976-byte default limit, strips query fro
 	oversized.fill(0x5a, MAX_IMPORT_BODY_BYTES);
 	const cutRes = await fetch(`${srv.url}/api/capped?token=secret`, { method: "POST", body: oversized });
 	assert.equal(cutRes.status, 200);
-	assert.deepEqual(await cutRes.json(), {
-		len: MAX_IMPORT_BODY_BYTES,
-		contentLength: String(oversized.byteLength),
-		head: "AAAAAAAA",
-		tail: "12345678",
-	});
+	assert.deepEqual(await cutRes.json(), { len: MAX_IMPORT_BODY_BYTES, contentLength: String(oversized.byteLength), head: "AAAAAAAA", tail: "12345678" });
 	assert.deepEqual(warnings, [
 		`Request body exceeded ${MAX_IMPORT_BODY_BYTES} bytes for /api/capped. Only the first ${MAX_IMPORT_BODY_BYTES} bytes will be available.`,
 	]);
 
-	const exemptRes = await fetch(`${srv.url}/api/plugins/document-one/documents/markdown`, {
-		method: "POST",
-		body: oversized,
-	});
+	const exemptRes = await fetch(`${srv.url}/api/plugins/document-one/documents/markdown`, { method: "POST", body: oversized });
 	assert.equal(exemptRes.status, 200);
 	const exemptJson = (await exemptRes.json()) as { len: number; tail: string };
 	assert.equal(exemptJson.len, oversized.byteLength);
@@ -405,6 +388,21 @@ test("keeps Node default requestTimeout and closes open SSE streams cleanly with
 	assert.deepEqual(warnings, []);
 });
 
+async function closeWithDeadline(api: ApiHttpServer, onTimeout: () => void, deadlineMs: number): Promise<void> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => {
+			onTimeout();
+			reject(new Error("srv.api.close() hung past shutdownTimeoutMs"));
+		}, deadlineMs);
+	});
+	try {
+		await Promise.race([api.close(), timeout]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}
+
 test("arms shutdown deadline before in-flight handlers settle and logs when close is forced", async (t) => {
 	const warnings: string[] = [];
 	const entered = deferred<void>();
@@ -418,9 +416,23 @@ test("arms shutdown deadline before in-flight handlers settle and logs when clos
 	t.after(() => releaseStuck.resolve());
 	const pendingFetch = fetch(`${srv.url}/stuck`).catch(() => null);
 	await entered.promise;
-	await srv.api.close();
+	await closeWithDeadline(srv.api, () => releaseStuck.resolve(), 1_500);
 	await pendingFetch;
 	assert.deepEqual(warnings, ["Forced HTTP connection close after 60ms shutdown deadline."]);
+});
+
+test("openWireStream waitForText rejects immediately when SSE stream ends before token arrives", async (t) => {
+	const controlled = makeControlledStream();
+	const headers = { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" };
+	const srv = await startServer(t, async () => new Response(controlled.stream, { status: 200, headers }));
+	const stream = await openWireStream(srv.port, { method: "GET", path: "/sse-early-close" });
+	assert.equal(stream.hasEnded(), false);
+	const waiting = stream.waitForText("never-sent", 2_000);
+	controlled.push("data: unrelated\n\n");
+	controlled.close();
+	await assert.rejects(waiting, /Stream ended before condition was met/);
+	assert.equal(stream.hasEnded(), true);
+	await assert.rejects(() => stream.waitForText("never-sent", 2_000), /Stream ended before condition was met/);
 });
 
 function makeFakeServerResponse(msg: IncomingMessage): ServerResponse {
@@ -447,13 +459,8 @@ test("normalizes absolute-form, asterisk-form, IPv6, and Host-port fallback targ
 
 	const asteriskPipe = new PassThrough();
 	const fakeMsg = Object.assign(asteriskPipe, {
-		method: "OPTIONS",
-		url: "*",
-		headers: { host: "[::1]:4321" },
-		rawHeaders: ["Host", "[::1]:4321"],
-		aborted: false,
-		complete: true,
-		socket: { localAddress: "::1", localPort: 0 },
+		method: "OPTIONS", url: "*", headers: { host: "[::1]:4321" }, rawHeaders: ["Host", "[::1]:4321"],
+		aborted: false, complete: true, socket: { localAddress: "::1", localPort: 0 },
 	}) as unknown as IncomingMessage;
 	asteriskPipe.end();
 	await serveHttp(fakeMsg, makeFakeServerResponse(fakeMsg), async (req) => {
@@ -466,13 +473,8 @@ test("normalizes absolute-form, asterisk-form, IPv6, and Host-port fallback targ
 test("detaches request body listeners in finally when handler stops reading mid-stream", async () => {
 	const bodyPipe = new PassThrough();
 	const fakeMsg = Object.assign(bodyPipe, {
-		method: "POST",
-		url: "/api/partial",
-		headers: { host: "127.0.0.1:8080" },
-		rawHeaders: ["Host", "127.0.0.1:8080"],
-		aborted: false,
-		complete: false,
-		socket: { localAddress: "127.0.0.1", localPort: 8080 },
+		method: "POST", url: "/api/partial", headers: { host: "127.0.0.1:8080" }, rawHeaders: ["Host", "127.0.0.1:8080"],
+		aborted: false, complete: false, socket: { localAddress: "127.0.0.1", localPort: 8080 },
 	}) as unknown as IncomingMessage;
 	bodyPipe.write(Buffer.from("first-chunk"));
 	await serveHttp(fakeMsg, makeFakeServerResponse(fakeMsg), async (req) => {

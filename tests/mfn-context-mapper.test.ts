@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import path from "node:path";
 import test, { after } from "node:test";
 import type { PlanTree } from "../src/core/contracts/plan.ts";
@@ -37,6 +38,11 @@ interface StoredLexicalItem {
 
 interface MockGatewayState {
 	embedderAvailable: boolean;
+	lexicalPauseRemaining?: number;
+	recallForceError?: { status: number; code: string; retryable: boolean } | null;
+	lexicalSearchForceError?: boolean;
+	lexicalSearchCalls?: number;
+	lexicalPutOpIds?: string[];
 	pools: Map<string, Record<string, unknown>>;
 	lexicalRecords: Map<string, StoredLexicalItem>;
 	ingestedOps: Map<string, TurnIngestPayload>;
@@ -90,6 +96,10 @@ function validateTurnIngestContract(payload: TurnIngestPayload): void {
 function handleTurnRecall(state: MockGatewayState, env: MfnRequestEnvelope): { status: number; body: unknown } {
 	const payload = env.payload as unknown as TurnRecallPayload;
 	state.recallRequests.push(payload);
+	if (state.recallForceError) {
+		const f = state.recallForceError;
+		return { status: f.status, body: { version: 2, request_id: env.request_id, status: "error", error: { code: f.code, message: f.code, retryable: f.retryable } } };
+	}
 	const complete = state.embedderAvailable;
 	const recallResult = {
 		format_version: 1,
@@ -121,14 +131,25 @@ function handleTurnIngest(state: MockGatewayState, env: MfnRequestEnvelope): { s
 	}
 	const opId = env.operation_id!;
 	const prior = state.ingestedOps.get(opId);
-	if (prior) {
-		assert.deepEqual(prior, payload);
-	} else {
-		state.ingestedOps.set(opId, structuredClone(payload));
-	}
+	if (prior) assert.deepEqual(prior, payload);
+	else state.ingestedOps.set(opId, structuredClone(payload));
 	const group = { format_version: 1, turn_id: payload.turn_id, core: "committed", enrichment: "complete", children: [], plan_summary: {} };
 	const exec = { operation_id: opId, workflow_state: "committed", workflow_revision: "1", outcomes: [], result: { group } };
 	return { status: 200, body: { version: 2, request_id: env.request_id, status: "committed", result: exec } };
+}
+
+function handleLexicalPut(state: MockGatewayState, env: MfnRequestEnvelope): { status: number; body: unknown } {
+	state.lexicalPutOpIds?.push(env.operation_id!);
+	if ((state.lexicalPauseRemaining ?? 0) > 0) {
+		state.lexicalPauseRemaining = (state.lexicalPauseRemaining ?? 0) - 1;
+		return {
+			status: 503,
+			body: { version: 2, request_id: env.request_id, status: "error", error: { code: "admission_paused", message: "paused", retryable: true } },
+		};
+	}
+	const p = env.payload as { memory_id: string; content: string; tags?: string[]; metadata?: Record<string, string> };
+	state.lexicalRecords.set(p.memory_id, { memory_id: p.memory_id, content: p.content, tags: p.tags ?? [], metadata: p.metadata ?? {} });
+	return { status: 200, body: { version: 2, request_id: env.request_id, status: "committed", result: { operation_id: env.operation_id, workflow_state: "committed", outcomes: [] } } };
 }
 
 function dispatchOperation(state: MockGatewayState, env: MfnRequestEnvelope): { status: number; body: unknown } {
@@ -146,23 +167,21 @@ function dispatchOperation(state: MockGatewayState, env: MfnRequestEnvelope): { 
 		state.pools.set(env.pool_id!, env.payload);
 		return { status: 200, body: { version: 2, request_id: env.request_id, status: "committed", result: { operation_id: env.operation_id, workflow_state: "committed", outcomes: [] } } };
 	}
-	if (env.operation === "memory.put") {
-		const p = env.payload as { memory_id: string; content: string; tags?: string[]; metadata?: Record<string, string> };
-		state.lexicalRecords.set(p.memory_id, { memory_id: p.memory_id, content: p.content, tags: p.tags ?? [], metadata: p.metadata ?? {} });
-		return { status: 200, body: { version: 2, request_id: env.request_id, status: "committed", result: { operation_id: env.operation_id, workflow_state: "committed", outcomes: [] } } };
-	}
+	if (env.operation === "memory.put") return handleLexicalPut(state, env);
 	if (env.operation === "memory.search") {
+		state.lexicalSearchCalls = (state.lexicalSearchCalls ?? 0) + 1;
+		if (state.lexicalSearchForceError) {
+			return { status: 503, body: { version: 2, request_id: env.request_id, status: "error", error: { code: "layer2_down", message: "down", retryable: true } } };
+		}
 		const q = String((env.payload as { query?: string }).query ?? "").toLowerCase();
-		const hits = [...state.lexicalRecords.values()]
-			.filter((r) => r.content.toLowerCase().includes(q) || q.includes("bayes"))
-			.map((r) => ({ memory_id: r.memory_id, score: 0.77 }));
+		const hits = [...state.lexicalRecords.values()].filter((r) => r.content.toLowerCase().includes(q) || q.includes("bayes")).map((r) => ({ memory_id: r.memory_id, score: 0.77 }));
 		return { status: 200, body: { version: 2, request_id: env.request_id, status: "ok", result: { operation_id: null, workflow_state: "committed", outcomes: [{ layer: 2, state: "ok", result: { hits } }] } } };
 	}
 	if (env.operation === "memory.peek") {
 		const id = String((env.payload as { memory_id?: string }).memory_id ?? "");
 		const item = state.lexicalRecords.get(id);
 		if (!item) return { status: 404, body: { version: 2, request_id: env.request_id, status: "error", error: { code: "not_found", message: "absent", retryable: false } } };
-		return { status: 200, body: { version: 2, request_id: env.request_id, status: "ok", result: { operation_id: null, workflow_state: "committed", outcomes: [{ layer: 2, state: "ok", result: { memory: item, created_at_us: 1000, telemetry: "unobserved" } }] } } };
+		return { status: 200, body: { version: 2, request_id: env.request_id, status: "ok", result: { operation_id: null, workflow_state: "committed", outcomes: [{ layer: 2, state: "ok", result: { memory: item, created_at_us: 1000 } }] } } };
 	}
 	if (env.operation === "turn.recall") return handleTurnRecall(state, env);
 	if (env.operation === "turn.ingest") return handleTurnIngest(state, env);
@@ -301,7 +320,7 @@ test("503 embedder_unavailable queues in outbox while lexicalPut + 207 lexicalSe
 		const flushRes = await reloadedOutbox.flush(client);
 		assert.equal(flushRes.flushed, 1);
 		assert.equal(reloadedOutbox.size(), 0);
-		assert.equal(state.ingestedOps.get(queued.operationId)?.turn_id, queued.payload.turn_id);
+		assert.equal(state.ingestedOps.get(queued.operationId)?.turn_id, queued.payload?.turn_id);
 	} finally {
 		await gw.close();
 		fs.rmSync(dir, { recursive: true, force: true });
@@ -330,6 +349,93 @@ test("ingestSettledTurnWithMfn chunks >4 messages into 1..4 batches, clamps deli
 		const bridge = await prepareMfnTurnBridge({ chatId: "chat-batch", priorMessages: fiveMsgs.slice(0, 4), appends: [fiveMsgs[4]!], agentMessages: fiveMsgs, stagedAutomatic: false });
 		assert.equal(bridge.initialPersistBaseCount, bridge.projectedMessages.length);
 		assert.equal(bridge.projectedMessages[0]?.role, "custom");
+	} finally {
+		setActiveMfnRuntime(null);
+		await gw.close();
+	}
+});
+
+test("503 admission_paused on memory.put retries with stable operationId and queues/replays via outbox (M1)", async () => {
+	const state: MockGatewayState = {
+		embedderAvailable: true,
+		lexicalPauseRemaining: 2,
+		lexicalPutOpIds: [],
+		pools: new Map(),
+		lexicalRecords: new Map(),
+		ingestedOps: new Map(),
+		recallRequests: [],
+		recalledFixture: [],
+	};
+	const gw = await startMockGateway(state);
+	try {
+		const client = new MfnClient({ port: gw.port, token: TEST_TOKEN });
+		const outbox = new MfnIngestOutbox();
+		const msg1: LhMessage[] = [{ id: "lp1", role: "user", content: "Transient pause lexical write", timestamp: 1 }];
+		const r1 = await ingestSettledTurnWithMfn({ client, outbox, chatId: "chat-m1", turnMessages: msg1, mainPoolId: "peer-main", lexicalPoolId: "peer-lexical" });
+		assert.equal(r1.lexicalWrites, 1);
+		assert.equal(r1.queuedLexicalWrites, 0);
+		assert.equal(state.lexicalPutOpIds?.length, 3);
+		assert.equal(state.lexicalPutOpIds?.[0], state.lexicalPutOpIds?.[2]);
+		state.lexicalPutOpIds = [];
+		state.lexicalPauseRemaining = 3;
+		const msg2: LhMessage[] = [{ id: "lp2", role: "user", content: "Queued pause lexical write", timestamp: 2 }];
+		const r2 = await ingestSettledTurnWithMfn({ client, outbox, chatId: "chat-m1", turnMessages: msg2, mainPoolId: "peer-main", lexicalPoolId: "peer-lexical" });
+		assert.equal(r2.lexicalWrites, 0);
+		assert.equal(r2.queuedLexicalWrites, 1);
+		assert.equal(outbox.size(), 1);
+		const queuedLex = outbox.entries()[0]!;
+		assert.equal(queuedLex.kind, "lexical_put");
+		assert.equal(queuedLex.operationId, state.lexicalPutOpIds[0]);
+		const flushed = await outbox.flush(client);
+		assert.equal(flushed.flushed, 1);
+		assert.equal(state.lexicalRecords.has(messageMemoryId("chat-m1", "lp2")), true);
+	} finally {
+		await gw.close();
+	}
+});
+
+async function getClosedPort(): Promise<number> {
+	return new Promise((resolve, reject) => {
+		const srv = net.createServer();
+		srv.once("error", reject);
+		srv.listen(0, "127.0.0.1", () => {
+			const port = (srv.address() as net.AddressInfo).port;
+			srv.close((err) => (err ? reject(err) : resolve(port)));
+		});
+	});
+}
+
+test("ECONNREFUSED, 409 embedder_mismatch, and 401 degrade cleanly without calling lexicalSearch or failing bridge (M2)", async () => {
+	const { messages, tree } = makeTranscript("chat-m2");
+	const deadPort = await getClosedPort();
+	const deadClient = new MfnClient({ port: deadPort, token: TEST_TOKEN, timeoutMs: 500 });
+	const deadPrepared = await prepareTurnContextWithMfn({ client: deadClient, chatId: "chat-m2", messages, tree, mainPoolId: "peer-main", lexicalPoolId: "peer-lexical", liveTailTokens: 20 });
+	assert.equal(deadPrepared.degraded.includes("ECONNREFUSED"), true);
+	assert.equal(deadPrepared.liveTail.length > 0, true);
+	assert.match(deadPrepared.marker?.content ?? "", /Bayes Theorem/);
+	const state: MockGatewayState = { embedderAvailable: true, lexicalSearchCalls: 0, pools: new Map(), lexicalRecords: new Map(), ingestedOps: new Map(), recallRequests: [], recalledFixture: [] };
+	const gw = await startMockGateway(state);
+	try {
+		const client = new MfnClient({ port: gw.port, token: TEST_TOKEN });
+		for (const fault of [
+			{ status: 409, code: "embedder_mismatch", retryable: false },
+			{ status: 401, code: "unauthenticated", retryable: false },
+		]) {
+			state.recallForceError = fault;
+			const ctx = await prepareTurnContextWithMfn({ client, chatId: "chat-m2", messages, tree, mainPoolId: "peer-main", lexicalPoolId: "peer-lexical", liveTailTokens: 20 });
+			assert.equal(ctx.degraded.includes(fault.code), true);
+			assert.equal(state.lexicalSearchCalls, 0);
+		}
+		state.recallForceError = null;
+		state.embedderAvailable = false;
+		state.lexicalSearchForceError = true;
+		const bothDegraded = await prepareTurnContextWithMfn({ client, chatId: "chat-m2", messages, mainPoolId: "peer-main", lexicalPoolId: "peer-lexical" });
+		assert.equal(bothDegraded.degraded.includes("embedder_unavailable"), true);
+		assert.equal(bothDegraded.degraded.includes("layer2_down"), true);
+		const throwingClient = { turnRecall: () => Promise.reject(new Error("boom")) } as unknown as MfnClient;
+		setActiveMfnRuntime({ client: throwingClient, outbox: new MfnIngestOutbox(), mainPoolId: "m", lexicalPoolId: "l" });
+		const fallbackBridge = await prepareMfnTurnBridge({ chatId: "chat-m2", priorMessages: [], appends: messages.slice(-1), agentMessages: messages.slice(-1), stagedAutomatic: false });
+		assert.equal(fallbackBridge.projectedMessages.length, 1);
 	} finally {
 		setActiveMfnRuntime(null);
 		await gw.close();

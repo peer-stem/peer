@@ -28,6 +28,7 @@ import {
 	pulseEventsBusOnBoth,
 	waitChatSettledOnBoth,
 	waitExtractionIdleOnBoth,
+	waitSideChatsSettledOnBoth,
 } from "./api-parity-routes-b.ts";
 
 export async function runEventsStreamParity(h: ParityHarness): Promise<void> {
@@ -157,7 +158,7 @@ export async function runSideChatStreamsParity(h: ParityHarness): Promise<void> 
 		normalizeJsonValue(h, "next", parseNdjsonStream(nextPost.text)),
 		"Follow-up POST side-chats NDJSON mismatch",
 	);
-	await waitSideIdle(h);
+	await waitSideChatsSettledOnBoth(h, GOLDEN_TEACH_CHAT);
 	assertDataDirsEqual(h, "stream POST side-chats");
 	const watchUrl = `${sideUrl}/${GOLDEN_SIDE_THREAD}`;
 	const watchOut = await runParityRequest(h, {
@@ -169,18 +170,6 @@ export async function runSideChatStreamsParity(h: ParityHarness): Promise<void> 
 		normalizeJsonValue(h, "api", parseNdjsonStream(watchOut.apiRes.text)),
 		normalizeJsonValue(h, "next", parseNdjsonStream(watchOut.nextRes.text)),
 	);
-}
-
-async function waitSideIdle(h: ParityHarness): Promise<void> {
-	const url = `/api/chats/${GOLDEN_TEACH_CHAT}/side-chats`;
-	for (let i = 0; i < 200; i++) {
-		const [n, a] = await Promise.all([sendWire(h.pair.next.port, { method: "GET", path: url }), sendWire(h.pair.api.port, { method: "GET", path: url })]);
-		const nAns = Object.keys((JSON.parse(n.text) as { answering?: Record<string, string> }).answering ?? {});
-		const aAns = Object.keys((JSON.parse(a.text) as { answering?: Record<string, string> }).answering ?? {});
-		if (nAns.length === 0 && aAns.length === 0) return;
-		await new Promise((r) => setTimeout(r, 30));
-	}
-	throw new Error("Side-chat stream did not settle in time");
 }
 
 interface StreamedAudioOutcome {
