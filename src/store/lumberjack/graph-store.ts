@@ -10,7 +10,11 @@ import type {
 } from "../../core/contracts.ts";
 import { emit } from "../../core/events.ts";
 import type { GraphStore, SourceOrganizationStore } from "../../core/ports.ts";
-import { emptySourceOrganization, parseSourceOrganization, type SourceOrganization } from "../../core/source-organization.ts";
+import {
+	emptySourceOrganization,
+	parseSourceOrganization,
+	type SourceOrganization,
+} from "../../core/source-organization.ts";
 import type { LumberJackForest, UpsertNodeInput } from "./binding.ts";
 
 interface RootLedgerSlot {
@@ -49,11 +53,13 @@ export interface FlashcardDeckRecord {
 	updatedAt: string;
 }
 
+type PropProgress = { mastery?: number; fsrs?: FsrsCardSchedule };
+
 export interface LumberJackLearnerStore {
 	readProfile(): LearnerProfileRecord | null;
 	writeProfile(profile: LearnerProfileRecord): void;
-	updatePropositionProgress(nodeId: string, progress: { mastery?: number; fsrs?: FsrsCardSchedule }): void;
-	readPropositionProgress(nodeId: string): { mastery?: number; fsrs?: FsrsCardSchedule } | null;
+	updatePropositionProgress(nodeId: string, progress: PropProgress): void;
+	readPropositionProgress(nodeId: string): PropProgress | null;
 	upsertDeck(deck: FlashcardDeckRecord): void;
 	listDecks(): FlashcardDeckRecord[];
 }
@@ -64,12 +70,16 @@ function isPlainRecord(v: unknown): v is Record<string, unknown> {
 
 const isString = (v: unknown): v is string => typeof v === "string";
 
+export const isSafeEntityId = (v: unknown): v is string =>
+	typeof v === "string" && v.trim().length > 0 && v.trim() !== "." && v.trim() !== ".." &&
+	!v.includes("/") && !v.includes("\\") && !v.includes("\0");
+
 const isProvenancePoint = (v: unknown): v is ProvenancePoint =>
-	isPlainRecord(v) && isString(v.chatId) && isString(v.messageId);
+	isPlainRecord(v) && isSafeEntityId(v.chatId) && isSafeEntityId(v.messageId);
 
 export const isGraphNode = (v: unknown): v is GraphNode =>
 	isPlainRecord(v) &&
-	isString(v.id) &&
+	isSafeEntityId(v.id) &&
 	isString(v.name) &&
 	isString(v.statement) &&
 	Array.isArray(v.aliases) &&
@@ -80,34 +90,39 @@ export const isGraphNode = (v: unknown): v is GraphNode =>
 
 export const isGraphChain = (v: unknown): v is GraphChain =>
 	isPlainRecord(v) &&
-	isString(v.id) &&
+	isSafeEntityId(v.id) &&
 	Array.isArray(v.premises) &&
 	v.premises.length > 0 &&
-	v.premises.every(isString) &&
-	isString(v.conclusion) &&
+	v.premises.every(isSafeEntityId) &&
+	isSafeEntityId(v.conclusion) &&
 	Array.isArray(v.provenance) &&
 	v.provenance.every(isProvenancePoint) &&
 	isString(v.createdAt);
 
 export const isCheckpoint = (v: unknown): v is SessionCheckpoint =>
-	isPlainRecord(v) && isString(v.chatId) && isString(v.foldedAt);
+	isPlainRecord(v) && isSafeEntityId(v.chatId) && isString(v.foldedAt);
 
 export const isCoverageEntry = (v: unknown): v is CoverageEntry =>
 	isPlainRecord(v) &&
-	isString(v.chatId) &&
+	isSafeEntityId(v.chatId) &&
 	isString(v.fp) &&
 	typeof v.tokens === "number" &&
 	Number.isFinite(v.tokens) &&
 	isString(v.foldedAt);
 
 export const isNotesSource = (v: unknown): v is NotesSource =>
-	isPlainRecord(v) && isString(v.id) && isString(v.filePath) && isString(v.importedAt);
+	isPlainRecord(v) && isSafeEntityId(v.id) && isString(v.filePath) && isString(v.importedAt);
 
 export const isPosition = (v: unknown): v is Position =>
 	isPlainRecord(v) && typeof v.x === "number" && Number.isFinite(v.x) && typeof v.y === "number" && Number.isFinite(v.y);
 
-function sanitizeSegment(raw: string): string {
-	return raw.replace(/[^A-Za-z0-9_.:-]/g, "_");
+export function sanitizeSegment(raw: string): string {
+	if (typeof raw !== "string") throw new Error("Invalid segment: expected string");
+	const trimmed = raw.trim();
+	if (trimmed === "" || trimmed === "." || trimmed === "..") throw new Error(`Invalid segment: ${raw}`);
+	const clean = raw.replace(/[^A-Za-z0-9_.:-]/g, "_");
+	if (clean === "" || clean === "." || clean === "..") throw new Error(`Invalid segment: ${raw}`);
+	return clean;
 }
 
 function readLedgers(forest: LumberJackForest): RootLedgerSlot {
@@ -130,18 +145,15 @@ function originParentPath(forest: LumberJackForest, chatOrSourceId: string): str
 	return null;
 }
 
-function extractProgressFields(raw: unknown): { mastery?: number; fsrs?: FsrsCardSchedule } {
+function extractProgressFields(raw: unknown): PropProgress {
 	if (!isPlainRecord(raw)) return {};
-	const out: { mastery?: number; fsrs?: FsrsCardSchedule } = {};
+	const out: PropProgress = {};
 	if (typeof raw.mastery === "number" && Number.isFinite(raw.mastery)) out.mastery = raw.mastery;
 	if (isPlainRecord(raw.fsrs)) out.fsrs = raw.fsrs as unknown as FsrsCardSchedule;
 	return out;
 }
 
-function readPropProgressNode(
-	forest: LumberJackForest,
-	nodeId: string,
-): { mastery?: number; fsrs?: FsrsCardSchedule } | null {
+function readPropProgressNode(forest: LumberJackForest, nodeId: string): PropProgress | null {
 	const seg = sanitizeSegment(nodeId);
 	const snap = forest.getNode(`learner/progress/${seg}`);
 	if (snap) {
@@ -154,7 +166,8 @@ function readPropProgressNode(
 function buildPropositionUpsert(forest: LumberJackForest, node: GraphNode): UpsertNodeInput {
 	const propPath = `knowledge/propositions/${sanitizeSegment(node.id)}`;
 	const existing = forest.getNode(propPath);
-	const aliases = new Set<string>(Array.isArray(existing?.metadata?.aliases) ? (existing.metadata.aliases as string[]) : []);
+	const prevAliases = Array.isArray(existing?.metadata?.aliases) ? (existing.metadata.aliases as string[]) : [];
+	const aliases = new Set<string>(prevAliases);
 	for (const alias of node.aliases) aliases.add(alias);
 	const parents: string[] = [];
 	for (const pt of node.provenance) {
@@ -296,15 +309,7 @@ function appendUsageToSource(forest: LumberJackForest, id: string, entry: Extrac
 	forest.upsertNode({ path: nodePath, kind: "source", slot: { ...existing, extractions: [...list, entry] } });
 }
 
-function rewriteGraphLedgers(
-	forest: LumberJackForest,
-	next: {
-		nodes?: GraphNode[];
-		chains?: GraphChain[];
-		coverage?: CoverageEntry[];
-		checkpoints?: SessionCheckpoint[];
-	},
-): void {
+function rewriteGraphLedgers(forest: LumberJackForest, next: Partial<RootLedgerSlot>): void {
 	const prevPositions = readCanvasPositions(forest);
 	const ledgers = readLedgers(forest);
 	if (next.nodes !== undefined) ledgers.nodes = next.nodes.filter(isGraphNode);
@@ -351,14 +356,10 @@ function listStoredSources(forest: LumberJackForest): NotesSource[] {
 	return out;
 }
 
-function updatePropProgressNode(
-	forest: LumberJackForest,
-	nodeId: string,
-	progress: { mastery?: number; fsrs?: FsrsCardSchedule },
-): void {
+function updatePropProgressNode(forest: LumberJackForest, nodeId: string, progress: PropProgress): void {
 	const seg = sanitizeSegment(nodeId);
 	const prev = readPropProgressNode(forest, nodeId) ?? {};
-	const merged: { mastery?: number; fsrs?: FsrsCardSchedule } = { ...prev };
+	const merged: PropProgress = { ...prev };
 	if (progress.mastery !== undefined) merged.mastery = progress.mastery;
 	if (progress.fsrs !== undefined) merged.fsrs = progress.fsrs;
 	forest.upsertNode({

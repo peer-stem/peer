@@ -5,29 +5,26 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import type { ExtractionRunUsage, TurnUsage } from "../src/core/contracts.ts";
+import type { ExtractionRunUsage, GraphNode, TurnUsage } from "../src/core/contracts.ts";
 import { subscribe, type ServerEvent } from "../src/core/events.ts";
 import type { LhMessage } from "../src/core/native-messages.ts";
 import type { PluginAgentRecord } from "../src/core/plugin-agents.ts";
 import type { PluginTaskRecord } from "../src/core/plugin-workers.ts";
 import type { ThemeFile } from "../src/core/themes.ts";
 import { DEFAULT_ADDON_PATH, type LumberJackForest } from "../src/store/lumberjack/binding.ts";
+import { isGraphChain, isGraphNode, isNotesSource, sanitizeSegment } from "../src/store/lumberjack/graph-store.ts";
 import {
-	createLumberJackStores,
-	LJ_STATUS,
-	LumberJackForest as PublicForest,
-	startLumberJackStreamBridge,
-	type FsrsCardSchedule,
+	createLumberJackStores, LJ_STATUS, LumberJackForest as PublicForest,
+	startLumberJackStreamBridge, type FsrsCardSchedule,
 } from "../src/store/lumberjack/index.ts";
 
 const WORKTREE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PERSIST_ROOT = process.env.PEER_PERSIST_ROOT ?? "/usr/lib/persist/peer";
 const SCRATCH_ROOT = process.env.PEER_TEST_SCRATCH ?? path.join(PERSIST_ROOT, "scratch");
 const SKIP_GUARD = {
-	skip:
-		!fs.existsSync(DEFAULT_ADDON_PATH) && process.env.PEER_REQUIRE_SUBSTRATE !== "1"
-			? "lumberjack_peer.node not built"
-			: false,
+	skip: !fs.existsSync(DEFAULT_ADDON_PATH) && process.env.PEER_REQUIRE_SUBSTRATE !== "1"
+		? "lumberjack_peer.node not built"
+		: false,
 };
 
 function withScratchForest<T>(prefix: string, fn: (dir: string) => T): T {
@@ -63,45 +60,33 @@ test("LumberJackForest enforces close handle guard and cross-process LJ_LOCKED",
 });
 
 const SAMPLE_FSRS: FsrsCardSchedule = {
-	due: 1765000000000,
-	stability: 6.4,
-	difficulty: 2.8,
-	reps: 5,
-	lapses: 0,
-	state: 2,
-	last_review: 1764000000000,
+	due: 1765000000000, stability: 6.4, difficulty: 2.8,
+	reps: 5, lapses: 0, state: 2, last_review: 1764000000000,
 };
 
+function makeSeedNode(
+	id: string,
+	name: string,
+	statement: string,
+	aliases: string[],
+	min: string,
+	msgId: string,
+): GraphNode {
+	return {
+		id,
+		name,
+		statement,
+		aliases,
+		createdAt: `2026-11-16T00:0${min}:00Z`,
+		provenance: [{ chatId: "src_1", messageId: msgId }],
+	};
+}
+
 function seedBayesGraph(stores: ReturnType<typeof createLumberJackStores>): void {
-	stores.graphStore.upsertSource({
-		id: "src_1",
-		filePath: "/docs/probability.md",
-		importedAt: "2026-11-16T00:00:00Z",
-	});
-	stores.graphStore.appendNode({
-		id: "n_prior",
-		name: "Prior",
-		statement: "P(A) is prior probability",
-		aliases: ["prior"],
-		createdAt: "2026-11-16T00:01:00Z",
-		provenance: [{ chatId: "src_1", messageId: "m1" }],
-	});
-	stores.graphStore.appendNode({
-		id: "n_like",
-		name: "Likelihood",
-		statement: "P(B|A) is likelihood",
-		aliases: [],
-		createdAt: "2026-11-16T00:02:00Z",
-		provenance: [{ chatId: "src_1", messageId: "m2" }],
-	});
-	stores.graphStore.appendNode({
-		id: "n_bayes",
-		name: "Bayes Rule",
-		statement: "P(A|B) = P(B|A)P(A)/P(B)",
-		aliases: ["Bayes"],
-		createdAt: "2026-11-16T00:03:00Z",
-		provenance: [{ chatId: "src_1", messageId: "m3" }],
-	});
+	stores.graphStore.upsertSource({ id: "src_1", filePath: "/docs/probability.md", importedAt: "2026-11-16T00:00:00Z" });
+	stores.graphStore.appendNode(makeSeedNode("n_prior", "Prior", "P(A) is prior probability", ["prior"], "1", "m1"));
+	stores.graphStore.appendNode(makeSeedNode("n_like", "Likelihood", "P(B|A) is likelihood", [], "2", "m2"));
+	stores.graphStore.appendNode(makeSeedNode("n_bayes", "Bayes Rule", "P(A|B) = P(B|A)P(A)/P(B)", ["Bayes"], "3", "m3"));
 	stores.graphStore.appendChain({
 		id: "arg_bayes",
 		premises: ["n_prior", "n_like"],
@@ -112,7 +97,7 @@ function seedBayesGraph(stores: ReturnType<typeof createLumberJackStores>): void
 	stores.graphStore.writePositions({ n_prior: { x: 12, y: 34 }, n_bayes: { x: 90, y: 180 } });
 }
 
-test("GraphStore persists joint-premise DAG, canvas positions, and durable learner progress across rewriteLedgers", SKIP_GUARD, () => {
+test("GraphStore persists joint-premise DAG, positions, and learner progress", SKIP_GUARD, () => {
 	withScratchForest("s1-graph", (dir) => {
 		let stores = createLumberJackStores(dir);
 		seedBayesGraph(stores);
@@ -147,15 +132,8 @@ test("GraphStore persists joint-premise DAG, canvas positions, and durable learn
 
 const SAMPLE_PLAN_TREE = {
 	version: 1,
-	nodes: [
-		{ id: "p_vec", title: "Vectors" },
-		{ id: "p_mat", title: "Matrices" },
-		{ id: "p_eig", title: "Eigenvalues" },
-	],
-	edges: [
-		{ from: "p_vec", to: "p_eig" },
-		{ from: "p_mat", to: "p_eig" },
-	],
+	nodes: [{ id: "p_vec", title: "Vectors" }, { id: "p_mat", title: "Matrices" }, { id: "p_eig", title: "Eigenvalues" }],
+	edges: [{ from: "p_vec", to: "p_eig" }, { from: "p_mat", to: "p_eig" }],
 };
 
 const SAMPLE_SIDE_CHATS = [
@@ -169,18 +147,12 @@ const SAMPLE_SIDE_CHATS = [
 ];
 
 const SAMPLE_TURN_USAGE: TurnUsage = {
-	id: "turn_req_1",
-	messageId: "msg_a1",
-	at: "2026-11-16T00:01:00Z",
-	model: "anthropic:claude-sonnet",
+	id: "turn_req_1", messageId: "msg_a1", at: "2026-11-16T00:01:00Z", model: "anthropic:claude-sonnet",
 	steps: [{ inputTokens: 120, outputTokens: 45, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 10 }],
 };
 
 const SAMPLE_EXTRACTION_USAGE: ExtractionRunUsage = {
-	startedAt: 1763251200000,
-	at: "2026-11-16T00:02:00Z",
-	durationMs: 450,
-	stats: { nodes: 2, chains: 1 },
+	startedAt: 1763251200000, at: "2026-11-16T00:02:00Z", durationMs: 450, stats: { nodes: 2, chains: 1 },
 	stages: {
 		extractor: { model: "anthropic:claude-haiku", steps: [] },
 		auditor: { model: "anthropic:claude-sonnet", steps: [] },
@@ -209,7 +181,7 @@ function verifyChatForestAndUsage(
 	assert.equal(loaded?.extractions?.length, 1);
 }
 
-test("ChatStore honors SILENCE LAW, listChats order, idempotent usage appends, and reopen durability", SKIP_GUARD, () => {
+test("ChatStore honors silence law, listChats order, usage dedup, and reopen", SKIP_GUARD, () => {
 	withScratchForest("s1-chat", (dir) => {
 		let stores = createLumberJackStores(dir);
 		let chatsChangedCount = 0;
@@ -227,7 +199,8 @@ test("ChatStore honors SILENCE LAW, listChats order, idempotent usage appends, a
 			const rawBytes = Buffer.from("svg-or-png-binary-payload");
 			const sha = createHash("sha256").update(rawBytes).digest("hex");
 			const rawBase64 = rawBytes.toString("base64");
-			stores.chatStore.saveImageSnapshot(chat.id, sha, { mimeType: "image/png", data: rawBase64, width: 64, height: 64 });
+			const imgSnap = { mimeType: "image/png" as const, data: rawBase64, width: 64, height: 64 };
+			stores.chatStore.saveImageSnapshot(chat.id, sha, imgSnap);
 			assert.equal(chatsChangedCount, 2, "content saves must stay silent");
 			verifyChatForestAndUsage(stores, chat.id, sha, rawBase64);
 			stores.chatStore.renameChat(chat.id, "Spectral Theory");
@@ -250,7 +223,16 @@ test("ChatStore honors SILENCE LAW, listChats order, idempotent usage appends, a
 	});
 });
 
-test("StreamBridge dispatches raw node_path mutations and catches transient poll timer errors", SKIP_GUARD, async () => {
+function makeFailingPollForest(): LumberJackForest {
+	return {
+		isOpen: true,
+		pollStream() {
+			throw new Error("transient poll failure");
+		},
+	} as unknown as LumberJackForest;
+}
+
+test("StreamBridge dispatches raw node_path events and catches poll errors", SKIP_GUARD, async () => {
 	await withScratchForest("s1-stream", async (dir) => {
 		const stores = createLumberJackStores(dir);
 		const captured: ServerEvent[] = [];
@@ -273,12 +255,10 @@ test("StreamBridge dispatches raw node_path mutations and catches transient poll
 
 		let loggedErrors = 0;
 		const origError = console.error;
-		console.error = () => { loggedErrors++; };
-		const failingForest = {
-			isOpen: true,
-			pollStream() { throw new Error("transient poll failure"); },
-		} as unknown as LumberJackForest;
-		const errBridge = startLumberJackStreamBridge(failingForest, 10);
+		console.error = () => {
+			loggedErrors++;
+		};
+		const errBridge = startLumberJackStreamBridge(makeFailingPollForest(), 10);
 		try {
 			await new Promise((resolve) => setTimeout(resolve, 35));
 			assert.equal(loggedErrors >= 1, true);
@@ -290,33 +270,18 @@ test("StreamBridge dispatches raw node_path mutations and catches transient poll
 });
 
 const VALID_AGENT_RECORD: PluginAgentRecord = {
-	version: 1,
-	id: "agent_sess_1",
-	definitionId: "tutor_helper",
-	createdAt: "2026-11-16T00:00:00Z",
-	updatedAt: "2026-11-16T00:01:00Z",
+	version: 1, id: "agent_sess_1", definitionId: "tutor_helper",
+	createdAt: "2026-11-16T00:00:00Z", updatedAt: "2026-11-16T00:01:00Z",
 	messages: [{ role: "user", content: "Hello", timestamp: 1 } as never],
-	pending: [],
-	status: "idle",
-	acceptedInputs: ["req_1"],
+	pending: [], status: "idle", acceptedInputs: ["req_1"],
 };
 
 const VALID_TASK_RECORD: PluginTaskRecord = {
-	version: 1,
-	id: "task_1",
-	definitionId: "quiz_builder",
-	requestId: "req_task_1",
-	createdAt: "2026-11-16T00:00:00Z",
-	updatedAt: "2026-11-16T00:01:00Z",
-	completedAt: "2026-11-16T00:02:00Z",
-	prompt: "Build quiz",
-	input: { topic: "Measure theory" },
+	version: 1, id: "task_1", definitionId: "quiz_builder", requestId: "req_task_1",
+	createdAt: "2026-11-16T00:00:00Z", updatedAt: "2026-11-16T00:01:00Z", completedAt: "2026-11-16T00:02:00Z",
+	prompt: "Build quiz", input: { topic: "Measure theory" },
 	model: { provider: "anthropic", id: "claude-sonnet", thinkingLevel: "low" },
-	purpose: "background",
-	maxTurns: 4,
-	turns: 1,
-	status: "succeeded",
-	result: { count: 3 },
+	purpose: "background", maxTurns: 4, turns: 1, status: "succeeded", result: { count: 3 },
 	messages: [{ role: "user", content: "Build quiz", timestamp: 10 } as never],
 };
 
@@ -344,26 +309,19 @@ function verifyPluginStoreValidation(stores: ReturnType<typeof createLumberJackS
 	stores.forest.deleteNode(`config/plugins/${scopeHex}/tasks/corrupt_t`);
 }
 
-test("GraphStore upsertSource preserves existing extractions and plugin stores enforce schema validation", SKIP_GUARD, () => {
+test("GraphStore upsertSource preserves extractions and validates plugin stores", SKIP_GUARD, () => {
 	withScratchForest("s1-l8", (dir) => {
 		let stores = createLumberJackStores(dir);
 		stores.graphStore.upsertSource({ id: "src_a", filePath: "/a.md", importedAt: "2026-11-16T00:00:00Z" });
 		stores.graphStore.appendSourceUsage("src_a", SAMPLE_EXTRACTION_USAGE);
 		stores.graphStore.appendSourceUsage("src_a", SAMPLE_EXTRACTION_USAGE);
 		const otherUsage: ExtractionRunUsage = { ...SAMPLE_EXTRACTION_USAGE, startedAt: 999999, durationMs: 10 };
-		stores.graphStore.upsertSource({
-			id: "src_a",
-			filePath: "/a-renamed.md",
-			importedAt: "2026-11-16T01:00:00Z",
-			extractions: [otherUsage],
+		const nextSrc = (id: string, filePath: string) => ({
+			id, filePath, importedAt: "2026-11-16T01:00:00Z", extractions: [otherUsage],
 		});
+		stores.graphStore.upsertSource(nextSrc("src_a", "/a-renamed.md"));
 		stores.graphStore.upsertSource({ id: "src_b", filePath: "/b.md", importedAt: "2026-11-16T00:00:00Z" });
-		stores.graphStore.upsertSource({
-			id: "src_b",
-			filePath: "/b2.md",
-			importedAt: "2026-11-16T01:00:00Z",
-			extractions: [otherUsage],
-		});
+		stores.graphStore.upsertSource(nextSrc("src_b", "/b2.md"));
 		verifyPluginStoreValidation(stores);
 
 		stores.close();
@@ -379,7 +337,7 @@ test("GraphStore upsertSource preserves existing extractions and plugin stores e
 	});
 });
 
-test("LumberJackForest deleteNode unlinks children parents and batchUpsertNodes rolls back atomically", SKIP_GUARD, () => {
+test("LumberJackForest deleteNode unlinks children and rolls back bad batches", SKIP_GUARD, () => {
 	withScratchForest("s1-native-dag", (dir) => {
 		let forest = new PublicForest(dir);
 		forest.upsertNode({ path: "knowledge/propositions/p_parent", kind: "proposition" });
@@ -407,30 +365,53 @@ test("LumberJackForest deleteNode unlinks children parents and batchUpsertNodes 
 	});
 });
 
+function verifyPlanTreeCleanup(dir: string): void {
+	const stores = createLumberJackStores(dir);
+	try {
+		const chat = stores.chatStore.createChat("Plan Cleanup");
+		const mixedTree = {
+			version: 1,
+			nodes: [...SAMPLE_PLAN_TREE.nodes, { id: "../bad", title: "Bad" }],
+			edges: [...SAMPLE_PLAN_TREE.edges, { from: "../bad", to: "p_eig" }],
+		};
+		stores.chatStore.saveTree(chat.id, mixedTree);
+		assert.deepEqual(stores.forest.listChildren(`plans/${chat.id}`).map((n) => n.name), ["p_eig", "p_mat", "p_vec"]);
+		assert.equal(stores.forest.deleteNode(`plans/${chat.id}/p_vec`), true);
+		assert.equal(stores.forest.getNode(`plans/${chat.id}/p_vec`), null);
+		assert.deepEqual(stores.forest.listChildren(`plans/${chat.id}`).map((n) => n.name), ["p_eig", "p_mat"]);
+		stores.forest.upsertNode({ path: `plans/${chat.id}/p_mat`, parent_paths: [], clear_parents: true });
+		assert.deepEqual(stores.forest.getNode(`plans/${chat.id}/p_mat`)?.parents, {});
+		assert.equal(stores.chatStore.deleteChat(chat.id), true);
+		assert.deepEqual(stores.forest.listChildren(`plans/${chat.id}`), []);
+		assert.equal(stores.forest.getNode(`plans/${chat.id}`), null);
+	} finally {
+		stores.close();
+	}
+}
+
+test("N10/N8: deleteNode cleans tree parent Children, clear_parents, and ID guards", SKIP_GUARD, () => {
+	for (const bad of ["", ".", ".."]) {
+		assert.equal(isGraphNode({ id: bad, name: "N", statement: "S", aliases: [], createdAt: "t", provenance: [] }), false);
+		assert.equal(isGraphChain({ id: bad, premises: ["p1"], conclusion: "c1", provenance: [], createdAt: "t" }), false);
+		assert.equal(isNotesSource({ id: bad, filePath: "/a.md", importedAt: "t" }), false);
+		assert.throws(() => sanitizeSegment(bad));
+	}
+	withScratchForest("s3-n10-plans", verifyPlanTreeCleanup);
+});
+
 const SAMPLE_THEME: ThemeFile = {
 	name: "Nordic Night",
 	mode: "dark",
 	colors: {
-		background: "#101418",
-		accent: "#5e81ac",
-		surface: "#1b222c",
-		bold: "#eceff4",
-		border: "#2e3440",
-		italic: "#88c0d0",
-		text: "#d8dee9",
-		code: "#a3be8c",
-		textMuted: "#81a1c1",
-		error: "#bf616a",
-		success: "#a3be8c",
-		warning: "#ebcb8b",
+		background: "#101418", accent: "#5e81ac", surface: "#1b222c", bold: "#eceff4",
+		border: "#2e3440", italic: "#88c0d0", text: "#d8dee9", code: "#a3be8c",
+		textMuted: "#81a1c1", error: "#bf616a", success: "#a3be8c", warning: "#ebcb8b",
 	},
 };
 
 const SAMPLE_PROFILE = {
-	goals: ["Master stochastic calculus"],
-	interests: ["Probability", "Physics"],
-	confidenceCalibration: 0.85,
-	updatedAt: "2026-11-16T00:00:00Z",
+	goals: ["Master stochastic calculus"], interests: ["Probability", "Physics"],
+	confidenceCalibration: 0.85, updatedAt: "2026-11-16T00:00:00Z",
 };
 
 function seedStoresForFullDurability(stores: ReturnType<typeof createLumberJackStores>): string {
@@ -457,19 +438,14 @@ function seedStoresForFullDurability(stores: ReturnType<typeof createLumberJackS
 	return job.id;
 }
 
-test("Themes, SourceOrganization DAG, Checkpoints, Coverage, Settings, Prompts, Jobs, and LearnerStore survive reopen", SKIP_GUARD, () => {
+test("Themes, SourceOrg DAG, Checkpoints, Coverage, Settings, Prompts, and Jobs persist", SKIP_GUARD, () => {
 	withScratchForest("s1-durability", (dir) => {
 		let stores = createLumberJackStores(dir);
 		assert.equal(stores.settingsStore.readSettings(), null);
 		const jobId = seedStoresForFullDurability(stores);
-		assert.equal(
-			Object.values(stores.forest.getNode("knowledge/folders/fld_meas")?.parents ?? {}).includes("fld_math"),
-			true,
-		);
-		assert.equal(
-			Object.values(stores.forest.getNode("knowledge/sources/src_org")?.parents ?? {}).includes("fld_meas"),
-			true,
-		);
+		const hasParent = (p: string, name: string) => Object.values(stores.forest.getNode(p)?.parents ?? {}).includes(name);
+		assert.equal(hasParent("knowledge/folders/fld_meas", "fld_math"), true);
+		assert.equal(hasParent("knowledge/sources/src_org", "fld_meas"), true);
 
 		stores.close();
 		stores = createLumberJackStores(dir);

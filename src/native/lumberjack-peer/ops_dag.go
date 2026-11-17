@@ -228,7 +228,7 @@ func applyMetadataOnNode(node *core.Node, meta map[string]interface{}, replace b
 }
 
 func applyParentsOnNode(root *core.Node, node *core.Node, parentPaths []string, clearFirst bool) error {
-	if clearFirst && len(parentPaths) > 0 {
+	if clearFirst {
 		node.Parents = map[string]string{}
 	}
 	for _, pPath := range parentPaths {
@@ -251,7 +251,8 @@ func handleUpsertNode(host extension.Host, payload json.RawMessage) (any, C.lj_s
 		return nil, C.LJ_CODEC, err.Error()
 	}
 	var snap nodeSnapshot
-	_, err := host.Change(context.Background(), extension.WriteOp{Key: "upsert:" + in.Path, Origin: "peer"}, func(tx extension.Tx) error {
+	op := extension.WriteOp{Key: "upsert:" + in.Path, Origin: "peer"}
+	_, err := host.Change(context.Background(), op, func(tx extension.Tx) error {
 		node, txErr := applyUpsertInTx(tx, in)
 		if txErr != nil {
 			return txErr
@@ -287,7 +288,8 @@ func handleBatchUpsertNodes(host extension.Host, payload json.RawMessage) (any, 
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, C.LJ_CODEC, err.Error()
 	}
-	_, err := host.Change(context.Background(), extension.WriteOp{Key: "batch_upsert", Origin: "peer"}, func(tx extension.Tx) error {
+	op := extension.WriteOp{Key: "batch_upsert", Origin: "peer"}
+	_, err := host.Change(context.Background(), op, func(tx extension.Tx) error {
 		return applyBatchInTx(tx, req.Nodes)
 	})
 	if err != nil {

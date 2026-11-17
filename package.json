@@ -17,6 +17,8 @@
 		"build": "npm run plugins:build-core && npm run plugins:build-authoring && next build",
 		"start": "next start -H localhost",
 		"test": "NODE_ENV=test tsx --test tests/*.test.ts tests/*.test.tsx",
+		"test:gate": "NODE_ENV=test PEER_REQUIRE_SUBSTRATE=1 tsx --test tests/*.test.ts tests/*.test.tsx",
+		"test:substrate": "NODE_ENV=test PEER_REQUIRE_SUBSTRATE=1 tsx --test tests/substrate-foundation.test.ts tests/lumberjack-dag-store.test.ts tests/import-learnharness.test.ts tests/mfn-unit.test.ts tests/mfn-context-mapper.test.ts tests/mfn-chat-handler.test.ts tests/mfn-live-integration.test.ts",
 		"lint": "eslint .",
 		"typecheck": "tsc --noEmit",
 		"substrate:build": "node scripts/build-substrate.mjs",

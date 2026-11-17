@@ -121,27 +121,32 @@ No `x-powered-by`, no Next `RSC` `Vary` header (`next-app-route-vary`, `next-pro
 
 ## 4. MFN 2.0 Learned Memory & Context Mapping Contract (`src/memory/mfn/`)
 
-1. **Dedicated Supervised Instance**: `peer` supervises its own MFN 2.0 controller (`ifr`, `dsr`, `alm`, `cpe`, `psr`, `mfn-gateway`) on `127.0.0.1` over `0700` sibling directories `state/mfn/data` and `state/mfn/runtime` with `0600` `state/mfn/secrets/api-token`, strict environment allow-listing, live child-exit monitoring, process-group cleanup across all 6 owners on timeout/exit, and parent-exit cleanup hooks.
+1. **Dedicated Supervised Instance**: `peer` supervises its own MFN 2.0 controller (`ifr`, `dsr`, `alm`, `cpe`, `psr`, `mfn-gateway`) on `127.0.0.1` over `0700` sibling directories `state/mfn/data` and `state/mfn/runtime` with `0600` `state/mfn/secrets/api-token`, strict 13-key OS environment allow-listing, live child-exit readiness reset, `/proc` `(pid, starttime)` + `MFN_RUNTIME_DIR` detached-child cleanup on timeout/stop, and a clean-exit `process.on("exit")` `SIGTERM` hook (`N5` single-flight/cross-process lock awaits owner decision).
 2. **Embedder Pin (`MFN_EMBEDDERS_FILE`)**: Atomic `0600` single-link file (`format_version: 1`) targeting loopback IP literal `http://127.0.0.1:11434`, `nomic-embed-text:latest` (`768` dims), and verified 64-hex `model_digest`.
 3. **Context Assembly (`turn.recall`) & Current `S2/S3` Standing**:
-   - Retains a compact exact live tail (`~4k–6k` tokens) and calls `POST /v2/execute` (`op: "turn.recall"`) under a hard deadline with `window.memory_ids` and `exclude_memory_ids` (zero duplicate live-tail memories). Any MFN/network/non-retryable recall failure degrades gracefully to empty recall so a learner's chat turn never aborts when MFN is down.
-   - **Current wiring (`M9`)**: Recall and ingest currently execute in `src/server/chat-handler.ts` via `src/server/mfn-turn-bridge.ts`, bypassing LLM compaction when MFN is active. Moving recall into `turn-preparation.ts` (if needed), wiring extraction/check-resolution ingest hooks, backfilling via importer, and deleting `src/core/compaction.ts` + `src/server/compaction.ts` complete during `C1–C3`.
+   - Retains a compact exact live tail (`~4k–6k` tokens) and calls `POST /v2/execute` (`op: "turn.recall"`) under a hard wall-clock deadline with `window.memory_ids` and `exclude_memory_ids` (zero duplicate live-tail memories), hydrating lexical fallback hits at `<= 2` concurrent `memory.peek` calls (`<= mfn-gateway`'s 4-in-flight bound) without discarding sibling hits if one peek fails.
+   - **Degraded behavior & `N3` (**open**, §9.2)**: When MFN is unreachable or returns a recall error (`ECONNREFUSED`, timeout, `409`, `404`, `401`), `prepareTurnContextWithMfn` degrades to the `~5k`-token live tail without recall or LLM compaction (because compaction is bypassed while MFN is registered); if `prepareTurnContextWithMfn` throws outside recall, `prepareMfnTurnBridge` falls back to the raw uncompacted transcript (which on a long chat can exceed a model's context window). Whether MFN-down turns keep live-tail-only or fall back to compaction awaits owner decision `§9.2`.
+   - **Current wiring (`M9`)**: Recall and ingest currently execute in `src/server/chat-handler.ts` via `src/server/mfn-turn-bridge.ts` when an MFN runtime is registered (`master` registers none until `C1`). Extraction/check-resolution ingest hooks, importer backfill, and deletion of `src/core/compaction.ts` + `src/server/compaction.ts` complete during `C1–C3`.
    - **Open (`M4`, `M5`, §10.4)**: Untrusted fencing/role framing of recalled text (`M4`) and maximum character/token size caps on ingested and recalled memory blocks (`M5`) await owner decision `§10.4`.
-4. **Settlement (`turn.ingest`), `admission_paused` Retry & Outbox**:
-   - Calls `POST /v2/execute` (`op: "turn.ingest"`) and `memory.write` (lexical pool) with idempotent UUIDv7 `operation_id` and `< 2^62` memory IDs.
-   - Both `turn.ingest` and `memory.write` treat `503 admission_paused` (`retryable: true` during MFN checkpoint/backup capture) and `503 embedder_unavailable` as retryable: retrying boundedly and queuing pending writes in the outbox.
-   - Outbox (`src/memory/mfn/outbox.ts`) supports LumberJack `memory/outbox` persistence (`createLumberJackOutboxPersistence`) and atomic `0600` temp-file+rename persistence, evicts non-retryable or max-attempt poisoned entries to dead-letter without blocking the queue head, bounds capacity without throwing on learner turns, and flushes on startup and periodic background ticks.
+4. **Settlement (`turn.ingest`), `memory.put`, Backoff & Dead-Letter Outbox**:
+   - Calls `POST /v2/execute` (`op: "turn.ingest"` on main pool and `op: "memory.put"` on lexical pool) with idempotent UUIDv7 `operation_id` and `< 2^62` memory IDs. Batch or lexical failures never abort remaining batches or lexical puts of the turn (`N6`).
+   - Both `turn.ingest` and `memory.put` treat `503 admission_paused` and `503 embedder_unavailable` as retryable and queue failed writes into `MfnIngestOutbox` (`src/memory/mfn/outbox.ts`), removing entries by `operationId` rather than queue position (`N4`).
+   - Retries are bounded by age (`maxAgeMs`, default 7 days) with exponential backoff (`nextRetryAtMs`), never by flush count (`N1`). Systemic replay errors (`401`/`403`, `409 embedder_mismatch`, `404` missing pool, `5xx`/network) stop the drain and preserve queued entries intact (`N2`), while per-item poison errors (`400`/`413`/`415`/`422`) and age-expired entries move into a persisted `dead_letter` list (`format_version: 3`).
+   - `createLumberJackOutboxPersistence` (`"memory/outbox"` node slot), atomic `0600` file persistence (with `.corrupt.*` backup and `.tmp.*` sweep), and `startAutoFlush` are implemented on `MfnIngestOutbox`; wiring them into server startup occurs in `C1` (without options, `new MfnIngestOutbox()` is in-memory and unscheduled).
 
 ## 5. Explicit LearnHarness Importer (`src/store/import-learnharness.ts`)
 
 1. `peer` starts with a clean forest (zero automatic startup migration).
-2. `importLearnHarnessData(sourceDir)` reads a LearnHarness directory strictly read-only (rejecting symlinks, isolating corrupt JSON/JSONL records without aborting healthy records), unwraps `{ positions, updatedAt }` from `positions.json`, validates ledger record shapes, preserves existing FSRS schedules on re-import, and imports `chats/*.json`, `graph/{nodes,chains,sources}.jsonl`, `images/*`, settings, and Flashcards FSRS state idempotently into LumberJack.
+2. `importLearnHarnessData(sourceDir)` reads a LearnHarness directory strictly read-only (rejecting symlinks and opening regular files with `O_NOFOLLOW`, guarding directory/file read errors without aborting healthy files, rejecting `""`/`.`/`..` IDs, normalizing missing chat `updatedAt`, unwrapping `{ positions, updatedAt }` from `positions.json`, validating ledger shapes, preserving flashcard `reviews`, and retaining existing higher-rep/newer FSRS schedules) into LumberJack.
 
 ## 6. CloudCanvas Client & Code Standards
 
 1. **Client (`src/client/`)**: Zero React, Next.js, or Tailwind. Built with CloudCanvas (`0.7.1`) + `cloudcanvas-lib` (`0.7.1`); exact view/widget contract awaits owner decision `§10.5`. Model-produced text never enters the DOM as raw HTML; Mermaid runs with `securityLevel: "strict"`; interactive demos run in opaque-origin sandboxed frames.
-2. **Code Bounds**: Max `500` lines per file, `50` lines per definition (function, method, or class), `3` levels of tab indentation.
-3. **Tests (`tests/`)**: Unit, integration, and end-to-end suites on SSD scratch; prebuilt-binary tests skip cleanly when native artifacts are absent unless `PEER_REQUIRE_SUBSTRATE=1`.
+2. **Code Bounds**: Max `500` lines per file, `50` lines per definition (function, method, or class), `3` levels of tab indentation (`N14` line-density cleanup awaits owner decision).
+3. **Tests & Gate Commands (`tests/`, `package.json`)**:
+   - Required substrate gate command: `npm run test:gate` (`NODE_ENV=test PEER_REQUIRE_SUBSTRATE=1 tsx --test tests/*.test.ts tests/*.test.tsx`) and `npm run test:substrate`.
+   - Default `npm test` skips prebuilt-binary suites cleanly when native artifacts are absent (`F6`); setting `PEER_REQUIRE_SUBSTRATE=1` enforces their execution (`N13`).
+   - Engine API parity gate: `npm run build && NODE_ENV=test PEER_API_PARITY=1 tsx --test tests/api-parity.test.ts` (plus `PEER_API_PARITY_LONG=1` for `long-stream`).
 
 ## 7. Acceptance by Phase
 
@@ -176,15 +181,18 @@ No `x-powered-by`, no Next `RSC` `Vary` header (`next-app-route-vary`, `next-pro
 7. `events-header-flush-timing`: `GET /api/events` flushes headers immediately (`< 50 ms`) on `src/api` vs Next buffering until first SSE frame (§2.7).
 8. `sigterm-open-sse-exit`: `SIGTERM` with `/api/events` open exits `< 3 s` on `src/api` vs Next waiting past `3 s` (§2.8).
 
-### 8.3 Governor Review `§10` Owner Decisions (`2026-11-17-governor-review-of-master-8b2b718-sprints-s0-s1-s2.md`)
+### 8.3 Governor Review & Re-Review Owner Decisions (`§10` of `8b2b718` review; `§8.5` & `§9` of `5ad6577` re-review)
 
 | # | Decision | Waiting items |
 |---|---|---|
-| `§10.1` | Correction sprint (`S3`) before `C1` — authorized by Richard on 2026-11-16 ("execute §9, leaving the items that wait on §10") | Executing in `S3` |
+| `§10.1` / `§9.1` | Correction sprint (`S3`) + second pass (`§8` of re-review) before PR / `C1` — authorized by Richard | Executing in `S3` |
 | `§10.2` | `M3`: How `peer` guarantees CPU or Nova/Vulkan on the embedder — check running Ollama and refuse if it reports forbidden GPU use, or supervise a `peer`-owned Ollama under `hardware-guard.ts` | **Open** (`M3`) |
 | `§10.3` | `L5`, `L6`: Move images through `/objects` and conversations/jobs canonically to `Event`/`Entry` records before `C1`, or accept JSON slots/attachments and amend `§3.3` | **Open** (`L5`, `L6`, `L7`) |
-| `§10.4` | `M4`, `M5`: Untrusted fencing/framing of recalled memory text (`M4`) and size cap on ingested/recalled blocks (`M5`) | **Open** (`M4`, `M5`) |
+| `§10.4` + `§9.2` | `M4`, `M5`, `N3`: Untrusted fencing/framing (`M4`) and size cap (`M5`) of recalled memory blocks, plus MFN-down behavior (`N3`: live-tail-only vs compaction fallback, and bounding bridge fallback on long chats) | **Open** (`M4`, `M5`, `N3`) |
 | `§10.5` | Client contract for `C1`: adopt/adapt the `feature/2.1-client-base-definition` (`f7b3a62`) B1 contracts, or derive anew for CloudCanvas + LumberJack + MFN | **Open** (blocks `C1`) |
 | `§10.6` | `D1–D6` and the 8 recorded parity differences (§8.1–§8.2): approve/settle as open, or close by change of direction | **Open** (`D1–D6`) |
+| `§9.3` | Whether the Governor marks supported Sprint `S0–S3` PDL step claims verified | **Open** (Governor / Owner) |
+| `§9.4` | `N15`: Upgrade Next 16.4.3 now for its upstream advisory notice, or leave until `C3` removes Next.js | **Open** (`N15`) |
+| `§8.5` (owner) | Deferred minor items reserved for owner decision: `N5` (`supervisor` single-flight/`/proc` scan), `N9` (orphaned progress records & ledger re-parse), `N11` (`stream-events` initial cursor & duplicate emit), `N14` (line-length density in 9 near-500-line files) | **Open** (`N5, N9, N11, N14`) |
 
 Signature: Google gemini-4-carbon high - 04da2a6d-9328-4ad4-b892-398e4c39b74c

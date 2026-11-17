@@ -11,6 +11,7 @@ import {
 	MfnClient,
 	MfnIngestOutbox,
 	setActiveMfnRuntime,
+	type MfnActiveRuntime,
 	type MfnMemoryPutPayload,
 	type MfnRequestEnvelope,
 	type RecalledMemory,
@@ -86,13 +87,22 @@ function replyGatewayOp(state: HandlerGatewayState, env: MfnRequestEnvelope): { 
 	}
 	if (env.operation === "memory.put") {
 		state.lexicalPuts.push(env.payload as unknown as MfnMemoryPutPayload);
-		return { status: 200, body: { version: 2, request_id: env.request_id, status: "committed", result: { operation_id: env.operation_id } } };
+		const exec = { operation_id: env.operation_id };
+		return { status: 200, body: { version: 2, request_id: env.request_id, status: "committed", result: exec } };
 	}
 	if (env.operation === "turn.ingest") {
 		const p = env.payload as unknown as TurnIngestPayload;
 		state.ingested.push(p);
-		const group = { format_version: 1, turn_id: p.turn_id, core: "committed", enrichment: "complete", children: [], plan_summary: {} };
-		return { status: 200, body: { version: 2, request_id: env.request_id, status: "committed", result: { operation_id: env.operation_id, result: { group } } } };
+		const group = {
+			format_version: 1,
+			turn_id: p.turn_id,
+			core: "committed",
+			enrichment: "complete",
+			children: [],
+			plan_summary: {},
+		};
+		const exec = { operation_id: env.operation_id, result: { group } };
+		return { status: 200, body: { version: 2, request_id: env.request_id, status: "committed", result: exec } };
 	}
 	return { status: 200, body: { version: 2, request_id: env.request_id, status: "ok", result: {} } };
 }
@@ -110,7 +120,8 @@ async function startHandlerGateway(state: HandlerGatewayState): Promise<{ port: 
 	});
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
 	const port = (server.address() as net.AddressInfo).port;
-	return { port, close: () => new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve()))) };
+	const close = () => new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+	return { port, close };
 }
 
 function getClosedPort(): Promise<number> {
@@ -145,8 +156,7 @@ function makeScriptedBuildAgent(replyText: string, seenContexts: string[][]) {
 		},
 	]);
 	const engine = { model: faux.getModel(), streamFn: faux.streamSimple };
-	return (opts: AgentBuildOptions) =>
-		createTeacherAgent(undefined, { engine, messages: opts.messages });
+	return (opts: AgentBuildOptions) => createTeacherAgent(undefined, { engine, messages: opts.messages });
 }
 
 const RECALLED_DIAGONAL_MEM: RecalledMemory = {
@@ -163,7 +173,8 @@ const RECALLED_DIAGONAL_MEM: RecalledMemory = {
 async function runConfiguredTurn(title: string, userText: string, replyText: string, seenContexts: string[][]) {
 	const chat = chatStore.createChat(title);
 	chatStore.saveSettings(chat.id, { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" } });
-	const res = await handleChatInput(chat.id, { type: "text", text: userText }, makeScriptedBuildAgent(replyText, seenContexts));
+	const buildAgent = makeScriptedBuildAgent(replyText, seenContexts);
+	const res = await handleChatInput(chat.id, { type: "text", text: userText }, buildAgent);
 	assert.equal(res.status, 200);
 	const handle = runningTurn(chat.id);
 	if (handle) {
@@ -211,26 +222,70 @@ test("handleChatInput succeeds 200 when MFN has ECONNREFUSED or returns 409 embe
 	const deadOutbox = new MfnIngestOutbox();
 	try {
 		const deadClient = new MfnClient({ port: deadPort, token: TEST_TOKEN, timeoutMs: 300 });
-		setActiveMfnRuntime({ client: deadClient, outbox: deadOutbox, mainPoolId: "peer-main", lexicalPoolId: "peer-lexical" });
+		const deadRt = {
+			client: deadClient, outbox: deadOutbox, mainPoolId: "peer-main", lexicalPoolId: "peer-lexical",
+		};
+		setActiveMfnRuntime(deadRt);
 		const seenDead: string[][] = [];
-		const deadChatId = await runConfiguredTurn("MFN dead port", "Hello while MFN is down", "Still teaching cleanly.", seenDead);
+		const deadId = await runConfiguredTurn("MFN dead port", "Hello while down", "Still teaching.", seenDead);
 		assert.equal(seenDead.length, 1);
-		assert.equal(chatStore.getChat(deadChatId)?.messages.length, 2);
+		assert.equal(chatStore.getChat(deadId)?.messages.length, 2);
 		await waitFor(() => deadOutbox.size() >= 1);
 	} finally {
 		setActiveMfnRuntime(null);
 	}
 	const state409: HandlerGatewayState = { mode: "mismatch409", recalled: [], ingested: [], lexicalPuts: [] };
 	const gw409 = await startHandlerGateway(state409);
+	const outbox409 = new MfnIngestOutbox();
 	try {
 		const client409 = new MfnClient({ port: gw409.port, token: TEST_TOKEN, timeoutMs: 500 });
-		setActiveMfnRuntime({ client: client409, outbox: new MfnIngestOutbox(), mainPoolId: "peer-main", lexicalPoolId: "peer-lexical" });
+		const rt409 = { client: client409, outbox: outbox409, mainPoolId: "peer-main", lexicalPoolId: "peer-lexical" };
+		setActiveMfnRuntime(rt409);
 		const seen409: string[][] = [];
-		const chat409Id = await runConfiguredTurn("MFN 409 mismatch", "Hello on digest mismatch", "Mismatch degraded safely.", seen409);
+		const chat409Id = await runConfiguredTurn("MFN 409 mismatch", "Hello on mismatch", "Mismatch safe.", seen409);
 		assert.equal(seen409.length, 1);
 		assert.equal(chatStore.getChat(chat409Id)?.messages.length, 2);
+		await waitFor(() => outbox409.size() === 3);
 	} finally {
 		setActiveMfnRuntime(null);
 		await gw409.close();
+	}
+});
+
+function createFaultyPrepRuntime(client: MfnClient, outbox: MfnIngestOutbox): MfnActiveRuntime {
+	return {
+		client,
+		outbox,
+		mainPoolId: "peer-main",
+		lexicalPoolId: "peer-lexical",
+		get liveTailTokens(): number {
+			throw new Error("forced-bridge-prep-fault");
+		},
+	};
+}
+
+test("handleChatInput catches prepareMfnTurnBridge fault and falls back to raw transcript (§8.3)", async () => {
+	const state: HandlerGatewayState = { mode: "ok", recalled: [], ingested: [], lexicalPuts: [] };
+	const gw = await startHandlerGateway(state);
+	const origConsoleError = console.error;
+	const errorLogs: string[] = [];
+	console.error = (...args: unknown[]) => {
+		errorLogs.push(args.map((a) => (a instanceof Error ? a.message : String(a))).join(" "));
+	};
+	try {
+		const client = new MfnClient({ port: gw.port, token: TEST_TOKEN });
+		setActiveMfnRuntime(createFaultyPrepRuntime(client, new MfnIngestOutbox()));
+		const seenContexts: string[][] = [];
+		const chatId = await runConfiguredTurn("Bridge fault", "Prompt under bridge fault", "Recovered.", seenContexts);
+		assert.equal(seenContexts.length, 1);
+		assert.equal(chatStore.getChat(chatId)?.messages.length, 2);
+		const expectedPrefix = `[chat ${chatId}] MFN turn preparation failed; falling back to raw transcript:`;
+		const matched = errorLogs.some((l) => l.includes(expectedPrefix) && l.includes("forced-bridge-prep-fault"));
+		assert.equal(matched, true);
+		await waitFor(() => state.ingested.length === 1 && state.lexicalPuts.length === 2);
+	} finally {
+		console.error = origConsoleError;
+		setActiveMfnRuntime(null);
+		await gw.close();
 	}
 });

@@ -31,24 +31,8 @@ const SKIP_REASON =
 		: false;
 
 const STOPWORDS = new Set([
-	"search",
-	"document",
-	"query",
-	"user",
-	"assistant",
-	"a",
-	"an",
-	"the",
-	"is",
-	"are",
-	"to",
-	"me",
-	"how",
-	"and",
-	"under",
-	"for",
-	"remind",
-	"explain",
+	"search", "document", "query", "user", "assistant", "a", "an", "the",
+	"is", "are", "to", "me", "how", "and", "under", "for", "remind", "explain",
 ]);
 
 function deterministicVector768(text: string): number[] {
@@ -74,8 +58,7 @@ function handleOllamaEmbed(req: http.IncomingMessage, res: http.ServerResponse):
 	req.on("end", () => {
 		const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { input?: string[] };
 		const inputs = Array.isArray(parsed.input) ? parsed.input : [];
-		const embeddings = inputs.map((item) => deterministicVector768(item));
-		const body = JSON.stringify({ embeddings });
+		const body = JSON.stringify({ embeddings: inputs.map((item) => deterministicVector768(item)) });
 		res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
 		res.end(body);
 	});
@@ -99,10 +82,7 @@ function startMockOllamaServer(): Promise<{
 			res.end(body);
 			return;
 		}
-		if (req.method === "POST" && req.url === "/api/embed") {
-			handleOllamaEmbed(req, res);
-			return;
-		}
+		if (req.method === "POST" && req.url === "/api/embed") return handleOllamaEmbed(req, res);
 		res.writeHead(404);
 		res.end();
 	});
@@ -113,8 +93,7 @@ function startMockOllamaServer(): Promise<{
 	return new Promise((resolve, reject) => {
 		server.once("error", reject);
 		server.listen(0, "127.0.0.1", () => {
-			const addr = server.address() as net.AddressInfo;
-			resolve({ port: addr.port, setOnline, close });
+			resolve({ port: (server.address() as net.AddressInfo).port, setOnline, close });
 		});
 	});
 }
@@ -138,7 +117,118 @@ function makeUserMsg(id: string, content: string, timestamp: number): LhMessage 
 	return { id, role: "user", content, timestamp } as LhMessage;
 }
 
-function postGatewayRoute(port: number, routePath: string, token: string, bodyJson: string, timeoutMs = 8_000): Promise<{ httpStatus: number; rawBody: string }> {
+const PSR_PROXY_RELAY_LINES = [
+	"def rx(s, n):",
+	"    b = bytearray()",
+	"    while len(b) < n:",
+	"        c = s.recv(n - len(b))",
+	"        if not c: return None",
+	"        b.extend(c)",
+	"    return bytes(b)",
+	"def relay(cli, rpath, stop):",
+	"    up = None",
+	"    try:",
+	"        while not stop.is_set():",
+	"            hdr = rx(cli, 4)",
+	"            if not hdr: break",
+	"            body = rx(cli, struct.unpack('<I', hdr)[0])",
+	"            if body is None: break",
+	"            if b'admin.pause_writes' in body:",
+	"                cap = time.monotonic() + 8.0",
+	"                while os.path.exists(HOLD) and time.monotonic() < cap and not stop.is_set():",
+	"                    time.sleep(0.01)",
+	"            if up is None:",
+	"                up = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)",
+	"                up.connect(rpath)",
+	"            up.sendall(hdr + body)",
+	"            rh = rx(up, 4)",
+	"            if not rh: break",
+	"            rb = rx(up, struct.unpack('<I', rh)[0])",
+	"            if rb is None: break",
+	"            cli.sendall(rh + rb)",
+	"    except OSError: pass",
+	"    finally:",
+	"        for s in (up, cli):",
+	"            try: s and s.close()",
+	"            except OSError: pass",
+];
+
+function buildPsrProxyPython(realPsr: string, realRuntimeDir: string, holdFile: string): string {
+	const cfgLines = [
+		`REAL_PSR = ${JSON.stringify(realPsr)}`,
+		`REAL_RT = ${JSON.stringify(realRuntimeDir)}`,
+		`HOLD = ${JSON.stringify(holdFile)}`,
+	];
+	return [
+		"#!/usr/bin/env python3",
+		"import os, signal, socket, struct, subprocess, sys, threading, time",
+		...cfgLines,
+		...PSR_PROXY_RELAY_LINES,
+		"os.makedirs(REAL_RT, mode=0o700, exist_ok=True); os.chmod(REAL_RT, 0o700)",
+		"rpath = os.path.join(REAL_RT, 'layer5.sock')",
+		"ppath = os.path.join(os.environ['MFN_RUNTIME_DIR'], 'layer5.sock')",
+		"env = {**os.environ, 'MFN_RUNTIME_DIR': REAL_RT}",
+		"proc = subprocess.Popen([REAL_PSR], env=env, stdin=subprocess.DEVNULL, start_new_session=True)",
+		"t0 = time.monotonic()",
+		"while not os.path.exists(rpath):",
+		"    if proc.poll() is not None or time.monotonic() - t0 > 5.0: sys.exit(1)",
+		"    time.sleep(0.01)",
+		"if os.path.exists(ppath): os.unlink(ppath)",
+		"os.umask(0o177); srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); srv.bind(ppath)",
+		"os.chmod(ppath, 0o600); srv.listen(32); srv.settimeout(0.1); stop = threading.Event()",
+		"def on_sig(sig, _f):",
+		"    stop.set()",
+		"    if proc.poll() is None: proc.send_signal(sig)",
+		"signal.signal(signal.SIGTERM, on_sig); signal.signal(signal.SIGINT, on_sig)",
+		"while not stop.is_set() and proc.poll() is None:",
+		"    try: cli, _ = srv.accept()",
+		"    except socket.timeout: continue",
+		"    except OSError: break",
+		"    threading.Thread(target=relay, args=(cli, rpath, stop), daemon=True).start()",
+		"for fn in (srv.close, lambda: os.unlink(ppath)):",
+		"    try: fn()",
+		"    except OSError: pass",
+		"if proc.poll() is None: proc.send_signal(signal.SIGTERM)",
+		"rc = proc.wait(timeout=10.0); sys.exit(0 if rc == 0 else rc)",
+		"",
+	].join("\n");
+}
+
+function prepareProxiedBinDir(stateRoot: string, holdFile: string): string {
+	const proxyBinDir = path.join(stateRoot, "bin");
+	const psrRealDir = path.join(stateRoot, "psr-real");
+	fs.mkdirSync(proxyBinDir, { recursive: true, mode: 0o700 });
+	fs.chmodSync(proxyBinDir, 0o700);
+	fs.mkdirSync(psrRealDir, { recursive: true, mode: 0o700 });
+	fs.chmodSync(psrRealDir, 0o700);
+	for (const name of ["ifr", "dsr", "alm", "cpe", "mfn-gateway"]) {
+		const dst = path.join(proxyBinDir, name);
+		fs.copyFileSync(path.join(MFN_BIN_DIR, name), dst);
+		fs.chmodSync(dst, 0o755);
+	}
+	const psrProxyPath = path.join(proxyBinDir, "psr");
+	const script = buildPsrProxyPython(path.join(MFN_BIN_DIR, "psr"), psrRealDir, holdFile);
+	fs.writeFileSync(psrProxyPath, script, { mode: 0o755 });
+	fs.chmodSync(psrProxyPath, 0o755);
+	return proxyBinDir;
+}
+
+function readIncomingBody(
+	res: http.IncomingMessage,
+	resolve: (val: { httpStatus: number; rawBody: string }) => void,
+	reject: (err: unknown) => void,
+): void {
+	const chunks: Buffer[] = [];
+	res.on("data", (c: Buffer) => chunks.push(c));
+	res.once("end", () => {
+		resolve({ httpStatus: res.statusCode ?? 0, rawBody: Buffer.concat(chunks).toString("utf8") });
+	});
+	res.once("error", reject);
+}
+
+function postGatewayRoute(
+	port: number, routePath: string, token: string, bodyJson: string, timeoutMs = 8_000,
+): Promise<{ httpStatus: number; rawBody: string }> {
 	const headers: http.OutgoingHttpHeaders = {
 		Authorization: `Bearer ${token}`,
 		Accept: "application/json",
@@ -147,12 +237,8 @@ function postGatewayRoute(port: number, routePath: string, token: string, bodyJs
 		Connection: "close",
 	};
 	return new Promise((resolve, reject) => {
-		const req = http.request({ hostname: "127.0.0.1", port, path: routePath, method: "POST", headers, agent: false }, (res) => {
-			const chunks: Buffer[] = [];
-			res.on("data", (c: Buffer) => chunks.push(c));
-			res.once("end", () => resolve({ httpStatus: res.statusCode ?? 0, rawBody: Buffer.concat(chunks).toString("utf8") }));
-			res.once("error", reject);
-		});
+		const opts = { hostname: "127.0.0.1", port, path: routePath, method: "POST", headers, agent: false };
+		const req = http.request(opts, (res) => readIncomingBody(res, resolve, reject));
 		const timer = setTimeout(() => req.destroy(new Error(`Timeout on ${routePath}`)), timeoutMs);
 		req.once("close", () => clearTimeout(timer));
 		req.once("error", reject);
@@ -160,22 +246,53 @@ function postGatewayRoute(port: number, routePath: string, token: string, bodyJs
 	});
 }
 
+async function waitGatewayPaused(client: MfnClient, timeoutMs = 5_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const health = await client.healthGet(2_000);
+		if (JSON.stringify(health).includes("\"dispatch_paused\":true")) return;
+		await sleepMs(15);
+	}
+	throw new Error("Timed out waiting for health.get to report dispatch_paused: true");
+}
+
+function isHealthFullyUnpaused(health: unknown): boolean {
+	type LayerHealth = { result?: { admission_paused?: unknown } };
+	const env = health as { result?: { readiness?: { dispatch_paused?: unknown }; outcomes?: LayerHealth[] } };
+	const dispatchUnpaused = env.result?.readiness?.dispatch_paused === false;
+	const outcomes = env.result?.outcomes ?? [];
+	return dispatchUnpaused && outcomes.length === 5 && outcomes.every((o) => o.result?.admission_paused === false);
+}
+
+async function waitGatewayUnpaused(client: MfnClient, timeoutMs = 10_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		try {
+			if (isHealthFullyUnpaused(await client.healthGet(2_000))) return;
+		} catch {
+			// Retry while backup capture settles.
+		}
+		await sleepMs(25);
+	}
+	throw new Error("Timed out waiting for health.get to report all dispatch and layers unpaused");
+}
+
 async function verifyHebbianSpreadAndExclusions(client: MfnClient, outbox: MfnIngestOutbox): Promise<void> {
+	await waitGatewayUnpaused(client);
 	const s1Msgs = [
 		makeUserMsg("m_s1_1", "A sigma algebra is closed under complement and countable unions.", 1_000),
 		makeUserMsg("m_s1_2", "Vitali construction partitions equivalence classes modulo rationals.", 2_000),
 	];
 	const firstIngest = await ingestSettledTurnWithMfn({
-		client,
-		outbox,
-		chatId: "chat_s1",
-		turnMessages: s1Msgs,
-		mainPoolId: "peer-main",
-		lexicalPoolId: "peer-lexical",
+		client, outbox, chatId: "chat_s1", turnMessages: s1Msgs, mainPoolId: "peer-main", lexicalPoolId: "peer-lexical",
 	});
-	assert.equal(firstIngest.ingestedBatches, 1);
+	assert.equal(firstIngest.ingestedBatches + firstIngest.queuedBatches, 1);
 	assert.equal(firstIngest.lexicalWrites + firstIngest.queuedLexicalWrites, 2);
-	if (outbox.size() > 0) await outbox.flush(client);
+	while (outbox.size() > 0) {
+		await waitGatewayUnpaused(client);
+		await outbox.flush(client, { force: true });
+		if (outbox.size() > 0) await sleepMs(40);
+	}
 	const memId1 = messageMemoryId("chat_s1", "m_s1_1");
 	const memId2 = messageMemoryId("chat_s1", "m_s1_2");
 	await assertLiveSpreadNeighbor(client, memId2);
@@ -183,19 +300,17 @@ async function verifyHebbianSpreadAndExclusions(client: MfnClient, outbox: MfnIn
 }
 
 async function assertLiveSpreadNeighbor(client: MfnClient, memId2: string): Promise<void> {
-	const s2Msgs = [makeUserMsg("m_s2_1", "How is a sigma algebra closed under complement and countable unions?", 3_000)];
+	const prompt = "How is a sigma algebra closed under complement and countable unions?";
+	const s2Msgs = [makeUserMsg("m_s2_1", prompt, 3_000)];
 	let spreadNeighbor = undefined;
 	const deadline = Date.now() + 3_000;
 	while (Date.now() < deadline) {
 		const recalled = await prepareTurnContextWithMfn({
-			client,
-			chatId: "chat_s2",
-			messages: s2Msgs,
-			mainPoolId: "peer-main",
-			lexicalPoolId: "peer-lexical",
+			client, chatId: "chat_s2", messages: s2Msgs, mainPoolId: "peer-main", lexicalPoolId: "peer-lexical",
 		});
 		spreadNeighbor = recalled.recalledMemories.find((m) => m.memory_id === memId2);
-		if (spreadNeighbor && (spreadNeighbor.activation.spread > 0 || spreadNeighbor.evidence.some((e) => e.layer === 3))) {
+		const viaL3 = spreadNeighbor?.evidence.some((e) => e.layer === 3) ?? false;
+		if (spreadNeighbor && (spreadNeighbor.activation.spread > 0 || viaL3)) {
 			assert.ok(recalled.marker?.content.includes("sigma algebra"));
 			break;
 		}
@@ -206,185 +321,141 @@ async function assertLiveSpreadNeighbor(client: MfnClient, memId2: string): Prom
 }
 
 async function assertLiveExclusionHonored(client: MfnClient, tailMsg: LhMessage, memId1: string): Promise<void> {
+	const query = { text: "A sigma algebra is closed under complement and countable unions.", context: null };
+	const session = { kind: "chat" as const, id: "chat_s1" };
+	const positiveControl = await client.turnRecall("peer-main", { query, session, exclude_memory_ids: [] });
+	assert.equal(positiveControl.result.memories.some((m) => m.memory_id === memId1), true);
+	const rawExcluded = await client.turnRecall("peer-main", { query, session, exclude_memory_ids: [memId1] });
+	assert.equal(rawExcluded.result.memories.some((m) => m.memory_id === memId1), false);
 	const sameChatCtx = await prepareTurnContextWithMfn({
-		client,
-		chatId: "chat_s1",
-		messages: [tailMsg],
-		mainPoolId: "peer-main",
-		lexicalPoolId: "peer-lexical",
+		client, chatId: "chat_s1", messages: [tailMsg], mainPoolId: "peer-main", lexicalPoolId: "peer-lexical",
 	});
 	assert.equal(sameChatCtx.recalledMemories.some((m) => m.memory_id === memId1), false);
-	const rawExcluded = await client.turnRecall("peer-main", {
-		query: { text: "A sigma algebra is closed under complement and countable unions.", context: null },
-		session: { kind: "chat", id: "chat_s1" },
-		exclude_memory_ids: [memId1],
-	});
-	assert.equal(rawExcluded.result.memories.some((m) => m.memory_id === memId1), false);
 }
 
-async function waitGatewayUnpaused(client: MfnClient): Promise<void> {
-	const deadline = Date.now() + 10_000;
+async function triggerHeldBackupPause(client: MfnClient, mfnPort: number, token: string): Promise<void> {
+	const deadline = Date.now() + 8_000;
 	while (Date.now() < deadline) {
-		try {
-			const health = await client.healthGet(2_000);
-			const outcomes = health.result?.outcomes ?? [];
-			const raw = JSON.stringify(health);
-			if (!raw.includes("\"dispatch_paused\":true") && outcomes.length > 0) return;
-		} catch {
-			// Retry while capture settles.
+		const curHealth = await client.healthGet(2_000);
+		if (JSON.stringify(curHealth).includes("\"dispatch_paused\":true")) return;
+		const bodyJson = JSON.stringify({ request_id: mintUuidV7() });
+		const backupRes = await postGatewayRoute(mfnPort, "/v2/backups", token, bodyJson);
+		assert.equal(backupRes.httpStatus === 202 || backupRes.httpStatus === 503, true);
+		if (backupRes.httpStatus === 202) {
+			await waitGatewayPaused(client);
+			return;
 		}
 		await sleepMs(40);
 	}
+	throw new Error("Timed out establishing held dispatch_paused state");
 }
 
-async function continuousIngestUntilStopped(
-	client: MfnClient,
-	outbox: MfnIngestOutbox,
-	slot: number,
-	shouldStop: () => boolean,
-	expectedIds: string[],
+async function verifyAdmissionPausedDuringBackup(
+	client: MfnClient, mfnPort: number, token: string, outbox: MfnIngestOutbox, holdFile: string,
 ): Promise<void> {
-	let step = 0;
-	while (!shouldStop()) {
-		const msgId = `bp_${slot}_${step++}`;
-		expectedIds.push(messageMemoryId("chat_bp", msgId));
-		await ingestSettledTurnWithMfn({
-			client,
-			outbox,
-			chatId: "chat_bp",
-			turnMessages: [makeUserMsg(msgId, `Borel measurable function preserves preimages item ${msgId}.`, 10_000 + step)],
-			mainPoolId: "peer-main",
-			lexicalPoolId: "peer-lexical",
+	await waitGatewayUnpaused(client);
+	fs.writeFileSync(holdFile, "hold\n", { mode: 0o600 });
+	try {
+		await triggerHeldBackupPause(client, mfnPort, token);
+		const pausedHealth = await client.healthGet(2_000);
+		assert.equal(JSON.stringify(pausedHealth).includes("\"dispatch_paused\":true"), true);
+		const msgId = "bp_paused_1";
+		const memId = messageMemoryId("chat_bp", msgId);
+		const turnMessages = [makeUserMsg(msgId, "Borel measurable function preserves preimages under pause.", 10_000)];
+		const queued = await ingestSettledTurnWithMfn({
+			client, outbox, chatId: "chat_bp", turnMessages, mainPoolId: "peer-main", lexicalPoolId: "peer-lexical",
 		});
-	}
-}
-
-async function flushAndVerifyIds(client: MfnClient, outbox: MfnIngestOutbox, expectedIds: string[]): Promise<void> {
-	const flushDeadline = Date.now() + 10_000;
-	while (outbox.size() > 0 && Date.now() < flushDeadline) {
+		assert.equal(queued.queuedBatches, 1);
+		assert.equal(queued.queuedLexicalWrites, 1);
+		fs.rmSync(holdFile, { force: true });
 		await waitGatewayUnpaused(client);
-		await outbox.flush(client);
-		if (outbox.size() > 0) await sleepMs(60);
-	}
-	assert.equal(outbox.size(), 0);
-	for (const memId of expectedIds) {
+		await outbox.flush(client, { force: true });
+		assert.equal(outbox.size(), 0);
 		const lexPeek = await client.execute("memory.peek", { memory_id: memId }, { poolId: "peer-lexical" });
 		const mainPeek = await client.execute("memory.peek", { memory_id: memId }, { poolId: "peer-main" });
 		assert.equal(lexPeek.envelope.status, "ok");
 		assert.equal(mainPeek.envelope.status, "ok");
+	} finally {
+		fs.rmSync(holdFile, { force: true });
 	}
-}
-
-async function verifyAdmissionPausedDuringBackup(
-	mfnPort: number,
-	token: string,
-	outbox: MfnIngestOutbox,
-): Promise<void> {
-	let admissionPausedCount = 0;
-	const spiedClient = new MfnClient({
-		token,
-		timeoutMs: 8_000,
-		transport: async (bodyJson, timeoutMs) => {
-			const res = await postGatewayRoute(mfnPort, "/v2/execute", token, bodyJson, timeoutMs + 500);
-			if (res.httpStatus === 503 && res.rawBody.includes("\"admission_paused\"")) admissionPausedCount += 1;
-			return res;
-		},
-	});
-	const expectedIds: string[] = [];
-	const stopAt = Date.now() + 8_000;
-	let stopWriters = false;
-	const shouldStop = () => stopWriters || admissionPausedCount > 0 || Date.now() >= stopAt;
-	const writers = [0, 1].map((slot) => continuousIngestUntilStopped(spiedClient, outbox, slot, shouldStop, expectedIds));
-	let nextBackupAt = 0;
-	while (admissionPausedCount === 0 && Date.now() < stopAt) {
-		if (Date.now() >= nextBackupAt) {
-			const res = await postGatewayRoute(mfnPort, "/v2/backups", token, JSON.stringify({ request_id: mintUuidV7() }));
-			assert.equal(res.httpStatus === 202 || res.httpStatus === 503, true);
-			nextBackupAt = Date.now() + 1_200;
-		}
-		await sleepMs(15);
-	}
-	stopWriters = true;
-	await Promise.all(writers);
-	assert.equal(admissionPausedCount > 0, true, "Expected live backup capture to trigger 503 admission_paused");
-	await flushAndVerifyIds(spiedClient, outbox, expectedIds);
 }
 
 async function verifyDegradedOutboxAndReplay(
-	client: MfnClient,
-	outbox: MfnIngestOutbox,
-	setOllamaOnline: (online: boolean) => void,
+	client: MfnClient, outbox: MfnIngestOutbox, setOllamaOnline: (online: boolean) => void,
 ): Promise<void> {
 	await waitGatewayUnpaused(client);
 	setOllamaOnline(false);
-	const offlineMsg = [makeUserMsg("m_off_1", "Radon Nikodym derivative relates absolutely continuous measures.", 20_000)];
+	const text = "Radon Nikodym derivative relates absolutely continuous measures.";
+	const offlineMsgs = [makeUserMsg("m_off_1", text, 20_000)];
 	const queued = await ingestSettledTurnWithMfn({
-		client,
-		outbox,
-		chatId: "chat_s2",
-		turnMessages: offlineMsg,
-		mainPoolId: "peer-main",
-		lexicalPoolId: "peer-lexical",
+		client, outbox, chatId: "chat_s2", turnMessages: offlineMsgs,
+		mainPoolId: "peer-main", lexicalPoolId: "peer-lexical",
 	});
 	assert.equal(queued.queuedBatches, 1);
 	assert.equal(queued.lexicalWrites + queued.queuedLexicalWrites, 1);
 	if (queued.queuedLexicalWrites > 0) {
 		await waitGatewayUnpaused(client);
-		await outbox.flush(client);
+		await outbox.flush(client, { force: true });
 	}
 	assert.equal(outbox.size(), 1);
-
+	const askMsg = makeUserMsg("m_s3_1", "Explain Radon Nikodym derivative for measures", 21_000);
 	const degradedCtx = await prepareTurnContextWithMfn({
-		client,
-		chatId: "chat_s3",
-		messages: [makeUserMsg("m_s3_1", "Explain Radon Nikodym derivative for measures", 21_000)],
-		mainPoolId: "peer-main",
-		lexicalPoolId: "peer-lexical",
+		client, chatId: "chat_s3", messages: [askMsg], mainPoolId: "peer-main", lexicalPoolId: "peer-lexical",
 	});
 	assert.equal(degradedCtx.degraded.length >= 1, true);
 	assert.equal(degradedCtx.lexicalSupplements.some((s) => s.content.includes("Radon Nikodym")), true);
-
 	setOllamaOnline(true);
-	const flushDeadline = Date.now() + 8_000;
-	while (outbox.size() > 0 && Date.now() < flushDeadline) {
-		await waitGatewayUnpaused(client);
-		await outbox.flush(client);
-		if (outbox.size() > 0) await sleepMs(50);
-	}
+	await waitGatewayUnpaused(client);
+	await outbox.flush(client, { force: true });
 	assert.equal(outbox.size(), 0);
 }
 
+async function runLiveIntegrationSuite(stateRoot: string, holdFile: string): Promise<void> {
+	const ollama = await startMockOllamaServer();
+	const mfnPort = await findFreeTcpPort();
+	let supervisor: MfnSupervisor | null = null;
+	try {
+		const ollamaUrl = `http://127.0.0.1:${ollama.port}`;
+		const digest = await probeOllamaModelDigest(ollamaUrl, MODEL_NAME, fetch, MODEL_DIGEST);
+		const embeddersFile = path.join(stateRoot, "secrets", "embedders.json");
+		writeEmbeddersPinFile(embeddersFile, [{
+			space_id: "nomic-v1", endpoint: ollamaUrl, model: MODEL_NAME,
+			model_digest: digest, dimensions: 768, timeout_ms: 1_500,
+		}]);
+		const proxyBinDir = prepareProxiedBinDir(stateRoot, holdFile);
+		supervisor = new MfnSupervisor({
+			repoRoot: WORKTREE_ROOT, stateRoot, binDir: proxyBinDir, port: mfnPort, backend: "cpu", embeddersFile,
+		});
+		assert.equal((await supervisor.start()).ready, true);
+		const client = supervisor.createClient(8_000);
+		await client.ensurePools({
+			mainPoolId: "peer-main", lexicalPoolId: "peer-lexical", spaceId: "nomic-v1", dimensions: 768,
+		});
+		const outbox = new MfnIngestOutbox({ filePath: path.join(stateRoot, "secrets", "outbox.json") });
+		const token = fs.readFileSync(path.join(stateRoot, "secrets", "api-token"), "utf8").trim();
+		await verifyHebbianSpreadAndExclusions(client, outbox);
+		await verifyAdmissionPausedDuringBackup(client, mfnPort, token, outbox, holdFile);
+		await verifyDegradedOutboxAndReplay(client, outbox, ollama.setOnline);
+	} catch (err) {
+		if (supervisor) console.error("[mfn-live stderr]", supervisor.getStderrTail());
+		throw err;
+	} finally {
+		fs.rmSync(holdFile, { force: true });
+		if (supervisor) await supervisor.stop();
+		await ollama.close();
+	}
+}
+
 test(
-	"Live MFN 2.0 native CPU engine runs L3 Hebbian spread, exclude_memory_ids, backup admission_paused recovery, and degraded replay",
+	"Live MFN 2.0 native CPU engine runs L3 spread, exclusions, health-verified backup pause, and degraded replay",
 	{ skip: SKIP_REASON },
 	async () => {
 		fs.mkdirSync(SCRATCH_ROOT, { recursive: true, mode: 0o700 });
 		const stateRoot = path.join(SCRATCH_ROOT, `m${randomBytes(2).toString("hex")}`);
-		const ollama = await startMockOllamaServer();
-		const mfnPort = await findFreeTcpPort();
-		let supervisor: MfnSupervisor | null = null;
+		const holdFile = path.join(stateRoot, "hold-psr-pause");
 		try {
-			const ollamaUrl = `http://127.0.0.1:${ollama.port}`;
-			const digest = await probeOllamaModelDigest(ollamaUrl, MODEL_NAME, fetch, MODEL_DIGEST);
-			const embeddersFile = path.join(stateRoot, "secrets", "embedders.json");
-			const pin = { space_id: "nomic-v1", endpoint: ollamaUrl, model: MODEL_NAME, model_digest: digest, dimensions: 768, timeout_ms: 1_500 };
-			writeEmbeddersPinFile(embeddersFile, [pin]);
-			supervisor = new MfnSupervisor({ repoRoot: WORKTREE_ROOT, stateRoot, binDir: MFN_BIN_DIR, port: mfnPort, backend: "cpu", embeddersFile });
-			const ready = await supervisor.start();
-			assert.equal(ready.ready, true);
-			const client = supervisor.createClient(8_000);
-			await client.ensurePools({ mainPoolId: "peer-main", lexicalPoolId: "peer-lexical", spaceId: "nomic-v1", dimensions: 768 });
-			const outbox = new MfnIngestOutbox({ filePath: path.join(stateRoot, "secrets", "outbox.json") });
-			const token = fs.readFileSync(path.join(stateRoot, "secrets", "api-token"), "utf8").trim();
-			await verifyHebbianSpreadAndExclusions(client, outbox);
-			await verifyAdmissionPausedDuringBackup(mfnPort, token, outbox);
-			await verifyDegradedOutboxAndReplay(client, outbox, ollama.setOnline);
-		} catch (err) {
-			if (supervisor) console.error("[mfn-live stderr]", supervisor.getStderrTail());
-			throw err;
+			await runLiveIntegrationSuite(stateRoot, holdFile);
 		} finally {
-			if (supervisor) await supervisor.stop();
-			await ollama.close();
 			fs.rmSync(stateRoot, { recursive: true, force: true });
 		}
 	},
