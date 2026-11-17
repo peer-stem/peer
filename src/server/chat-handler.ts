@@ -77,6 +77,7 @@ import {
 } from "../core/input-events.ts";
 import { steerDelivered } from "../core/contracts.ts";
 import type {CallUsage} from "../core/contracts.ts";
+import { isMfnRuntimeActive, prepareMfnTurnBridge } from "./mfn-turn-bridge.ts";
 
 /**
  * One chat turn over the server-owned native record. Framework-free (plain
@@ -383,7 +384,7 @@ export async function handleChatInput(
 	};
 	const sideBudgetError = () => new Error(SIDE_CONTEXT_BUDGET_ERROR);
 	const beforeCompaction = record.messages;
-	await ensureCompacted(
+	if (!isMfnRuntimeActive()) await ensureCompacted(
 		{
 			chatStore: stores.chatStore,
 			engine: compactionEngine,
@@ -658,15 +659,17 @@ export async function handleChatInput(
 	// enabled). The definitive toggleable set is TOGGLEABLE_TOOLS — the
 	// sub-agent JOB tools (research/demo/visual/pdf; adjudicated with the
 	// user: quiz/ask/fs/plan/probe_done are always-on).
+	const mfnTurn = await prepareMfnTurnBridge({ chatId, priorMessages: record.messages, appends, agentMessages, tree: record.tree, stagedAutomatic });
+	persistBaseCount = mfnTurn.initialPersistBaseCount;
 	if (isSubscriptionProvider(conversation.provider)) requestCycle = new SubscriptionRequestCycle({
-		initialMessages: asAgentMessages(agentMessages),
+		initialMessages: asAgentMessages(mfnTurn.projectedMessages),
 		staged: stagedAutomatic ? asAgentMessages(appends) : undefined,
 		foregroundOwed: !callPurpose.background,
 		purpose: callPurpose,
 		scopeCurrent: (scope) => connectionScopeCurrent(conversation.provider, scope),
 		commitStaged: () => {
 			stores.chatStore.saveMessages(chatId, merged);
-			persistBaseCount = merged.length;
+			persistBaseCount = mfnTurn.committedPersistBaseCount;
 			noteSteersDurable(chatId, merged);
 		},
 		restoreAutomatic: (automaticIds, retainedIds) => restoreUncommittedAutomatic(chatId, constructed, automaticIds, retainedIds),
@@ -677,7 +680,7 @@ export async function handleChatInput(
 		engine,
 		callPurpose,
 		requestCycle,
-		messages: asAgentMessages(agentMessages),
+		messages: asAgentMessages(mfnTurn.projectedMessages),
 		validateContext: (messages) => {
 			// This is the SDK's ACTUAL request, after both prepared references
 			// and already-drained steering have joined it. A pre-queue estimate
@@ -865,6 +868,7 @@ export async function handleChatInput(
 				// merely because a local/provider refusal settled the running turn.
 				const admittedMessages = turnMessages.filter((message) => !tentativeSideIds.has((message as LhMessage).id) || admittedSideIds.has((message as LhMessage).id));
 				const stamped = persistTurn(stores.chatStore, chatId, persistBaseCount, admittedMessages, isAborted);
+				mfnTurn.finish(stamped, isAborted, !requestCycle || requestCycle.dispatched);
 				noteSteersDurable(chatId, stores.chatStore.getChat(chatId)?.messages ?? stamped);
 				// usage log append (idempotent per turn id) — the stats bar
 				// refolds this on the client after the turn settles. The
@@ -922,7 +926,7 @@ export async function handleChatInput(
 				// beneath-threshold record is a silent no-op. Skipped under
 				// tests (the extraction precedent — scripted chats are
 				// fixtures; the service itself is pinned directly).
-				if (process.env.NODE_ENV !== "test" && !pendingSideBudgetError && (!requestCycle || requestCycle.dispatched))
+				if (!isMfnRuntimeActive() && process.env.NODE_ENV !== "test" && !pendingSideBudgetError && (!requestCycle || requestCycle.dispatched))
 					kickCompaction(() => {
 						const fresh = effectiveSettings();
 						const spec = resolveConversationSpec(stores.chatStore.getChat(chatId)?.settings, fresh.models.strong);
