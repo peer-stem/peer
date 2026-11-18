@@ -3,7 +3,7 @@ import type { TestContext } from "node:test";
 import type { RouteRecord } from "../src/api/types.ts";
 import { startParityPair, type ParityPair } from "./api-parity-servers.ts";
 import type { ServerSide } from "./api-parity-stubs.ts";
-import { sendRawSocket, sendWire, type LiveStreamHandle } from "./api-parity-wire.ts";
+import { countOccurrences, sendRawSocket, sendWire, type LiveStreamHandle } from "./api-parity-wire.ts";
 import {
 	assertDataDirsEqual,
 	runParityRequest,
@@ -68,6 +68,7 @@ async function checkRefusedTrailingSlash(h: ParityHarness): Promise<void> {
 }
 
 export async function caseHandlerThrows(h: ParityHarness): Promise<void> {
+	const steerPath = `/api/chats/${GOLDEN_TEACH_CHAT}/steer`;
 	h.pair.next.clearLogs();
 	h.pair.api.clearLogs();
 	const out = await runParityRequest(h, {
@@ -75,7 +76,7 @@ export async function caseHandlerThrows(h: ParityHarness): Promise<void> {
 		expectedStatus: 500,
 		request: {
 			method: "POST",
-			path: `/api/chats/${GOLDEN_TEACH_CHAT}/steer`,
+			path: steerPath,
 			headers: { "Content-Type": "application/json" },
 			body: "{bad",
 		},
@@ -84,7 +85,10 @@ export async function caseHandlerThrows(h: ParityHarness): Promise<void> {
 	assert.equal(out.apiRes.rawBody.length, 0);
 	await Promise.all([
 		h.pair.next.waitForLog((s) => /SyntaxError|JSON/i.test(s), 5_000),
-		h.pair.api.waitForLog((s) => s.includes("[api] Unhandled route error"), 5_000),
+		h.pair.api.waitForLog(
+			(s) => s.split("\n").some((line) => line.includes("[api] Unhandled route error") && line.includes(steerPath)),
+			5_000,
+		),
 	]);
 }
 
@@ -309,14 +313,18 @@ export async function caseLongStream(t: TestContext, h: ParityHarness): Promise<
 	const { nextEv, apiEv } = await openEventsWithPulse(h.pair.next.port, h.pair.api.port);
 	try {
 		await new Promise((r) => setTimeout(r, 362_000));
+		assert.equal(nextEv.hasEnded(), false, "Next /api/events ended during 362s idle window");
+		assert.equal(apiEv.hasEnded(), false, "API /api/events ended during 362s idle window");
+		const nextBefore = countOccurrences(nextEv.snapshotText(), "sources-changed");
+		const apiBefore = countOccurrences(apiEv.snapshotText(), "sources-changed");
 		const body = JSON.stringify({ sourceIds: ["src_long_stream_probe"], folderIds: [], deleteSessions: false });
 		await Promise.all([
 			sendWire(h.pair.next.port, { method: "DELETE", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body }),
 			sendWire(h.pair.api.port, { method: "DELETE", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body }),
 		]);
 		await Promise.all([
-			nextEv.waitForText("sources-changed", 10_000),
-			apiEv.waitForText("sources-changed", 10_000),
+			nextEv.waitForCount("sources-changed", nextBefore + 1, 10_000),
+			apiEv.waitForCount("sources-changed", apiBefore + 1, 10_000),
 		]);
 	} finally {
 		nextEv.abort();

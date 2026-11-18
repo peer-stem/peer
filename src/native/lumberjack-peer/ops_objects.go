@@ -89,13 +89,14 @@ func handleDeleteNode(host extension.Host, payload json.RawMessage) (any, C.lj_s
 		return nil, C.LJ_CODEC, err.Error()
 	}
 	deleted := false
-	_, err := host.Change(context.Background(), extension.WriteOp{Key: "delete:" + req.Path, Origin: "peer"}, func(tx extension.Tx) error {
+	op := extension.WriteOp{Key: "delete:" + req.Path, Origin: "peer"}
+	_, err := host.Change(context.Background(), op, func(tx extension.Tx) error {
 		target := findBySegments(tx.Root(), req.Path)
 		if target == nil {
 			return nil
 		}
 		deleted = true
-		unlinkFromParents(tx, target)
+		unlinkNodeRelatives(tx, req.Path, target)
 		tx.DeleteSlot(target.ID, peerSlotKey)
 		return nil
 	})
@@ -108,13 +109,35 @@ func handleDeleteNode(host extension.Host, payload json.RawMessage) (any, C.lj_s
 	return map[string]bool{"deleted": deleted}, C.LJ_OK, ""
 }
 
-func unlinkFromParents(tx extension.Tx, target *core.Node) {
+func unlinkTreeParent(root *core.Node, rawPath, targetID string) {
+	parts, err := cleanSegments(rawPath)
+	if err != nil || len(parts) <= 1 {
+		return
+	}
+	treeParent := findBySegments(root, strings.Join(parts[:len(parts)-1], "/"))
+	if treeParent != nil {
+		delete(treeParent.Children, targetID)
+	}
+}
+
+func unlinkNodeRelatives(tx extension.Tx, rawPath string, target *core.Node) {
 	for parentID := range target.Parents {
 		if p, ok := tx.NodeByID(parentID); ok && p != nil {
 			delete(p.Children, target.ID)
 		}
 	}
+	unlinkTreeParent(tx.Root(), rawPath, target.ID)
+	for childID, child := range target.Children {
+		if child != nil {
+			delete(child.Parents, target.ID)
+		}
+		if resolved, ok := tx.NodeByID(childID); ok && resolved != nil {
+			delete(resolved.Parents, target.ID)
+		}
+	}
 	delete(tx.Root().Children, target.ID)
+	target.Parents = map[string]string{}
+	target.Children = map[string]*core.Node{}
 }
 
 func handleSetEntries(host extension.Host, payload json.RawMessage) (any, C.lj_status_t, string) {
@@ -126,7 +149,8 @@ func handleSetEntries(host extension.Host, payload json.RawMessage) (any, C.lj_s
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, C.LJ_CODEC, err.Error()
 	}
-	_, err := host.Change(context.Background(), extension.WriteOp{Key: "entries:" + req.Path, Origin: "peer"}, func(tx extension.Tx) error {
+	op := extension.WriteOp{Key: "entries:" + req.Path, Origin: "peer"}
+	_, err := host.Change(context.Background(), op, func(tx extension.Tx) error {
 		node, txErr := ensurePathNode(tx.Root(), req.Path, false)
 		if txErr != nil {
 			return txErr
@@ -240,7 +264,8 @@ func handleSetRootSlot(host extension.Host, payload json.RawMessage) (any, C.lj_
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, C.LJ_CODEC, err.Error()
 	}
-	_, err := host.Change(context.Background(), extension.WriteOp{Key: "root_slot", Origin: "peer"}, func(tx extension.Tx) error {
+	op := extension.WriteOp{Key: "root_slot", Origin: "peer"}
+	_, err := host.Change(context.Background(), op, func(tx extension.Tx) error {
 		return tx.SetSlot(tx.Root().ID, peerRootLedgers, req.Data)
 	})
 	if err != nil {
@@ -322,7 +347,8 @@ func handlePutObject(host extension.Host, payload json.RawMessage) (any, C.lj_st
 	sum := sha256.Sum256(data)
 	digest := hex.EncodeToString(sum[:])
 	existed := false
-	_, err = host.Change(context.Background(), extension.WriteOp{Key: "object:" + digest, Origin: "peer"}, func(tx extension.Tx) error {
+	op := extension.WriteOp{Key: "object:" + digest, Origin: "peer"}
+	_, err = host.Change(context.Background(), op, func(tx extension.Tx) error {
 		var txErr error
 		existed, txErr = storeAttachmentInTx(tx, digest, req.Name, req.MimeType, data)
 		return txErr
@@ -330,7 +356,10 @@ func handlePutObject(host extension.Host, payload json.RawMessage) (any, C.lj_st
 	if err != nil {
 		return nil, C.LJ_INTERNAL, err.Error()
 	}
-	return map[string]any{"id": digest, "sha256": digest, "size": len(data), "mime_type": req.MimeType, "existed": existed}, C.LJ_OK, ""
+	res := map[string]any{
+		"id": digest, "sha256": digest, "size": len(data), "mime_type": req.MimeType, "existed": existed,
+	}
+	return res, C.LJ_OK, ""
 }
 
 func handleGetObject(host extension.Host, payload json.RawMessage) (any, C.lj_status_t, string) {

@@ -10,21 +10,8 @@ import test, { after } from "node:test";
 import { pathToFileURL } from "node:url";
 import { readApiConfig } from "../src/api/config.ts";
 import { createLogger } from "../src/api/log.ts";
-import {
-	isMainModule,
-	reportGateRefusal,
-	reportRouteError,
-	reportServerError,
-	reportServerWarn,
-	safeRequestPath,
-	startApiServer,
-} from "../src/api/main.ts";
-import {
-	WORKTREE_ROOT,
-	buildScratchChildEnv,
-	createScratchDir,
-	installScratchProcessEnv,
-} from "./api-test-helpers.ts";
+import { formatForcedExitLine, isMainModule, reportGateRefusal, reportRouteError, reportServerError, reportServerWarn, safeRequestPath, startApiServer } from "../src/api/main.ts";
+import { WORKTREE_ROOT, buildScratchChildEnv, createScratchDir, installScratchProcessEnv } from "./api-test-helpers.ts";
 
 const MAIN_ENTRY = path.join(WORKTREE_ROOT, "src", "api", "main.ts");
 const SCRATCH_DIR = createScratchDir("api-config-");
@@ -140,11 +127,20 @@ async function findSparePort(): Promise<number> {
 
 function collectHttpJsonResponse(
 	res: http.IncomingMessage,
+	clearTimer: () => void,
 	resolve: (v: { status: number; body: string }) => void,
+	reject: (err: Error) => void,
 ): void {
 	const chunks: Buffer[] = [];
 	res.on("data", (chunk: Buffer) => chunks.push(chunk));
-	res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+	res.on("end", () => {
+		clearTimer();
+		resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") });
+	});
+	res.on("error", (err) => {
+		clearTimer();
+		reject(err);
+	});
 }
 
 function httpJsonRequest(
@@ -152,15 +148,25 @@ function httpJsonRequest(
 	method: string,
 	urlPath: string,
 	body?: unknown,
+	timeoutMs = 5_000,
+	extraHeaders?: Record<string, string>,
 ): Promise<{ status: number; body: string }> {
 	const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), "utf8");
-	const headers = payload
+	const baseHeaders = payload
 		? { "content-type": "application/json", "content-length": String(payload.length) }
-		: undefined;
+		: {};
+	const headers = { ...baseHeaders, ...extraHeaders };
 	const opts = { hostname: "127.0.0.1", port, method, path: urlPath, headers };
 	return new Promise((resolve, reject) => {
-		const req = http.request(opts, (res) => collectHttpJsonResponse(res, resolve));
-		req.on("error", reject);
+		const timer = setTimeout(() => {
+			req.destroy(new Error(`HTTP ${method} ${urlPath} timed out after ${timeoutMs}ms`));
+		}, timeoutMs);
+		const clearTimer = () => clearTimeout(timer);
+		const req = http.request(opts, (res) => collectHttpJsonResponse(res, clearTimer, resolve, reject));
+		req.on("error", (err) => {
+			clearTimer();
+			reject(err);
+		});
 		if (payload) req.write(payload);
 		req.end();
 	});
@@ -201,16 +207,7 @@ function seedCrashProbePlugin(dataDir: string): void {
 }
 
 test("readApiConfig rejects missing and invalid PORT values", () => {
-	const invalidPorts: Array<string | undefined> = [
-		undefined,
-		"",
-		"   ",
-		"0",
-		"-1",
-		"65536",
-		"abc",
-		"3000.5",
-	];
+	const invalidPorts: Array<string | undefined> = [undefined, "", "   ", "0", "-1", "65536", "abc", "3000.5"];
 	for (const port of invalidPorts) {
 		assert.throws(
 			() => readApiConfig({ PORT: port }),
@@ -220,21 +217,9 @@ test("readApiConfig rejects missing and invalid PORT values", () => {
 });
 
 test("readApiConfig parses valid PORT and applies default or trimmed HOSTNAME", () => {
-	assert.deepEqual(readApiConfig({ PORT: "1" }), {
-		port: 1,
-		hostname: "127.0.0.1",
-		logLevel: "info",
-	});
-	assert.deepEqual(readApiConfig({ PORT: "65535", HOSTNAME: "   " }), {
-		port: 65535,
-		hostname: "127.0.0.1",
-		logLevel: "info",
-	});
-	assert.deepEqual(readApiConfig({ PORT: "42100", HOSTNAME: "  localhost  " }), {
-		port: 42100,
-		hostname: "localhost",
-		logLevel: "info",
-	});
+	assert.deepEqual(readApiConfig({ PORT: "1" }), { port: 1, hostname: "127.0.0.1", logLevel: "info" });
+	assert.deepEqual(readApiConfig({ PORT: "65535", HOSTNAME: "   " }), { port: 65535, hostname: "127.0.0.1", logLevel: "info" });
+	assert.deepEqual(readApiConfig({ PORT: "42100", HOSTNAME: "  localhost  " }), { port: 42100, hostname: "localhost", logLevel: "info" });
 });
 
 test("readApiConfig parses case-insensitive LH_LOG_LEVEL and rejects invalid levels", () => {
@@ -334,6 +319,11 @@ test("typed main.ts reporters format structured events and strip URL query strin
 	assert.equal(records[2]?.message, "Body capped warning");
 	assert.equal(records[3]?.message, "[api] Gate refused request");
 	assert.equal(records[3]?.fields?.path, "/api/chats/c1");
+	const forced = JSON.parse(formatForcedExitLine()) as Record<string, unknown>;
+	assert.equal(typeof forced.timestamp, "string");
+	assert.equal(forced.level, "warn");
+	assert.match(String(forced.message), /\[api\] Forced process exit after 2500ms shutdown deadline\./);
+	assert.equal("ts" in forced || "msg" in forced, false);
 });
 
 test("startApiServer logs plugin initialization failure and continues serving HTTP", async (t) => {
@@ -362,6 +352,51 @@ test("startApiServer logs plugin initialization failure and continues serving HT
 	}
 	assert.match(logs, /\[plugins\] Initialization failed; plugin management will report the error:/);
 	assert.match(logs, /Engine API server listening/);
+});
+
+test("httpJsonRequest destroys stalled sockets after timeoutMs", async (t) => {
+	const sockets = new Set<net.Socket>();
+	const stalled = net.createServer((sock) => {
+		sockets.add(sock);
+		sock.on("close", () => sockets.delete(sock));
+	});
+	t.after(() => {
+		for (const sock of sockets) sock.destroy();
+		stalled.close();
+	});
+	await new Promise<void>((resolve) => stalled.listen(0, "127.0.0.1", () => resolve()));
+	const port = (stalled.address() as net.AddressInfo).port;
+	await assert.rejects(() => httpJsonRequest(port, "GET", "/stall", undefined, 80), /timed out after 80ms/);
+});
+
+test("startApiServer wires onRefusal warning and runtime server error listener without crashing", async (t) => {
+	const scratch = installScratchProcessEnv("api-config-refusal-err-");
+	t.after(() => scratch.restore());
+	const sink = new PassThrough();
+	let logs = "";
+	sink.setEncoding("utf8");
+	sink.on("data", (chunk: string) => {
+		logs += chunk;
+	});
+	const logger = createLogger({ level: "info", stream: sink });
+	const port = await findSparePort();
+	const running = await startApiServer({ PORT: String(port), HOSTNAME: "127.0.0.1" }, { logger });
+	try {
+		const refused = await httpJsonRequest(running.port, "POST", "/api/chats", { title: "Cross-Site" }, 5_000, { Origin: "http://evil.example" });
+		assert.equal(refused.status, 403);
+		running.server.emit("error", new Error("synthetic-listen-fault"));
+		const ok = await httpJsonRequest(running.port, "GET", "/api/settings");
+		assert.equal(ok.status, 200);
+	} finally {
+		await running.close();
+	}
+	const records = logs.trim().split("\n").map((line) => JSON.parse(line) as { level?: string; message?: string; fields?: Record<string, unknown> });
+	const refusalLog = records.find((r) => r.message === "[api] Gate refused request");
+	assert.equal(refusalLog?.level, "warn");
+	assert.deepEqual(refusalLog?.fields, { method: "POST", path: "/api/chats" });
+	const srvErrLog = records.find((r) => r.message === "[api] Server error");
+	assert.equal(srvErrLog?.level, "error");
+	assert.equal((srvErrLog?.fields?.error as { message?: string } | undefined)?.message, "synthetic-listen-fault");
 });
 
 test("main.ts CLI exits non-zero immediately without PORT and creates no auth.json", async () => {

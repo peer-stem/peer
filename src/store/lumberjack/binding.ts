@@ -82,7 +82,7 @@ export interface StoredObjectData {
 }
 
 const DEFAULT_PERSIST_ROOT = process.env.PEER_PERSIST_ROOT ?? "/usr/lib/persist/peer";
-const DEFAULT_ADDON_PATH = path.join(DEFAULT_PERSIST_ROOT, "build", "lumberjack", "lumberjack_peer.node");
+export const DEFAULT_ADDON_PATH = path.join(DEFAULT_PERSIST_ROOT, "build", "lumberjack", "lumberjack_peer.node");
 
 let cachedAddon: RawLumberJackAddon | null = null;
 
@@ -103,9 +103,7 @@ export function loadLumberJackAddon(addonPath = DEFAULT_ADDON_PATH): RawLumberJa
 
 function writeTieredConfigIfAbsent(forestDir: string): void {
 	const cfgPath = path.join(forestDir, "config.yaml");
-	if (fs.existsSync(cfgPath)) {
-		return;
-	}
+	if (fs.existsSync(cfgPath)) return;
 	const yaml = [
 		"persistence:",
 		"  mode: tiered",
@@ -117,6 +115,64 @@ function writeTieredConfigIfAbsent(forestDir: string): void {
 	fs.writeFileSync(cfgPath, yaml, { mode: 0o600 });
 }
 
+interface ForestOpenOptions {
+	name?: string;
+	principal?: string;
+	addon?: RawLumberJackAddon;
+}
+
+function openForestHandle(directory: string, opts?: ForestOpenOptions): {
+	directory: string;
+	name: string;
+	addon: RawLumberJackAddon;
+	handle: bigint;
+} {
+	const resolvedDir = path.resolve(directory);
+	fs.mkdirSync(resolvedDir, { recursive: true, mode: 0o700 });
+	writeTieredConfigIfAbsent(resolvedDir);
+	const name = opts?.name ?? "state";
+	const addon = opts?.addon ?? loadLumberJackAddon();
+	const principal = opts?.principal ?? "peer-system";
+	const openYaml = [
+		"organization: peer",
+		`database_path: ${JSON.stringify(resolvedDir)}`,
+		`name: ${JSON.stringify(name)}`,
+		`principal: ${JSON.stringify(principal)}`,
+		"",
+	].join("\n");
+	return { directory: resolvedDir, name, addon, handle: addon.open(openYaml) };
+}
+
+function requireActiveHandle(handle: bigint, closed: boolean): bigint {
+	if (!closed) return handle;
+	const err = new Error("LumberJack forest handle is closed") as Error & { ljStatus?: number };
+	err.ljStatus = LJ_STATUS.BAD_HANDLE;
+	throw err;
+}
+
+function execForestOp<T>(addon: RawLumberJackAddon, handle: bigint, closed: boolean, op: string, payload: unknown): T {
+	const raw = addon.peerExec(requireActiveHandle(handle, closed), JSON.stringify({ op, payload }));
+	return JSON.parse(raw) as T;
+}
+
+function getForestNode(forest: LumberJackForest, nodePath: string): NodeSnapshot | null {
+	const res = forest.exec<{ found: boolean; node?: NodeSnapshot }>("get_node", { path: nodePath });
+	return res.found && res.node ? res.node : null;
+}
+
+function pollForestStream(
+	addon: RawLumberJackAddon,
+	handle: bigint,
+	closed: boolean,
+	after: bigint,
+	epoch: bigint,
+	timeoutMs: number,
+): { status: number; yaml: string } {
+	const lines = [`after: ${after.toString()}`, `timeout_ms: ${timeoutMs}`];
+	if (epoch > 0n) lines.push(`epoch: ${epoch.toString()}`);
+	return addon.streamPoll(requireActiveHandle(handle, closed), `${lines.join("\n")}\n`);
+}
+
 export class LumberJackForest {
 	readonly directory: string;
 	readonly name: string;
@@ -124,96 +180,36 @@ export class LumberJackForest {
 	private handle: bigint;
 	private closed = false;
 
-	constructor(directory: string, opts?: { name?: string; principal?: string; addon?: RawLumberJackAddon }) {
-		const resolvedDir = path.resolve(directory);
-		fs.mkdirSync(resolvedDir, { recursive: true, mode: 0o700 });
-		writeTieredConfigIfAbsent(resolvedDir);
-		this.directory = resolvedDir;
-		this.name = opts?.name ?? "state";
-		this.addon = opts?.addon ?? loadLumberJackAddon();
-		const principal = opts?.principal ?? "peer-system";
-		const openYaml = [
-			"organization: peer",
-			`database_path: ${JSON.stringify(resolvedDir)}`,
-			`name: ${JSON.stringify(this.name)}`,
-			`principal: ${JSON.stringify(principal)}`,
-			"",
-		].join("\n");
-		this.handle = this.addon.open(openYaml);
+	constructor(directory: string, opts?: ForestOpenOptions) {
+		const opened = openForestHandle(directory, opts);
+		this.directory = opened.directory;
+		this.name = opened.name;
+		this.addon = opened.addon;
+		this.handle = opened.handle;
 	}
 
-	get isOpen(): boolean {
-		return !this.closed;
-	}
-
-	private activeHandle(): bigint {
-		if (this.closed) {
-			const err = new Error("LumberJack forest handle is closed") as Error & { ljStatus?: number };
-			err.ljStatus = LJ_STATUS.BAD_HANDLE;
-			throw err;
-		}
-		return this.handle;
-	}
-
-	exec<T>(op: string, payload: unknown = {}): T {
-		const raw = this.addon.peerExec(this.activeHandle(), JSON.stringify({ op, payload }));
-		return JSON.parse(raw) as T;
-	}
-
-	upsertNode(input: UpsertNodeInput): NodeSnapshot {
-		return this.exec<NodeSnapshot>("upsert_node", input);
-	}
-
-	batchUpsertNodes(nodes: UpsertNodeInput[]): number {
-		return this.exec<{ count: number }>("batch_upsert_nodes", { nodes }).count;
-	}
-
-	getNode(nodePath: string): NodeSnapshot | null {
-		const res = this.exec<{ found: boolean; node?: NodeSnapshot }>("get_node", { path: nodePath });
-		return res.found && res.node ? res.node : null;
-	}
-
-	listChildren(parentPath: string): NodeSnapshot[] {
-		return this.exec<{ nodes: NodeSnapshot[] }>("list_children", { path: parentPath }).nodes;
-	}
-
-	deleteNode(nodePath: string): boolean {
-		return this.exec<{ deleted: boolean }>("delete_node", { path: nodePath }).deleted;
-	}
-
+	get isOpen(): boolean { return !this.closed; }
+	exec<T>(op: string, payload: unknown = {}): T { return execForestOp<T>(this.addon, this.handle, this.closed, op, payload); }
+	upsertNode(input: UpsertNodeInput): NodeSnapshot { return this.exec<NodeSnapshot>("upsert_node", input); }
+	batchUpsertNodes(nodes: UpsertNodeInput[]): number { return this.exec<{ count: number }>("batch_upsert_nodes", { nodes }).count; }
+	getNode(nodePath: string): NodeSnapshot | null { return getForestNode(this, nodePath); }
+	listChildren(parentPath: string): NodeSnapshot[] { return this.exec<{ nodes: NodeSnapshot[] }>("list_children", { path: parentPath }).nodes; }
+	deleteNode(nodePath: string): boolean { return this.exec<{ deleted: boolean }>("delete_node", { path: nodePath }).deleted; }
 	setEntries(nodePath: string, eventId: string, entries: EntryWire[]): number {
 		return this.exec<{ count: number }>("set_entries", { path: nodePath, event_id: eventId, entries }).count;
 	}
-
 	getEntries(nodePath: string, eventId: string): EntryWire[] {
 		return this.exec<{ entries: EntryWire[] }>("get_entries", { path: nodePath, event_id: eventId }).entries;
 	}
-
-	getRootSlot<T>(): T | null {
-		const res = this.exec<{ data: T | null }>("get_root_slot", {});
-		return res.data ?? null;
-	}
-
-	setRootSlot(data: unknown): void {
-		this.exec("set_root_slot", { data });
-	}
-
+	getRootSlot<T>(): T | null { return this.exec<{ data: T | null }>("get_root_slot", {}).data ?? null; }
+	setRootSlot(data: unknown): void { this.exec("set_root_slot", { data }); }
 	putObject(name: string, mimeType: string, dataBase64: string): StoredObjectReceipt {
 		return this.exec<StoredObjectReceipt>("put_object", { name, mime_type: mimeType, data_base64: dataBase64 });
 	}
-
-	getObject(id: string): StoredObjectData {
-		return this.exec<StoredObjectData>("get_object", { id });
-	}
-
+	getObject(id: string): StoredObjectData { return this.exec<StoredObjectData>("get_object", { id }); }
 	pollStream(after: bigint, epoch = 0n, timeoutMs = 0): { status: number; yaml: string } {
-		const lines = [`after: ${after.toString()}`, `timeout_ms: ${timeoutMs}`];
-		if (epoch > 0n) {
-			lines.push(`epoch: ${epoch.toString()}`);
-		}
-		return this.addon.streamPoll(this.activeHandle(), `${lines.join("\n")}\n`);
+		return pollForestStream(this.addon, this.handle, this.closed, after, epoch, timeoutMs);
 	}
-
 	close(): void {
 		if (this.closed) return;
 		this.closed = true;

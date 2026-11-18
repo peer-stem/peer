@@ -46,9 +46,21 @@ export interface LumberJackChatStore extends ChatStore {
 
 const VALID_ID_RE = /^[A-Za-z0-9_-]+$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const isValidId = (v: unknown): v is string => typeof v === "string" && VALID_ID_RE.test(v);
+
+function normalizeSessionHeader(slot: { title?: unknown; createdAt?: unknown; updatedAt?: unknown }): {
+	title: string;
+	createdAt: string;
+	updatedAt: string;
+} {
+	const createdAt = typeof slot.createdAt === "string" ? slot.createdAt : "";
+	const updatedAt = typeof slot.updatedAt === "string" ? slot.updatedAt : createdAt;
+	const title = typeof slot.title === "string" && slot.title.trim() ? slot.title : "Untitled session";
+	return { title, createdAt, updatedAt };
+}
 
 function sessionPathFor(id: string): string {
-	if (!VALID_ID_RE.test(id)) throw new Error(`Invalid chat id: ${id}`);
+	if (!isValidId(id)) throw new Error(`Invalid chat id: ${id}`);
 	return `sessions/${id}`;
 }
 
@@ -89,12 +101,14 @@ function buildSessionEntries(messages: LhMessage[], sideChats?: SideChatThread[]
 function buildPlanDagUpserts(chatId: string, tree: PlanTree): UpsertNodeInput[] {
 	const sessionPath = sessionPathFor(chatId);
 	const prereqsByTarget = new Map<string, string[]>();
-	for (const edge of tree.edges) {
+	for (const edge of Array.isArray(tree.edges) ? tree.edges : []) {
+		if (!isValidId(edge?.from) || !isValidId(edge?.to)) continue;
 		const list = prereqsByTarget.get(edge.to) ?? [];
 		list.push(`plans/${chatId}/${edge.from}`);
 		prereqsByTarget.set(edge.to, list);
 	}
-	return tree.nodes.map((planNode) => ({
+	const validNodes = (Array.isArray(tree.nodes) ? tree.nodes : []).filter((planNode) => isValidId(planNode?.id));
+	return validNodes.map((planNode) => ({
 		path: `plans/${chatId}/${planNode.id}`,
 		type: "leaf" as const,
 		kind: "plan_node",
@@ -110,7 +124,10 @@ function buildPlanDagUpserts(chatId: string, tree: PlanTree): UpsertNodeInput[] 
 	}));
 }
 
-function hydrateImages(forest: LumberJackForest, refs?: Record<string, StoredImageRef>): Record<string, ImageSnapshot> | undefined {
+function hydrateImages(
+	forest: LumberJackForest,
+	refs?: Record<string, StoredImageRef>,
+): Record<string, ImageSnapshot> | undefined {
 	if (!refs) return undefined;
 	const keys = Object.keys(refs);
 	if (keys.length === 0) return undefined;
@@ -135,11 +152,12 @@ function slotToChatRecord(forest: LumberJackForest, slot: SessionSlotRecord): Ch
 function toChatSummary(slot: SessionSlotRecord): ChatSummary | null {
 	if (typeof slot.version === "number" && slot.version > CURRENT_CHAT_VERSION) return null;
 	try {
+		const { title, createdAt, updatedAt } = normalizeSessionHeader(slot);
 		return {
 			id: slot.id,
-			title: slot.title,
-			createdAt: slot.createdAt,
-			updatedAt: slot.updatedAt,
+			title,
+			createdAt,
+			updatedAt,
 			kind: slot.kind ?? "teach",
 			messageCount: slot.messages.length,
 			phase: phaseAt3Lh(slot.messages),
@@ -153,7 +171,7 @@ function toChatSummary(slot: SessionSlotRecord): ChatSummary | null {
 }
 
 function readSessionSlot(forest: LumberJackForest, id: string): SessionSlotRecord | null {
-	if (!VALID_ID_RE.test(id)) return null;
+	if (!isValidId(id)) return null;
 	const snap = forest.getNode(`sessions/${id}`);
 	if (!snap?.slot || typeof snap.slot !== "object") return null;
 	const slot = snap.slot as SessionSlotRecord;
@@ -182,7 +200,12 @@ function writeSessionSlot(forest: LumberJackForest, slot: SessionSlotRecord, syn
 	}
 }
 
-function storeImageOnSlot(forest: LumberJackForest, slot: SessionSlotRecord, snapshotId: string, image: ImageSnapshot): boolean {
+function storeImageOnSlot(
+	forest: LumberJackForest,
+	slot: SessionSlotRecord,
+	snapshotId: string,
+	image: ImageSnapshot,
+): boolean {
 	const digest = createHash("sha256").update(Buffer.from(image.data, "base64")).digest("hex");
 	if (!SHA256_RE.test(snapshotId) || digest !== snapshotId) {
 		throw new Error("Invalid image snapshot identity");
@@ -199,12 +222,12 @@ function importFullChatRecord(
 	forest: LumberJackForest,
 	record: ChatRecord,
 ): { imported: boolean; objectsDeduplicated: number; objectsStored: number } {
-	if (!VALID_ID_RE.test(record.id)) return { imported: false, objectsDeduplicated: 0, objectsStored: 0 };
+	if (!isValidId(record.id)) return { imported: false, objectsDeduplicated: 0, objectsStored: 0 };
 	if (typeof record.version === "number" && record.version > CURRENT_CHAT_VERSION) {
 		return { imported: false, objectsDeduplicated: 0, objectsStored: 0 };
 	}
 	const { imageSnapshots, ...rest } = record;
-	const slot: SessionSlotRecord = { ...rest, version: CURRENT_CHAT_VERSION };
+	const slot: SessionSlotRecord = { ...rest, ...normalizeSessionHeader(record), version: CURRENT_CHAT_VERSION };
 	let objectsDeduplicated = 0;
 	let objectsStored = 0;
 	if (imageSnapshots) {
@@ -214,8 +237,9 @@ function importFullChatRecord(
 		}
 	}
 	writeSessionSlot(forest, slot, true);
-	if (slot.tree && slot.tree.nodes.length > 0) {
-		forest.batchUpsertNodes(buildPlanDagUpserts(slot.id, slot.tree));
+	if (slot.tree && Array.isArray(slot.tree.nodes) && slot.tree.nodes.length > 0) {
+		const dag = buildPlanDagUpserts(slot.id, slot.tree);
+		if (dag.length > 0) forest.batchUpsertNodes(dag);
 	}
 	return { imported: true, objectsDeduplicated, objectsStored };
 }
@@ -237,7 +261,7 @@ function createChatInForest(forest: LumberJackForest, title: string, kind?: "pra
 }
 
 function deleteChatFromForest(forest: LumberJackForest, id: string): boolean {
-	if (!VALID_ID_RE.test(id)) return false;
+	if (!isValidId(id)) return false;
 	for (const planChild of forest.listChildren(`plans/${id}`)) {
 		forest.deleteNode(planChild.path);
 	}
@@ -253,7 +277,7 @@ function listSessionSummaries(forest: LumberJackForest): ChatSummary[] {
 		const summary = node.slot ? toChatSummary(node.slot as SessionSlotRecord) : null;
 		if (summary) summaries.push(summary);
 	}
-	return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+	return summaries.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
 }
 
 function saveSessionMessages(forest: LumberJackForest, id: string, messages: LhMessage[]): void {

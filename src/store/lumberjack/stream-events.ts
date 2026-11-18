@@ -20,6 +20,14 @@ function parseBigIntField(yaml: string, key: string): bigint {
 	return match?.[1] ? BigInt(match[1]) : 0n;
 }
 
+function normalizeMutatedPath(raw: string): string {
+	const unquoted = raw.replace(/^["']|["']$/g, "").trim();
+	if (!unquoted || unquoted === "null" || unquoted === "~") return "";
+	const trimmed = unquoted.replace(/^\/+|\/+$/g, "");
+	if (trimmed === "forest") return "";
+	return trimmed.startsWith("forest/") ? trimmed.slice("forest/".length) : trimmed;
+}
+
 function parseMutationSequencesAndPaths(yaml: string): { maxSeq: bigint; paths: string[] } {
 	let maxSeq = 0n;
 	const paths: string[] = [];
@@ -29,9 +37,10 @@ function parseMutationSequencesAndPaths(yaml: string): { maxSeq: bigint; paths: 
 			const val = BigInt(seqMatch[1]);
 			if (val > maxSeq) maxSeq = val;
 		}
-		const pathMatch = /^\s*path:\s*([^\s#]+)/.exec(rawLine);
+		const pathMatch = /^\s*(?:-\s*)?(?:node_path|path):\s*(.+?)\s*$/.exec(rawLine);
 		if (pathMatch?.[1]) {
-			paths.push(pathMatch[1].replace(/^["']|["']$/g, ""));
+			const clean = normalizeMutatedPath(pathMatch[1]);
+			if (clean) paths.push(clean);
 		}
 	}
 	return { maxSeq, paths };
@@ -46,13 +55,16 @@ export function pollLumberJackMutations(forest: LumberJackForest, cursor: Stream
 }
 
 function dispatchPathNotification(mutatedPath: string): void {
-	if (mutatedPath.startsWith("sessions/")) {
-		const chatId = mutatedPath.split("/")[1];
+	const rel = normalizeMutatedPath(mutatedPath);
+	if (rel.startsWith("sessions/")) {
+		const chatId = rel.split("/")[1];
 		if (chatId) emit("record-changed", { chatId });
-	} else if (mutatedPath.startsWith("knowledge/sources")) {
+	} else if (rel.startsWith("knowledge/sources")) {
 		emit("sources-changed", {});
-	} else if (mutatedPath.startsWith("knowledge")) {
+	} else if (rel.startsWith("knowledge")) {
 		emit("activity-changed", {});
+	} else if (rel.startsWith("jobs/")) {
+		emit("jobs-changed", {});
 	}
 }
 
@@ -79,7 +91,13 @@ export function startLumberJackStreamBridge(
 		}
 		return batch;
 	};
-	const timer = setInterval(pollOnce, intervalMs);
+	const timer = setInterval(() => {
+		try {
+			pollOnce();
+		} catch (err) {
+			console.error("[lumberjack-stream] poll error:", err);
+		}
+	}, intervalMs);
 	timer.unref();
 	return {
 		pollOnce,

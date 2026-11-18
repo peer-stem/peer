@@ -166,7 +166,28 @@ func snapshotNode(tx extension.ReadTx, n *core.Node, pathStr string) nodeSnapsho
 	}
 }
 
+func validateUpsertInput(in upsertNodeInput) error {
+	if _, err := cleanSegments(in.Path); err != nil {
+		return err
+	}
+	if in.Type != "" && in.Type != "leaf" && in.Type != "branch" {
+		return fmt.Errorf("invalid node type %q", in.Type)
+	}
+	for _, pPath := range in.ParentPaths {
+		if _, err := cleanSegments(pPath); err != nil {
+			return err
+		}
+	}
+	if len(in.Slot) > 0 && !json.Valid(in.Slot) {
+		return fmt.Errorf("invalid slot json for %q", in.Path)
+	}
+	return nil
+}
+
 func applyUpsertInTx(tx extension.Tx, in upsertNodeInput) (*core.Node, error) {
+	if err := validateUpsertInput(in); err != nil {
+		return nil, err
+	}
 	node, err := ensurePathNode(tx.Root(), in.Path, in.Type == "branch")
 	if err != nil {
 		return nil, err
@@ -207,7 +228,7 @@ func applyMetadataOnNode(node *core.Node, meta map[string]interface{}, replace b
 }
 
 func applyParentsOnNode(root *core.Node, node *core.Node, parentPaths []string, clearFirst bool) error {
-	if clearFirst && len(parentPaths) > 0 {
+	if clearFirst {
 		node.Parents = map[string]string{}
 	}
 	for _, pPath := range parentPaths {
@@ -230,7 +251,8 @@ func handleUpsertNode(host extension.Host, payload json.RawMessage) (any, C.lj_s
 		return nil, C.LJ_CODEC, err.Error()
 	}
 	var snap nodeSnapshot
-	_, err := host.Change(context.Background(), extension.WriteOp{Key: "upsert:" + in.Path, Origin: "peer"}, func(tx extension.Tx) error {
+	op := extension.WriteOp{Key: "upsert:" + in.Path, Origin: "peer"}
+	_, err := host.Change(context.Background(), op, func(tx extension.Tx) error {
 		node, txErr := applyUpsertInTx(tx, in)
 		if txErr != nil {
 			return txErr
@@ -247,6 +269,11 @@ func handleUpsertNode(host extension.Host, payload json.RawMessage) (any, C.lj_s
 
 func applyBatchInTx(tx extension.Tx, nodes []upsertNodeInput) error {
 	for _, item := range nodes {
+		if err := validateUpsertInput(item); err != nil {
+			return err
+		}
+	}
+	for _, item := range nodes {
 		if _, err := applyUpsertInTx(tx, item); err != nil {
 			return err
 		}
@@ -261,7 +288,8 @@ func handleBatchUpsertNodes(host extension.Host, payload json.RawMessage) (any, 
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, C.LJ_CODEC, err.Error()
 	}
-	_, err := host.Change(context.Background(), extension.WriteOp{Key: "batch_upsert", Origin: "peer"}, func(tx extension.Tx) error {
+	op := extension.WriteOp{Key: "batch_upsert", Origin: "peer"}
+	_, err := host.Change(context.Background(), op, func(tx extension.Tx) error {
 		return applyBatchInTx(tx, req.Nodes)
 	})
 	if err != nil {

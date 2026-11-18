@@ -2,31 +2,20 @@ import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai"
 import { citationsToReadableText } from "../../core/citations.ts";
 import { compactionCutIndex, planTreeToText } from "../../core/compaction.ts";
 import type { PlanTree } from "../../core/contracts/plan.ts";
-import {
-	sendToUserText,
-	type LhMarkerMessage,
-	type LhMessage,
-} from "../../core/native-messages.ts";
+import { sendToUserText, type LhMarkerMessage, type LhMessage } from "../../core/native-messages.ts";
 import { QUESTION_TOOLS } from "../../core/pending.ts";
 import { MfnApiError, type MfnClient } from "./client.ts";
 import { isValidCallerMemoryId, messageMemoryId, mintUuidV7 } from "./ids.ts";
-import { isRetryableMfnError, type MfnIngestOutbox } from "./outbox.ts";
+import { isPerItemPoisonMfnError, isRetryableMfnError, type MfnIngestOutbox } from "./outbox.ts";
 import type {
-	LexicalSearchMatch,
-	RecalledAnticipations,
-	RecalledMemory,
-	RecalledTheme,
-	TurnIngestDelivered,
-	TurnIngestMemory,
-	TurnIngestPayload,
-	TurnRecallLimits,
-	TurnRecallPayload,
+	LexicalSearchMatch, MfnMemoryPutPayload, RecalledAnticipations, RecalledMemory, RecalledTheme,
+	TurnIngestDelivered, TurnIngestMemory, TurnIngestPayload, TurnRecallLimits, TurnRecallPayload,
 } from "./types.ts";
 
 export const LIVE_TAIL_DEFAULT_TOKENS = 5_000;
-
 const TOOL_TEXT_CAP = 2_000;
 const CONTROL_RE = /[\x00-\x1f\x7f]/g;
+const LEXICAL_RETRY_DELAYS_MS = [30, 60] as const;
 
 export interface PrepareTurnContextOptions {
 	client: MfnClient;
@@ -40,7 +29,6 @@ export interface PrepareTurnContextOptions {
 	limits?: TurnRecallLimits;
 	weights?: { tags?: Record<string, number> };
 }
-
 export interface PreparedTurnContext {
 	agentMessages: LhMessage[];
 	liveTail: LhMessage[];
@@ -52,7 +40,6 @@ export interface PreparedTurnContext {
 	anticipations: RecalledAnticipations;
 	degraded: string[];
 }
-
 export interface IngestSettledTurnOptions {
 	client: MfnClient;
 	outbox: MfnIngestOutbox;
@@ -65,19 +52,17 @@ export interface IngestSettledTurnOptions {
 	occurredAtMs?: number;
 	sessionTags?: readonly string[];
 }
-
 export interface IngestSettledTurnResult {
 	ingestedBatches: number;
 	queuedBatches: number;
 	lexicalWrites: number;
+	queuedLexicalWrites: number;
 	flushedFromOutbox: number;
 	memoryIds: string[];
 }
 
 function utf8Slice(text: string, maxBytes: number): string {
-	if (Buffer.byteLength(text, "utf8") <= maxBytes) {
-		return text;
-	}
+	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
 	let used = 0;
 	let out = "";
 	for (const ch of text) {
@@ -116,9 +101,7 @@ function isSkippedMarker(message: LhMessage): boolean {
 }
 
 function extractAssistantText(assistant: AssistantMessage): string {
-	if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {
-		return "";
-	}
+	if (assistant.stopReason === "error" || assistant.stopReason === "aborted") return "";
 	const parts: string[] = [];
 	for (const block of assistant.content) {
 		if (block.type === "text" && block.text.trim()) {
@@ -138,19 +121,22 @@ function extractMessageText(message: LhMessage): string {
 		const texts = message.content.filter((b) => b.type === "text").map((b) => citationsToReadableText(b.text));
 		return texts.join("\n").trim();
 	}
-	if (message.role === "assistant") {
-		return extractAssistantText(message as AssistantMessage);
-	}
+	if (message.role === "assistant") return extractAssistantText(message as AssistantMessage);
 	if (message.role === "toolResult") {
 		const res = message as ToolResultMessage;
-		if (!res.isError && res.details === null && (QUESTION_TOOLS as readonly string[]).includes(res.toolName)) return "";
+		if (!res.isError && res.details === null && (QUESTION_TOOLS as readonly string[]).includes(res.toolName)) {
+			return "";
+		}
 		const text = res.content.map((c) => (c.type === "text" ? c.text : "")).join("\n").trim();
 		return text.length > TOOL_TEXT_CAP ? `${text.slice(0, TOOL_TEXT_CAP)}…` : text;
 	}
 	return (message as LhMarkerMessage).content.trim();
 }
 
-function collectTailMemoryIds(chatId: string, liveTail: readonly LhMessage[]): { windowIds: string[]; excludeIds: string[] } {
+function collectTailMemoryIds(
+	chatId: string,
+	liveTail: readonly LhMessage[],
+): { windowIds: string[]; excludeIds: string[] } {
 	const newestFirst: string[] = [];
 	const seen = new Set<string>();
 	for (let i = liveTail.length - 1; i >= 0; i--) {
@@ -162,10 +148,7 @@ function collectTailMemoryIds(chatId: string, liveTail: readonly LhMessage[]): {
 			newestFirst.push(memId);
 		}
 	}
-	return {
-		windowIds: newestFirst.slice(0, 64),
-		excludeIds: newestFirst.slice(0, 256),
-	};
+	return { windowIds: newestFirst.slice(0, 64), excludeIds: newestFirst.slice(0, 256) };
 }
 
 function selectRecallQuery(messages: readonly LhMessage[]): { text: string; context: string | null } | null {
@@ -174,34 +157,36 @@ function selectRecallQuery(messages: readonly LhMessage[]): { text: string; cont
 		const text = extractMessageText(messages[i]!);
 		if (text) texts.push(text);
 	}
-	if (texts.length === 0) return null;
-	const primary = utf8Slice(texts[0]!, 8_192);
+	const primary = texts[0] ? utf8Slice(texts[0], 8_192) : "";
 	if (!primary) return null;
 	const ctxJoined = texts.slice(1).reverse().join("\n");
-	const context = ctxJoined ? utf8Slice(ctxJoined, 2_048) : null;
-	return { text: primary, context };
+	return { text: primary, context: ctxJoined ? utf8Slice(ctxJoined, 2_048) : null };
 }
 
-function formatMfnSections(input: {
-	planText: string | null;
-	memories: readonly RecalledMemory[];
-	supplements: readonly LexicalSearchMatch[];
-	themes: readonly RecalledTheme[];
+interface RecallBundle {
+	memories: RecalledMemory[];
+	supplements: LexicalSearchMatch[];
+	themes: RecalledTheme[];
 	anticipations: RecalledAnticipations;
-}): string | null {
+	degraded: string[];
+}
+
+function formatMfnSections(planText: string | null, input: RecallBundle): string | null {
 	const sections: string[] = [];
-	if (input.planText) {
-		sections.push(`## Plan dependency tree\n${input.planText}`);
-	}
+	if (planText) sections.push(`## Plan dependency tree\n${planText}`);
 	if (input.memories.length > 0 || input.supplements.length > 0) {
-		const lines = input.memories.map((m) => `- [${m.memory_id}] (activation ${m.activation.total.toFixed(3)}): ${m.content}`);
+		const lines = input.memories.map(
+			(m) => `- [${m.memory_id}] (activation ${m.activation.total.toFixed(3)}): ${m.content}`,
+		);
 		for (const sup of input.supplements) {
 			lines.push(`- [${sup.memory_id}] (lexical ${sup.score.toFixed(3)}): ${sup.content}`);
 		}
 		sections.push(`## Recalled memories\n${lines.join("\n")}`);
 	}
 	if (input.themes.length > 0) {
-		const lines = input.themes.map((t) => `- ${t.label} (${t.pattern_id}, confidence ${t.confidence.toFixed(2)}): ${t.summary}`);
+		const lines = input.themes.map(
+			(t) => `- ${t.label} (${t.pattern_id}, confidence ${t.confidence.toFixed(2)}): ${t.summary}`,
+		);
 		sections.push(`## Active themes (L5)\n${lines.join("\n")}`);
 	}
 	const antLines = [
@@ -209,10 +194,36 @@ function formatMfnSections(input: {
 		...input.anticipations.entities.map((e) => `- [entity] ${e.label} (confidence ${e.confidence.toFixed(2)})`),
 		...input.anticipations.topics.map((t) => `- [topic] ${t.label} (confidence ${t.confidence.toFixed(2)})`),
 	];
-	if (antLines.length > 0) {
-		sections.push(`## Context anticipations (L4)\n${antLines.join("\n")}`);
-	}
+	if (antLines.length > 0) sections.push(`## Context anticipations (L4)\n${antLines.join("\n")}`);
 	return sections.length > 0 ? sections.join("\n\n") : null;
+}
+
+function extractMfnErrorCode(err: unknown, fallback: string): string {
+	if (err instanceof MfnApiError) return err.code;
+	if (err && typeof err === "object" && "code" in err) {
+		const raw = (err as { code?: unknown }).code;
+		if (typeof raw === "string" && raw.length > 0) return raw;
+	}
+	return fallback;
+}
+
+async function runLexicalSupplement(
+	opts: PrepareTurnContextOptions,
+	queryText: string,
+	excludeSet: ReadonlySet<string>,
+	recalledIds: ReadonlySet<string>,
+	degraded: string[],
+): Promise<LexicalSearchMatch[]> {
+	try {
+		const topK = opts.limits?.top_k ?? 8;
+		const hits = await opts.client.lexicalSearch(opts.lexicalPoolId, { query: queryText, top_k: topK });
+		return hits.filter((h) => !excludeSet.has(h.memory_id) && !recalledIds.has(h.memory_id));
+	} catch (err) {
+		const code = extractMfnErrorCode(err, "lexical_search_error");
+		console.warn(`[mfn] lexicalSearch fallback degraded (${code}):`, err);
+		if (!degraded.includes(code)) degraded.push(code);
+		return [];
+	}
 }
 
 async function queryRecallAndFallback(
@@ -220,18 +231,13 @@ async function queryRecallAndFallback(
 	query: { text: string; context: string | null },
 	windowIds: string[],
 	excludeIds: string[],
-): Promise<{
-	memories: RecalledMemory[];
-	supplements: LexicalSearchMatch[];
-	themes: RecalledTheme[];
-	anticipations: RecalledAnticipations;
-	degraded: string[];
-}> {
+): Promise<RecallBundle> {
 	const excludeSet = new Set(excludeIds);
+	const actor = opts.actorKey ? { key: sanitizeMfnId(opts.actorKey) } : null;
 	const recallPayload: TurnRecallPayload = {
 		query,
 		session: { kind: "chat", id: sanitizeMfnId(opts.chatId) },
-		...(opts.actorKey !== undefined ? { actor: opts.actorKey ? { key: sanitizeMfnId(opts.actorKey) } : null } : {}),
+		...(opts.actorKey !== undefined ? { actor } : {}),
 		window: { memory_ids: windowIds, score: true },
 		exclude_memory_ids: excludeIds,
 		...(opts.limits ? { limits: opts.limits } : {}),
@@ -241,33 +247,30 @@ async function queryRecallAndFallback(
 	let themes: RecalledTheme[] = [];
 	let anticipations: RecalledAnticipations = { actors: [], entities: [], topics: [] };
 	let degraded: string[] = [];
+	let embedderDegraded = false;
 	try {
 		const recalled = await opts.client.turnRecall(opts.mainPoolId, recallPayload);
 		const seen = new Set<string>(excludeSet);
-		memories = (recalled.result.memories ?? []).filter((m) => !seen.has(m.memory_id) && Boolean(seen.add(m.memory_id)));
+		const rawMems = recalled.result.memories ?? [];
+		memories = rawMems.filter((m) => !seen.has(m.memory_id) && Boolean(seen.add(m.memory_id)));
 		themes = recalled.result.themes ?? [];
 		anticipations = recalled.result.anticipations ?? anticipations;
 		degraded = [...(recalled.result.degraded ?? [])];
+		embedderDegraded = degraded.includes("embedder_unavailable") || degraded.includes("embedder");
 	} catch (err) {
-		if (!isRetryableMfnError(err)) throw err;
-		degraded = [err instanceof MfnApiError ? err.code : "embedder_unavailable"];
+		const code = extractMfnErrorCode(err, "recall_error");
+		console.warn(`[mfn] turn.recall degraded (${code}):`, err);
+		degraded = [code];
+		embedderDegraded = err instanceof MfnApiError && (code === "embedder_unavailable" || code === "embedder");
 	}
-	const needsLexical = degraded.includes("embedder_unavailable") || degraded.includes("embedder");
-	let supplements: LexicalSearchMatch[] = [];
-	if (needsLexical) {
-		const recalledIds = new Set(memories.map((m) => m.memory_id));
-		const hits = await opts.client.lexicalSearch(opts.lexicalPoolId, { query: query.text, top_k: opts.limits?.top_k ?? 8 });
-		supplements = hits.filter((h) => !excludeSet.has(h.memory_id) && !recalledIds.has(h.memory_id));
-	}
+	const recalledIds = new Set(memories.map((m) => m.memory_id));
+	const supplements = embedderDegraded
+		? await runLexicalSupplement(opts, query.text, excludeSet, recalledIds, degraded)
+		: [];
 	return { memories, supplements, themes, anticipations, degraded };
 }
 
-function buildMfnContextMarker(
-	body: string | null,
-	memories: readonly RecalledMemory[],
-	supplements: readonly LexicalSearchMatch[],
-	degraded: readonly string[],
-): LhMarkerMessage | null {
+function buildMfnContextMarker(body: string | null, recalled: RecallBundle): LhMarkerMessage | null {
 	if (!body) return null;
 	return {
 		id: `mfn_ctx_${mintUuidV7()}`,
@@ -279,17 +282,16 @@ function buildMfnContextMarker(
 			source: "mfn",
 			propositions: [],
 			chains: [],
-			recalledMemoryIds: memories.map((m) => m.memory_id),
-			lexicalMemoryIds: supplements.map((s) => s.memory_id),
-			degraded: [...degraded],
+			recalledMemoryIds: recalled.memories.map((m) => m.memory_id),
+			lexicalMemoryIds: recalled.supplements.map((s) => s.memory_id),
+			degraded: [...recalled.degraded],
 		},
 		timestamp: Date.now(),
 	};
 }
 
 export async function prepareTurnContextWithMfn(opts: PrepareTurnContextOptions): Promise<PreparedTurnContext> {
-	const liveTailTokens = opts.liveTailTokens ?? LIVE_TAIL_DEFAULT_TOKENS;
-	const cutIndex = compactionCutIndex(opts.messages, liveTailTokens);
+	const cutIndex = compactionCutIndex(opts.messages, opts.liveTailTokens ?? LIVE_TAIL_DEFAULT_TOKENS);
 	const liveTail = opts.messages.slice(cutIndex).filter((m) => !isSkippedMarker(m));
 	const { windowIds, excludeIds } = collectTailMemoryIds(opts.chatId, liveTail);
 	const query = selectRecallQuery(liveTail.length > 0 ? liveTail : opts.messages);
@@ -297,14 +299,8 @@ export async function prepareTurnContextWithMfn(opts: PrepareTurnContextOptions)
 	const recalled = query
 		? await queryRecallAndFallback(opts, query, windowIds, excludeIds)
 		: { memories: [], supplements: [], themes: [], anticipations: emptyAnt, degraded: [] };
-	const body = formatMfnSections({
-		planText: planTreeToText(opts.tree, opts.messages),
-		memories: recalled.memories,
-		supplements: recalled.supplements,
-		themes: recalled.themes,
-		anticipations: recalled.anticipations,
-	});
-	const marker = buildMfnContextMarker(body, recalled.memories, recalled.supplements, recalled.degraded);
+	const body = formatMfnSections(planTreeToText(opts.tree, opts.messages), recalled);
+	const marker = buildMfnContextMarker(body, recalled);
 	return {
 		agentMessages: marker ? [marker, ...liveTail] : [...liveTail],
 		liveTail,
@@ -318,7 +314,7 @@ export async function prepareTurnContextWithMfn(opts: PrepareTurnContextOptions)
 	};
 }
 
-function toIngestMemories(chatId: string, messages: readonly LhMessage[], extraTags: readonly string[]): TurnIngestMemory[] {
+function toIngestMemories(chatId: string, messages: readonly LhMessage[], tags: readonly string[]): TurnIngestMemory[] {
 	const chatSlug = sanitizeMfnId(chatId);
 	const items: TurnIngestMemory[] = [];
 	const seenIds = new Set<string>();
@@ -329,23 +325,22 @@ function toIngestMemories(chatId: string, messages: readonly LhMessage[], extraT
 		if (seenIds.has(memId)) continue;
 		seenIds.add(memId);
 		const isTutor = msg.role === "assistant";
-		const tags = sanitizeCallerTags([`role:${msg.role}`, `chat:${chatSlug}`, ...extraTags]);
+		const key = isTutor ? "actor:tutor" : "actor:learner";
+		const label = isTutor ? "Tutor" : "Learner";
 		items.push({
 			memory_id: memId,
 			content: `[${msg.role}] ${text}`,
-			tags,
+			tags: sanitizeCallerTags([`role:${msg.role}`, `chat:${chatSlug}`, ...tags]),
 			metadata: { chat_id: chatSlug, message_id: sanitizeMfnId(msg.id), role: msg.role },
 			association_keys: [`chat:${chatSlug}`],
-			subjects: [{ kind: "actor", key: isTutor ? "actor:tutor" : "actor:learner", label: isTutor ? "Tutor" : "Learner" }],
+			subjects: [{ kind: "actor", key, label }],
 		});
 	}
 	return items;
 }
 
 function buildDeliveredRefs(
-	recalled: readonly RecalledMemory[] | undefined,
-	anchorId: string,
-	batchIds: ReadonlySet<string>,
+	recalled: readonly RecalledMemory[] | undefined, anchorId: string, batchIds: ReadonlySet<string>,
 ): TurnIngestDelivered[] {
 	if (!recalled || recalled.length === 0) return [];
 	const out: TurnIngestDelivered[] = [];
@@ -362,19 +357,14 @@ function buildDeliveredRefs(
 }
 
 async function ingestSingleBatch(
-	opts: IngestSettledTurnOptions,
-	batch: TurnIngestMemory[],
-	batchIndex: number,
-	prevMemId: string | null,
-): Promise<"ingested" | "queued"> {
-	const anchorId = batch[0]!.memory_id;
+	opts: IngestSettledTurnOptions, batch: TurnIngestMemory[], batchIndex: number, prevMemId: string | null,
+): Promise<"ingested" | "queued" | "quarantined"> {
 	const batchIds = new Set(batch.map((m) => m.memory_id));
-	const delivered = batchIndex === 0 ? buildDeliveredRefs(opts.recalledMemories, anchorId, batchIds) : [];
-	const baseUs = Math.floor((opts.occurredAtMs ?? Date.now()) * 1_000);
+	const delivered = batchIndex === 0 ? buildDeliveredRefs(opts.recalledMemories, batch[0]!.memory_id, batchIds) : [];
 	const payload: TurnIngestPayload = {
 		turn_id: mintUuidV7(),
 		session: { kind: "chat", id: sanitizeMfnId(opts.chatId) },
-		occurred_at_us: baseUs + batchIndex,
+		occurred_at_us: Math.floor((opts.occurredAtMs ?? Date.now()) * 1_000) + batchIndex,
 		predecessor_memory_id: prevMemId && isValidCallerMemoryId(prevMemId) ? prevMemId : null,
 		memories: batch,
 		...(delivered.length > 0 ? { delivered } : {}),
@@ -384,38 +374,84 @@ async function ingestSingleBatch(
 		await opts.client.turnIngest(opts.mainPoolId, payload, opId);
 		return "ingested";
 	} catch (err) {
-		if (!opts.outbox.isRetryableIngestError(err)) throw err;
-		opts.outbox.enqueue({
-			operationId: opId,
-			poolId: opts.mainPoolId,
-			payload,
-			errorCode: err instanceof MfnApiError ? err.code : "transport_error",
-		});
+		const errorCode = extractMfnErrorCode(err, "transport_error");
+		const input = { kind: "turn_ingest" as const, operationId: opId, poolId: opts.mainPoolId, payload, errorCode };
+		if (isPerItemPoisonMfnError(err)) {
+			console.warn(`[mfn] Poison turn.ingest (${errorCode}); quarantining ${opId}:`, err);
+			opts.outbox.quarantine(input, `turn.ingest rejected (${errorCode})`);
+			return "quarantined";
+		}
+		console.warn(`[mfn] turn.ingest deferred (${errorCode}); queueing ${opId} in outbox:`, err);
+		opts.outbox.enqueue(input);
 		return "queued";
 	}
 }
 
-async function writeLexicalBestEffort(
-	client: MfnClient,
-	lexicalPoolId: string,
-	items: readonly TurnIngestMemory[],
-): Promise<number> {
-	let writes = 0;
-	for (const item of items) {
-		const putBody = { memory_id: item.memory_id, content: item.content, tags: item.tags, metadata: item.metadata };
-		try {
-			await client.lexicalPut(lexicalPoolId, putBody);
-			writes++;
-		} catch (err) {
-			if (!isRetryableMfnError(err)) throw err;
+interface LexicalOutboxSeed {
+	kind: "lexical_put";
+	operationId: string;
+	poolId: string;
+	lexicalPayload: MfnMemoryPutPayload;
+}
+
+async function attemptLexicalPutOnce(
+	opts: IngestSettledTurnOptions, seed: LexicalOutboxSeed,
+): Promise<{ done: "written" | "queued" | "quarantined" } | { retryCode: string }> {
+	try {
+		await opts.client.lexicalPut(seed.poolId, seed.lexicalPayload, seed.operationId);
+		return { done: "written" };
+	} catch (err) {
+		const errorCode = extractMfnErrorCode(err, "transport_error");
+		if (isRetryableMfnError(err)) return { retryCode: errorCode };
+		if (isPerItemPoisonMfnError(err)) {
+			console.warn(`[mfn] Poison lexicalPut (${errorCode}); quarantining ${seed.operationId}:`, err);
+			opts.outbox.quarantine({ ...seed, errorCode }, `memory.put rejected (${errorCode})`);
+			return { done: "quarantined" };
 		}
+		console.warn(`[mfn] Systemic lexicalPut (${errorCode}); queueing ${seed.operationId} in outbox:`, err);
+		opts.outbox.enqueue({ ...seed, errorCode });
+		return { done: "queued" };
 	}
-	return writes;
+}
+
+async function writeSingleLexicalItem(
+	opts: IngestSettledTurnOptions,
+	item: TurnIngestMemory,
+): Promise<"written" | "queued" | "quarantined"> {
+	const putBody: MfnMemoryPutPayload = {
+		memory_id: item.memory_id,
+		content: item.content,
+		tags: item.tags,
+		metadata: item.metadata,
+	};
+	const seed: LexicalOutboxSeed = {
+		kind: "lexical_put",
+		operationId: mintUuidV7(),
+		poolId: opts.lexicalPoolId,
+		lexicalPayload: putBody,
+	};
+	let errorCode = "transport_error";
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const step = await attemptLexicalPutOnce(opts, seed);
+		if ("done" in step) return step.done;
+		errorCode = step.retryCode;
+		const delay = LEXICAL_RETRY_DELAYS_MS[attempt];
+		if (delay !== undefined) await new Promise<void>((r) => setTimeout(r, delay));
+	}
+	console.warn(`[mfn] lexicalPut exhausted 3 attempts (${errorCode}); queueing ${seed.operationId} in outbox`);
+	opts.outbox.enqueue({ ...seed, errorCode });
+	return "queued";
 }
 
 export async function ingestSettledTurnWithMfn(opts: IngestSettledTurnOptions): Promise<IngestSettledTurnResult> {
 	const items = toIngestMemories(opts.chatId, opts.turnMessages, opts.sessionTags ?? []);
-	const lexicalWrites = await writeLexicalBestEffort(opts.client, opts.lexicalPoolId, items);
+	let lexicalWrites = 0;
+	let queuedLexicalWrites = 0;
+	for (const item of items) {
+		const lexOutcome = await writeSingleLexicalItem(opts, item);
+		if (lexOutcome === "written") lexicalWrites++;
+		else if (lexOutcome === "queued") queuedLexicalWrites++;
+	}
 	let ingestedBatches = 0;
 	let queuedBatches = 0;
 	let prevMemId = opts.predecessorMemoryId ?? null;
@@ -423,19 +459,15 @@ export async function ingestSettledTurnWithMfn(opts: IngestSettledTurnOptions): 
 		const batch = items.slice(i, i + 4);
 		const outcome = await ingestSingleBatch(opts, batch, Math.floor(i / 4), prevMemId);
 		if (outcome === "ingested") ingestedBatches++;
-		else queuedBatches++;
+		else if (outcome === "queued") queuedBatches++;
 		prevMemId = batch[batch.length - 1]!.memory_id;
 	}
 	let flushedFromOutbox = 0;
-	if (ingestedBatches > 0 && queuedBatches === 0 && opts.outbox.size() > 0) {
-		const flushed = await opts.outbox.flush(opts.client);
-		flushedFromOutbox = flushed.flushed;
+	if (ingestedBatches > 0 && queuedBatches === 0 && queuedLexicalWrites === 0 && opts.outbox.size() > 0) {
+		flushedFromOutbox = (await opts.outbox.flush(opts.client)).flushed;
 	}
 	return {
-		ingestedBatches,
-		queuedBatches,
-		lexicalWrites,
-		flushedFromOutbox,
+		ingestedBatches, queuedBatches, lexicalWrites, queuedLexicalWrites, flushedFromOutbox,
 		memoryIds: items.map((m) => m.memory_id),
 	};
 }
