@@ -36,18 +36,19 @@ import * as r35 from "@/app/api/plugins/[id]/documents/markdown/route.ts";
 import * as r36 from "@/app/api/plugins/[id]/route.ts";
 import * as r37 from "@/app/api/plugins/route.ts";
 import * as r38 from "@/app/api/search/route.ts";
-import * as r39 from "@/app/api/settings/prompts/route.ts";
-import * as r40 from "@/app/api/settings/prompts/[...segment]/route.ts";
-import * as r41 from "@/app/api/settings/route.ts";
-import * as r42 from "@/app/api/settings/[section]/route.ts";
-import * as r43 from "@/app/api/stt/token/route.ts";
-import * as r44 from "@/app/api/stt/transcribe/route.ts";
-import * as r45 from "@/app/api/subscriptions/browser/route.ts";
-import * as r46 from "@/app/api/subscriptions/route.ts";
-import * as r47 from "@/app/api/themes/[id]/route.ts";
-import * as r48 from "@/app/api/themes/route.ts";
-import * as r49 from "@/app/api/tts/speak/route.ts";
-import * as r50 from "@/app/api/tts/voices/route.ts";
+import * as r39 from "@/app/api/settings/import-learnharness/route.ts";
+import * as r40 from "@/app/api/settings/prompts/route.ts";
+import * as r41 from "@/app/api/settings/prompts/[...segment]/route.ts";
+import * as r42 from "@/app/api/settings/route.ts";
+import * as r43 from "@/app/api/settings/[section]/route.ts";
+import * as r44 from "@/app/api/stt/token/route.ts";
+import * as r45 from "@/app/api/stt/transcribe/route.ts";
+import * as r46 from "@/app/api/subscriptions/browser/route.ts";
+import * as r47 from "@/app/api/subscriptions/route.ts";
+import * as r48 from "@/app/api/themes/[id]/route.ts";
+import * as r49 from "@/app/api/themes/route.ts";
+import * as r50 from "@/app/api/tts/speak/route.ts";
+import * as r51 from "@/app/api/tts/voices/route.ts";
 import type { Method, RouteHandler, RouteRecord } from "./types.ts";
 
 const METHODS: readonly Method[] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
@@ -95,18 +96,19 @@ const ROUTE_MODULES: readonly (readonly [string, RouteModule])[] = [
 	["app/api/plugins/[id]/route.ts", r36],
 	["app/api/plugins/route.ts", r37],
 	["app/api/search/route.ts", r38],
-	["app/api/settings/prompts/route.ts", r39],
-	["app/api/settings/prompts/[...segment]/route.ts", r40],
-	["app/api/settings/route.ts", r41],
-	["app/api/settings/[section]/route.ts", r42],
-	["app/api/stt/token/route.ts", r43],
-	["app/api/stt/transcribe/route.ts", r44],
-	["app/api/subscriptions/browser/route.ts", r45],
-	["app/api/subscriptions/route.ts", r46],
-	["app/api/themes/[id]/route.ts", r47],
-	["app/api/themes/route.ts", r48],
-	["app/api/tts/speak/route.ts", r49],
-	["app/api/tts/voices/route.ts", r50],
+	["app/api/settings/import-learnharness/route.ts", r39],
+	["app/api/settings/prompts/route.ts", r40],
+	["app/api/settings/prompts/[...segment]/route.ts", r41],
+	["app/api/settings/route.ts", r42],
+	["app/api/settings/[section]/route.ts", r43],
+	["app/api/stt/token/route.ts", r44],
+	["app/api/stt/transcribe/route.ts", r45],
+	["app/api/subscriptions/browser/route.ts", r46],
+	["app/api/subscriptions/route.ts", r47],
+	["app/api/themes/[id]/route.ts", r48],
+	["app/api/themes/route.ts", r49],
+	["app/api/tts/speak/route.ts", r50],
+	["app/api/tts/voices/route.ts", r51],
 ];
 
 export function patternFromFile(file: string): string {

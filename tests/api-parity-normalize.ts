@@ -148,8 +148,8 @@ export class CoverageTracker {
 	}
 
 	assertComplete(): { patterns: number; exportedMethods: number; totalCheckedPairs: number } {
-		assert.equal(this.patterns.size, 50, "Expected exactly 50 route patterns");
-		assert.equal(this.exportedCount, 73, "Expected exactly 73 exported route methods");
+		assert.equal(this.patterns.size, 51, "Expected exactly 51 route patterns");
+		assert.equal(this.exportedCount, 74, "Expected exactly 74 exported route methods");
 		const missing = [...this.expected].filter((entry) => !this.seen.has(entry)).sort();
 		const extra = [...this.seen].filter((entry) => !this.expected.has(entry)).sort();
 		assert.deepEqual(missing, [], `Missing route parity coverage: ${missing.join(", ")}`);

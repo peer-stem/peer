@@ -37,10 +37,9 @@ import type { LhMarkerMessage, LhMessage } from "./native-messages.ts";
 import { modelSolutionForConclude, PRACTICE_CONCLUDE_TOOL, problemInputForConclude, SEND_TO_USER_TOOL, sendToUserText, pluginQuestionResultMatches } from "./native-messages.ts";
 import { readPluginQuestionMessageAnnotation, readPluginQuestionCancellation, type PluginQuestionAnnotationRead } from "./plugin-questions.ts";
 import { pluginProblemForCall, type PluginProblemSnapshot } from "./plugin-problems.ts";
-import { activeCompactionOf, type CompactionDetails } from "./compaction.ts";
+import { activeCompactionOf } from "./compaction.ts";
 import { QUESTION_TOOLS } from "./pending.ts";
-import type { SubagentArtifactData, SubagentResultMeta } from "./contracts/jobs.ts";
-import type { PlanBlockData } from "./contracts/chat.ts";
+import { projectMarker } from "./view-markers.ts";
 
 /** One projected transcript part consumed by host renderers and phase/input
  * scanners. type selects the part vocabulary; common fields are optional
@@ -126,199 +125,151 @@ function applyResult(part: LhViewPart, result: ToolResultMessage): void {
 	}
 }
 
-/** Does this assistant group carry a successful plan_init (the splice target)? */
-function lastSuccessfulPlanInit(parts: LhViewPart[]): number {
-	let idx = -1;
-	parts.forEach((p, i) => {
-		if (p.type !== "tool-plan_init") return;
-		const ok = (p.output as { ok?: unknown } | undefined)?.ok;
-		if (ok === true) idx = i;
-	});
-	return idx;
+function findToolPart(out: readonly LhViewMessage[], result: LhMessage & ToolResultMessage): LhViewPart | undefined {
+	for (let i = out.length - 1; i >= 0; i--) {
+		const parts = out[i]!.parts;
+		for (let p = parts.length - 1; p >= 0; p--) {
+			const part = parts[p]!;
+			if (!part.type.startsWith("tool-") || part.toolCallId !== result.toolCallId) continue;
+			if (part.pluginQuestion) {
+				const occurrence = {
+					messageId: part.sourceMessageId!,
+					contentIndex: part.sourceContentIndex!,
+					toolCallId: part.toolCallId!,
+					toolName: part.type.slice(5),
+				};
+				if (pluginQuestionResultMatches(result, occurrence, part.pluginQuestion) || (result.isError && part.pluginQuestion.status !== "posed")) {
+					return part;
+				}
+				continue;
+			}
+			if (!result.lhQuestionOccurrence && !readPluginQuestionCancellation(result.details)) return part;
+		}
+	}
+	return undefined;
+}
+
+function projectUserMessage(m: LhMessage): LhViewMessage {
+	const content = (m as { content: string | Array<{ type: string; text?: string }> }).content;
+	const parts = typeof content === "string"
+		? [textPart(content)]
+		: content.flatMap((block): LhViewPart[] => {
+			if (block.type === "text") return [textPart(block.text as string)];
+			if (block.type === "image") return [{ ...(block as ImageContent) }];
+			return [];
+		});
+	return { id: m.id, role: "user", parts };
+}
+
+function projectAssistantToolCall(
+	m: LhMessage & AssistantMessage,
+	contentIndex: number,
+	block: { id: string; name: string; arguments?: Record<string, unknown> },
+	ctx: {
+		messages: readonly LhMessage[];
+		live?: LiveTurnState;
+		streamingMessage: boolean;
+		outputErrors: ReadonlyMap<string, ToolResultMessage>;
+		nextTextId: () => string;
+	},
+): LhViewPart | null {
+	const annotation = readPluginQuestionMessageAnnotation(m, contentIndex);
+	if (annotation.status !== "absent") {
+		return {
+			type: `tool-${block.name}`,
+			toolCallId: block.id,
+			sourceMessageId: m.id,
+			sourceContentIndex: contentIndex,
+			pluginQuestion: annotation,
+			state: annotation.status === "posed" ? "input-available" : ctx.streamingMessage ? "input-streaming" : "output-error",
+		};
+	}
+	const part = toolPartOf(block, ctx.live, ctx.streamingMessage);
+	const pluginProblem = pluginProblemForCall(ctx.messages, { messageId: m.id, contentIndex, toolCallId: block.id, toolName: block.name });
+	if (pluginProblem) {
+		part.pluginProblem = pluginProblem;
+		part.input = pluginProblem.input;
+	}
+	if ((QUESTION_TOOLS as readonly string[]).includes(block.name)) {
+		part.sourceMessageId = m.id;
+		part.sourceContentIndex = contentIndex;
+	}
+	if (block.name === SEND_TO_USER_TOOL) {
+		if (m.stopReason === "error" || m.stopReason === "aborted") return null;
+		const error = ctx.outputErrors.get(block.id);
+		if (error) applyResult(part, error);
+		if (part.state === "output-error") return part;
+		const text = sendToUserText(block as Parameters<typeof sendToUserText>[0]);
+		return text !== undefined ? { type: "text", id: ctx.nextTextId(), text, state: "done" } : null;
+	}
+	if (block.name === PRACTICE_CONCLUDE_TOOL) {
+		part.reveal = modelSolutionForConclude(ctx.messages, block.id);
+		part.problemInput = problemInputForConclude(ctx.messages, block.id);
+	}
+	return part;
+}
+
+function projectAssistantMessage(
+	m: LhMessage & AssistantMessage,
+	messages: readonly LhMessage[],
+	live: LiveTurnState | undefined,
+	outputErrors: ReadonlyMap<string, ToolResultMessage>,
+	out: LhViewMessage[],
+): void {
+	const rest: LhViewPart[] = [];
+	const reasoning: LhViewPart[] = [];
+	let textN = 0;
+	let reasoningN = 0;
+	const streamingMessage = live?.streamingIds.has(m.id) === true;
+	const nextTextId = () => `${m.id}-t${textN++}`;
+	for (const [contentIndex, block] of m.content.entries()) {
+		if (block.type === "text") {
+			rest.push({ type: "text", id: nextTextId(), text: block.text, state: "done" });
+		} else if (block.type === "thinking") {
+			reasoning.push({ type: "reasoning", id: `${m.id}-r${reasoningN++}`, text: block.thinking, state: "done" });
+		} else if (block.type === "toolCall") {
+			const part = projectAssistantToolCall(m, contentIndex, block, { messages, live, streamingMessage, outputErrors, nextTextId });
+			if (part) rest.push(part);
+		}
+	}
+	const parts: LhViewPart[] = [...reasoning, ...rest];
+	if (parts.length === 0) {
+		if (!streamingMessage) return;
+		parts.push({ type: "reasoning", id: `${m.id}-r0`, text: "", state: "done" });
+	}
+	const last = out[out.length - 1];
+	if (last && last.role === "assistant") {
+		last.parts.push({ type: "step-start", sourceMessageId: m.id }, ...parts);
+	} else {
+		out.push({ id: m.id, role: "assistant", parts: [{ type: "step-start", sourceMessageId: m.id }, ...parts] });
+	}
 }
 
 /** Project the native record (+ live turn working list) into the client's
  *  view messages. Pure: the same input always projects to the same list. */
 export function projectView(messages: readonly LhMessage[], live?: LiveTurnState): LhViewMessage[] {
 	const out: LhViewMessage[] = [];
-	// Output calls become text rather than tool parts, so read settled
-	// failures up front: a failed call must retain the normal error path.
 	const outputErrors = new Map<string, ToolResultMessage>();
 	for (const message of messages) {
 		if (message.role === "toolResult" && message.toolName === SEND_TO_USER_TOOL && message.isError) {
 			outputErrors.set(message.toolCallId, message);
 		}
 	}
-
-	const lastAssistant = (): LhViewMessage | undefined => {
-		const last = out[out.length - 1];
-		return last && last.role === "assistant" ? last : undefined;
-	};
-	const findToolPart = (result: LhMessage & ToolResultMessage): LhViewPart | undefined => {
-		for (let i = out.length - 1; i >= 0; i--) {
-			// NEWEST-FIRST part scan within a group (the Lacan heal, 2026-10-04):
-			// a result pairs with the most RECENT call carrying its id. Unique
-			// ids (the uniquifier guarantees them for new turns) make scan order
-		// irrelevant; for legacy duplicate-id records (DeepSeek's per-response
-		// `call_0`) this routes each answer to its own call instead of letting
-		// a later result overwrite an earlier question's card.
-			const parts = out[i]!.parts;
-			for (let p = parts.length - 1; p >= 0; p--) {
-				const part = parts[p]!;
-				if (!part.type.startsWith("tool-") || part.toolCallId !== result.toolCallId) continue;
-				if (part.pluginQuestion) {
-					const occurrence = { messageId: part.sourceMessageId!, contentIndex: part.sourceContentIndex!, toolCallId: part.toolCallId!, toolName: part.type.slice(5) };
-					if (pluginQuestionResultMatches(result, occurrence, part.pluginQuestion) || (result.isError && part.pluginQuestion.status !== "posed")) return part;
-					continue;
-				}
-				if (!result.lhQuestionOccurrence && !readPluginQuestionCancellation(result.details)) return part;
-			}
-		}
-		return undefined;
-	};
-
-	// The active compaction (owner round 14): the fold emits the CUT
-	// DIVIDER — the longer, at-the-seam marker — immediately BEFORE the
-	// first kept message, so the transcript shows exactly where history
-	// was summarized away. Everything before it stays visible to the
-	// user (full history is never hidden); only the MODEL's context jumps.
 	const compaction = activeCompactionOf(messages);
-
 	for (const m of messages) {
 		const role = (m as { role?: string }).role;
-
 		if (compaction && m.id === compaction.details.firstKeptMessageId) {
 			out.push({
 				id: `cut_${compaction.id}`,
 				role: "user",
-				parts: [
-					{
-						type: "data-compaction-cut",
-						id: `cc_${compaction.id}`,
-						data: { content: compaction.content, details: compaction.details },
-					},
-				],
+				parts: [{ type: "data-compaction-cut", id: `cc_${compaction.id}`, data: { content: compaction.content, details: compaction.details } }],
 			});
 		}
-
-		if (role === "user") {
-			const content = m.content as string | Array<{ type: string; text?: string }>;
-			const parts = typeof content === "string" ? [textPart(content)] : content.flatMap((block): LhViewPart[] => {
-				if (block.type === "text") return [textPart(block.text as string)];
-				if (block.type === "image") return [{ ...block as ImageContent }];
-				return [];
-			});
-			out.push({ id: m.id, role: "user", parts });
-			continue;
-		}
-
-		if (role === "custom") {
-			projectMarker(m as LhMarkerMessage, out);
-			continue;
-		}
-
-		if (role === "toolResult") {
-			applyResultTo(findToolPart(m as LhMessage & ToolResultMessage), m as ToolResultMessage);
-			continue;
-		}
-
-		if (role === "assistant") {
-			const assistant = m as AssistantMessage;
-			// OWNER RULING (2026-09-26): reasoning ALWAYS renders above the
-			// message it belongs to. Providers emit trailing reasoning tokens
-			// (GLM fires a final reasoning burst after the answer), which
-			// lands the thinking block AFTER the text in the persisted
-			// content — presenting arrival order verbatim put the reasoning
-			// UNDER the message. The view canon owns presentation order:
-			// stable-partition each assistant message, reasoning parts first
-			// (their own order kept), then everything else.
-			const rest: LhViewPart[] = [];
-			const reasoning: LhViewPart[] = [];
-			let textN = 0;
-			let reasoningN = 0;
-			// LIVE IS POSITIVE EVIDENCE (owner, 2026-10-05): a call renders
-			// live ONLY when its own message is streaming THIS turn — session
-			// busyness alone can never resurrect a settled call (the practice
-			// bug: a thinking submission flipped the POSE turn's problem call
-			// back to a spinner mid-transcript; live cards belong at the
-			// bottom, and this gate is what puts them there by construction).
-			const streamingMessage = live?.streamingIds.has(m.id) === true;
-			for (const [contentIndex, block] of assistant.content.entries()) {
-				if (block.type === "text") {
-					rest.push({ type: "text", id: `${m.id}-t${textN++}`, text: block.text, state: "done" });
-				} else if (block.type === "thinking") {
-					reasoning.push({ type: "reasoning", id: `${m.id}-r${reasoningN++}`, text: block.thinking, state: "done" });
-				} else if (block.type === "toolCall") {
-					const annotation = readPluginQuestionMessageAnnotation(m, contentIndex);
-					if (annotation.status !== "absent") {
-						// Source position, not reasoning-partitioned/grouped view index.
-						rest.push({ type: `tool-${block.name}`, toolCallId: block.id,
-							sourceMessageId: m.id, sourceContentIndex: contentIndex, pluginQuestion: annotation,
-							state: annotation.status === "posed" ? "input-available" : streamingMessage ? "input-streaming" : "output-error" });
-						continue;
-					}
-					const part = toolPartOf(block, live, streamingMessage);
-					const pluginProblem = pluginProblemForCall(messages, { messageId: m.id, contentIndex, toolCallId: block.id, toolName: block.name });
-					if (pluginProblem) { part.pluginProblem = pluginProblem; part.input = pluginProblem.input; }
-					if ((QUESTION_TOOLS as readonly string[]).includes(block.name)) {
-						part.sourceMessageId = m.id;
-						part.sourceContentIndex = contentIndex;
-					}
-					if (block.name === SEND_TO_USER_TOOL) {
-						// Failed/aborted generations never execute their calls;
-						// the provider error/abort UI already owns that outcome.
-						if (assistant.stopReason === "error" || assistant.stopReason === "aborted") continue;
-						const error = outputErrors.get(block.id);
-						if (error) applyResult(part, error);
-						if (part.state === "output-error") {
-							rest.push(part);
-						} else {
-							const text = sendToUserText(block);
-							if (text !== undefined) {
-								rest.push({ type: "text", id: `${m.id}-t${textN++}`, text, state: "done" });
-							}
-						}
-						// No live tool card or acknowledgement: this channel is
-						// ordinary prose, including while its arguments stream.
-						continue;
-					}
-					// The conclusion's reveal join (owner round, 2026-10-05): the
-					// hero of a conclude card is the modelSolution committed at POSE
-					// time — a record fold, enriched here so the card renders pure.
-					if (block.name === PRACTICE_CONCLUDE_TOOL) {
-						part.reveal = modelSolutionForConclude(messages, block.id);
-						part.problemInput = problemInputForConclude(messages, block.id);
-					}
-					rest.push(part);
-				}
-			}
-			const parts: LhViewPart[] = [...reasoning, ...rest];
-			if (parts.length === 0) {
-				// An arrived-but-silent STREAMING message (owner, optimistic
-				// round 3, 2026-10-02): the turn's first applied event can
-				// carry empty content — project ONE empty reasoning part so
-				// the message's ARRIVAL renders the thinking row (chat.tsx's
-				// Reasoning isStreamings the last part: the same spinner +
-				// shimmer as the placeholder it replaces — the handoff is
-				// seamless and the two can never double). Settled empty
-				// messages stay hidden (presentation-only).
-				if (live?.streamingIds.has(m.id)) {
-					parts.push({ type: "reasoning", id: `${m.id}-r0`, text: "", state: "done" });
-				} else {
-					continue;
-				}
-			}
-			const group = lastAssistant();
-			if (group) {
-				// Same group: the step separator renders between the steps.
-				group.parts.push({ type: "step-start", sourceMessageId: m.id }, ...parts);
-			} else {
-				out.push({ id: m.id, role: "assistant", parts: [{ type: "step-start", sourceMessageId: m.id }, ...parts] });
-			}
-			continue;
-		}
+		if (role === "user") out.push(projectUserMessage(m));
+		else if (role === "custom") projectMarker(m as LhMarkerMessage, out);
+		else if (role === "toolResult") applyResultTo(findToolPart(out, m as LhMessage & ToolResultMessage), m as ToolResultMessage);
+		else if (role === "assistant") projectAssistantMessage(m as LhMessage & AssistantMessage, messages, live, outputErrors, out);
 	}
-
 	return out;
 }
 
@@ -404,129 +355,4 @@ function applyResultTo(part: LhViewPart | undefined, result: ToolResultMessage):
 	}
 	// A result with no visible part (e.g. a call whose assistant message
 	// rendered nothing) is dropped from the view — the record keeps it.
-}
-
-/** A marker's projected message (handoff/steers) or splice (plan block). */
-function projectMarker(marker: LhMarkerMessage, out: LhViewMessage[]): void {
-	switch (marker.customType) {
-		case "graph-context": {
-			// The session's map context (owner, 2026-10-04): user-side —
-			// a minimal collapsible card ABOVE the first user message;
-			// never a text bubble (scaffolding, like the thinking card).
-			out.push({
-				id: marker.id,
-				role: "user",
-				parts: [{ type: "data-graph-context", id: `gc_${marker.id}`, data: marker.details }],
-			});
-			return;
-		}
-		case "probe-handoff": {
-			out.push({
-				id: marker.id,
-				role: "user",
-				parts: [{ type: "data-probe-handoff", id: `ph_${marker.id}`, data: marker.details }],
-			});
-			return;
-		}
-		case "subagent-steer": {
-			const meta = marker.details as SubagentResultMeta;
-			const artifact = marker.details as {
-				kind: SubagentArtifactData["kind"];
-				result: SubagentArtifactData["result"];
-				ui?: SubagentArtifactData["ui"];
-			};
-			out.push({
-				id: marker.id,
-				role: "user",
-				metadata: { subagentResult: meta },
-				parts: [
-					textPart(marker.content),
-					{
-						type: "data-subagent-artifact",
-						id: `sa_${marker.id}`,
-						data: { kind: artifact.kind, result: artifact.result, ui: artifact.ui },
-					},
-				],
-			});
-			return;
-		}
-		case "subagent-abort": {
-			const meta = marker.details as SubagentResultMeta & { aborted: true };
-			out.push({
-				id: marker.id,
-				role: "user",
-				metadata: { subagentResult: meta },
-				parts: [textPart(marker.content), { type: "data-subagent-aborted", id: `sa_${marker.id}`, data: meta }],
-			});
-			return;
-		}
-		case "plugin-problem-submission": {
-			out.push({ id: marker.id, role: "user", parts: [{ type: "data-plugin-problem-submission", id: `ps_${marker.id}`, data: marker.details }] });
-			return;
-		}
-		case "practice-thinking": {
-			// The learner's working trace / committed answer (practice
-			// sessions): a user-side card keyed on the structured details
-			// (problemCallId, commit, text) — the register lives in the card,
-			// not re-parsed from content.
-			out.push({
-				id: marker.id,
-				role: "user",
-				parts: [{ type: "data-practice-thinking", id: `pt_${marker.id}`, data: marker.details }],
-			});
-			return;
-		}
-		case "practice-next": {
-			// The learner's explicit move-on signal (owner round 16): a compact
-			// centered system line — the mono-caps chrome register, not prose.
-			// The model reads the marker's content; the transcript never shows
-			// it (the label is chrome, single-sourced in the renderer).
-			out.push({
-				id: marker.id,
-				role: "user",
-				parts: [{ type: "data-practice-next", id: `pn_${marker.id}`, data: null }],
-			});
-			return;
-		}
-		case "side-question":
-		case "side-question-told":
-			// Raw context entries do not split the teaching segment or render
-			// loud transcript pills. Its quiet speech-bubble reopens the saved
-			// conversation in the floating/docked companion.
-			return;
-		case "problem-dismissed":
-			// UI-only (the ask-style dismissal): the synthesized conclude
-			// pair — which rides the NEXT input — carries the record's face.
-			return;
-		case "compaction": {
-			// THE MOMENT DIVIDER (owner round 14): minimal centered small
-			// text at the compaction moment — where the user currently is
-			// (the marker appends at the record's tail). Clicking opens the
-			// full summary. The cut divider is emitted by the fold loop at
-			// the kept boundary (see projectView).
-			out.push({
-				id: marker.id,
-				role: "user",
-				parts: [
-					{
-					type: "data-compaction",
-					id: `cm_${marker.id}`,
-					data: { content: marker.content, details: marker.details as CompactionDetails },
-				},
-				],
-			});
-			return;
-		}
-		case "plan-block": {
-			// No message of its own: splice into the preceding assistant
-			// group, IN FLOW after the last successful plan_init call.
-			const group = out[out.length - 1];
-			if (!group || group.role !== "assistant") return;
-			const idx = lastSuccessfulPlanInit(group.parts);
-			if (idx === -1) return;
-			const { block } = marker.details as { planCallId: string; block: PlanBlockData };
-			group.parts.splice(idx + 1, 0, { type: "data-plan-block", id: marker.id, data: block });
-			return;
-		}
-	}
 }
