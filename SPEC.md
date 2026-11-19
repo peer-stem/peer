@@ -107,7 +107,7 @@ No `x-powered-by`, no Next `RSC` `Vary` header (`next-app-route-vary`, `next-pro
 
 ### 2.11 The client's files
 
-**Decided** (2026-11-14): `src/api/static.ts` serves static client assets unchanged on the same origin for non-`/api` paths, ungated, resolving the static root once at startup and preventing path traversal. Exact client bundle paths/headers finalize with `C1` (§8.3).
+**Decided** (`2026-11-14` & `C-11` `2026-11-19`): `src/api/static.ts` serves static client assets unchanged on the same origin for non-`/api` paths, ungated, resolving roots once at startup with `realpath` containment and rejecting dotfile segments (`404`). In `C1`, `src/api/static.ts` serves `public/client/index.html` (`Cache-Control: no-cache`) on SPA routes (`/`, `/chat/new`, `/chat/{seg}`, `/plugins/{seg}/{seg}`, `/settings`), allowlisted `/client/vendor/{cloudcanvas,cloudcanvas-lib}/**` mounts, and `/client/src/**` (`.js`, `.css`, `.json`, `.svg` only).
 
 ## 3. LumberJack Forest & Multi-Parent DAG Contract (`src/store/lumberjack/`)
 
@@ -136,10 +136,11 @@ No `x-powered-by`, no Next `RSC` `Vary` header (`next-app-route-vary`, `next-pro
 
 1. `peer` starts with a clean forest (zero automatic startup migration).
 2. `importLearnHarnessData(sourceDir)` reads a LearnHarness directory strictly read-only (`O_NOFOLLOW`, symlink refusal, isolated file/dir read errors, ID validation against `""`/`.`/`..`, normalized missing `updatedAt`, unwrapped `positions.json`, validated ledger shapes, preserved flashcard `reviews`, and retained higher-rep/newer FSRS schedules) into LumberJack.
+3. **Decided (`C-10`, `2026-11-19`)**: `POST /api/settings/import-learnharness` (gated by `apiRequestRefusal`, body `{ sourceDirectory: string }`) runs `importLearnHarnessData`, emits `chats-changed` and `sources-changed`, and returns `LearnHarnessImportReport` for Settings -> Data.
 
 ## 6. CloudCanvas Client & Code Standards
 
-1. **Client (`src/client/`)**: Zero React, Next.js, or Tailwind. Built with CloudCanvas (`0.7.1`) + `cloudcanvas-lib` (`0.7.1`); client contracts adapted in `S4` await Richard's sign-off before `C1` (`§8.3` / `§10.5`). Model-produced text never enters the DOM as raw HTML; Mermaid runs with `securityLevel: "strict"`; interactive demos run in opaque-origin sandboxed frames.
+1. **Client (`src/client/`, Approved `C-01..C-18` on `2026-11-19`)**: Zero React, Next.js, or Tailwind. Built inside `peer` around pinned `extern/cloudcanvas` (`69076f7`, `0.7.1`) and `extern/cloudcanvas-lib` (`d5a5fa1`, `0.7.1+`) with zero `extern/` edits per `.context/logs/plans/2026-11-19-client-contract-{views,state,seams}.md` (`create<Name>(host, callbacks)` / `create<Screen>View(host, { send, navigate })`, single `Store<M, I>` interface, `src/client/main.js` composition root, `peer-graph` widget hosting `components/graph-canvas.ts`, `PluginCodeBlockRenderer` block registry, `display: false` MFN marker skip). Model-produced text never enters the DOM as raw HTML; Mermaid runs with `securityLevel: "strict"`; interactive demos run in opaque-origin sandboxed frames.
 2. **Code Bounds**: Max `500` lines per file, `50` lines per definition (function, method, or class), `3` levels of tab indentation (`N14` near-500-line splits and `N20` single-condition test assertions + non-gate `memory.peek` skip coverage completed in `S4`).
 3. **Tests & Gate Commands (`tests/`, `package.json`)**:
    - Substrate & unit gates (`./node_modules/.bin/tsx`): `npm run test:gate` (`NODE_ENV=test PEER_REQUIRE_SUBSTRATE=1 ./node_modules/.bin/tsx --test tests/*.test.ts tests/*.test.tsx`), `npm run test:substrate`, and `npm test` (skips native-binary suites cleanly unless `PEER_REQUIRE_SUBSTRATE=1`, `F6`/`N13`).
@@ -151,7 +152,7 @@ No `x-powered-by`, no Next `RSC` `Vary` header (`next-app-route-vary`, `next-pro
 |---|---|
 | **A: Engine API (`A1–A2`, `S4`)** | All 50 routes / 73 methods / 5 streams pass parity against Next standalone, all §2.10 cases pass, A2 follow-ups 1–8 pass, and `D1–D6` + all 8 `RECORDED_DIFFERENCES` (`approved: true`) are settled (§8.1–§8.2) |
 | **S0–S4: Substrate, LumberJack & MFN Baseline** | Submodules clean & pinned; `build-substrate.mjs` verifies SHA-256 hashes & zero CUDA/ROCm `.so`/env on SSD; Governor `S0–S3` findings + `S4` alignment (`D3,D4,L5–L7,N9,N11,N14,N20,N21`, `M3` spec) pass tests; Richard signs off `§10.5` client contracts |
-| **C1–C2: CloudCanvas `peer` App** | Knowledge/Mastery DAG canvas, Lesson/Practice workspace with basic MFN wiring, Flashcards FSRS, Settings/Models/Voice, Plugins, and LearnHarness Import UI pass linkedom unit tests and `puppeteer-core` E2E against live `src/api` + LumberJack + MFN |
+| **C1–C2: CloudCanvas `peer` App** | Knowledge/Mastery DAG canvas, Lesson/Practice workspace with basic MFN wiring, Flashcards FSRS, Settings/Models/Voice, Plugins, and LearnHarness Import UI pass DOM-free store tests, `happy-dom 20.12.0` view unit tests (`C-14`), and `puppeteer-core` E2E against live `src/api` + LumberJack + MFN |
 | **C3: Desktop Cutover & Removal** | Packaged Electron app runs `src/api` + LumberJack + MFN + CloudCanvas client end-to-end; `app/`, React `components/`, Next.js, Tailwind, raw-file store adapters, and LLM compaction are removed; full QA passes and Richard signs off Trial |
 
 ## 8. Decision Ledger & Remaining Gates
@@ -186,7 +187,7 @@ No `x-powered-by`, no Next `RSC` `Vary` header (`next-app-route-vary`, `next-pro
 | `§10.2` (`M3`) | System loopback Ollama CPU-only guarantee enforced by owner's systemd override (§1.3); active daemon probes deferred | **Decided (2026-11-17)** / probes **Benched (2026-11-18)** |
 | `§10.3` (`L5–L7`) | Canonical `/objects` binary images (`L5`) and canonical `Event`/`Entry` conversations, side-chats, usage & jobs (`L6`, `L7`) | **Resolved in `S4`** |
 | `§10.4` + `§9.2` | MFN tuning beyond basic wiring (`§3` recall structure/staleness, `M4`, `M5`, `N3`, `N5`, `N17–N19`, `N22`) | **Benched (2026-11-18)** (`§4.1`) |
-| `§10.5` | CloudCanvas client contracts (`B1` adaptation for CloudCanvas + LumberJack + basic MFN wiring) | **Adapted in `S4` for owner sign-off before `C1`** |
+| `§10.5` | CloudCanvas client contracts (`C-01..C-18` in `2026-11-19-client-contract-{views,state,seams}.md`, built inside `peer` around `69076f7` + `d5a5fa1`) | **Approved / Decided (2026-11-19)** |
 | `§10.6` | `D1–D6` and the 8 recorded parity differences (§8.1–§8.2) | **Approved / Decided (2026-11-17)** |
 | `§9.3` | Governor verification of supported Sprint `S0–S4` PDL step claims | **Open** (Governor / Owner) |
 | `§9.4` (`N15`) | Next 16.4.3 upstream advisory notice | **Closed (no Next upgrade; Next removed at `C3`)** |

@@ -52,6 +52,20 @@ The LumberJack multi-parent DAG + MFN 2.0 substrate directly supports the learne
 | Mastery, mystery, and ongoing skill ranking | LumberJack `proposition` node metadata (`mastery`, `fsrs`) + multi-parent gap traversal |
 | Cross-subject linking, seams, and chained learning | LumberJack multi-parent `Parents` across sources/domains + MFN L5 `echo_of` & L3 Hebbian co-activation |
 | Masterclass multi-session roadmaps | LumberJack `plans/<id>/<node>` DAGs linked across sessions + MFN L5 theme centroids |
-| Model-generated assessment visuals & dashboards | CloudCanvas widget/board documents + LumberJack `/objects` SHA-256 attachments |
+| Model-generated assessment visuals & dashboards | CloudCanvas widget/board documents + LumberJack `/objects` BLAKE3 attachments |
+
+## 6. Later Learner Design Points (Phase 6–7 Backlog, Recorded 2026-11-14)
+
+Folded from `docs/design-points-2026-11-14` (`4c6cb42`); each opens with its own Discovery sprint after parity/cutover:
+
+| Design Point | LumberJack + MFN + CloudCanvas Substrate Mapping |
+|---|---|
+| **Learn more (`+`) on a section** | Learner adds `(+)` on a section and tells the model where to expound; extends `plans/<chat_id>/*` and `knowledge/*` DAG nodes dynamically beyond author-once `plan_init` |
+| **Quizzes graded on ability** | Grades quiz responses on ability to calibrate higher-order/degree follow-up quizzes over `learner/progress/*` mastery & FSRS state |
+| **Expand a set of topics in conversation** | Synthesizes mastered vs struggled propositions and MFN recall across curriculum/interests/goals to generate new learning paths |
+| **Skill tree** | Model-built CloudCanvas visual stage (Phase 6) mapping cross-session successes and failures onto the multi-parent proposition/plan DAG |
+| **Definitions & learning levels** | Structured definition field + metadata hierarchy (`lesson`, `topic`, `unit`, `subject`, `discipline` — nesting **open**) on `knowledge/propositions/*` and `sessions/*` |
+| **Notes and a notebook** | Post-teaching section notes (`"notes don't require me to write a comment"`; model-authored notes **open**) aggregated by metadata/tags into a cross-session notebook in LumberJack |
+| **Key Points** | Inline section links saved without required comment as a personal study guide & interactive notebook; flagged in LumberJack as active practice targets with back-navigation and single/all/mixed practice launch (model-marked key points **open**) |
 
 Signature: Google gemini-4-carbon high - 04da2a6d-9328-4ad4-b892-398e4c39b74c
