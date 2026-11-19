@@ -96,14 +96,20 @@ function registerGateShutdownAndAudit(
 	test("recorded-differences-audit", (t) => {
 		const mods = getMods();
 		const harness = getHarness();
+		assert.equal(mods.compare.RECORDED_DIFFERENCES.length, 8);
+		for (const rule of mods.compare.RECORDED_DIFFERENCES) {
+			assert.equal(rule.approved, true, `Expected recorded difference ${rule.id} to be approved`);
+		}
 		const badDiff = { ruleId: "unrecorded-synthetic-diff", request: "GET /api/graph", nextSummary: "x", apiSummary: "y" };
 		assert.throws(() => mods.compare.auditRecordedDifferences([badDiff]), /Unrecorded parity difference/);
+		const pendingRule = { id: "pending-synthetic-diff", summary: "pending", specRef: "SPEC", approved: false };
+		const pendingObs = { ruleId: "pending-synthetic-diff", request: "GET /api/graph", nextSummary: "x", apiSummary: "y" };
+		const pendingAudit = mods.compare.auditRecordedDifferences([pendingObs], [pendingRule]);
+		assert.deepEqual(pendingAudit.unapprovedRuleIds, ["pending-synthetic-diff"]);
 		const audit = mods.compare.auditRecordedDifferences(harness.observed);
-		assert.equal(getSpawnedPairCount() <= 5, true, `Expected <= 5 spawned server pairs, got ${getSpawnedPairCount()}`);
+		assert.deepEqual(audit.unapprovedRuleIds, []);
+		assert.ok(getSpawnedPairCount() <= 5, `Expected <= 5 spawned server pairs, got ${getSpawnedPairCount()}`);
 		t.diagnostic(`Spawned parity server pairs: ${getSpawnedPairCount()}`);
-		if (audit.unapprovedRuleIds.length > 0) {
-			t.diagnostic(`Recorded differences pending owner approval (approved=false): ${audit.unapprovedRuleIds.join(", ")}`);
-		}
 		if (process.env.PEER_API_PARITY_REPORT === "1") {
 			console.log(`PARITY_OBSERVED_JSON=${JSON.stringify(harness.observed)}`);
 		}

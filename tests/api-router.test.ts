@@ -168,15 +168,8 @@ it("rejects trailing slashes, empty segments, and unmatched /api paths with 404"
 		rec("GET", "/api/plugins/[id]/assets/[...file]", () => new Response("ok")),
 	]);
 	const notFoundPaths = [
-		"/api",
-		"/api/",
-		"/api/unknown",
-		"/api/settings/",
-		"/api/chats//settings",
-		"/api/plugins/p1/assets",
-		"/api/plugins/p1/assets/",
-		"/api/plugins/p1/assets/a/b/",
-		"/api/plugins/p1/assets/a//b",
+		"/api", "/api/", "/api/unknown", "/api/settings/", "/api/chats//settings",
+		"/api/plugins/p1/assets", "/api/plugins/p1/assets/", "/api/plugins/p1/assets/a/b/", "/api/plugins/p1/assets/a//b",
 	];
 	await withGateEnv({}, async () => {
 		for (const path of notFoundPaths) {
@@ -324,10 +317,8 @@ it("computes bodyLimit across non-/api, standard /api, exempt, and percent-encod
 	];
 	for (const path of capped) assert.equal(bodyLimit(path), MAX_IMPORT_BODY_BYTES, path);
 	const exempt = [
-		"/api/plugins/document-one/documents/markdown",
-		"/api/plugins/document-one/documents/markdown/",
-		"/api/plugins/document%2Done/documents/markdown",
-		"/api/plugins/%64ocument-one/documents/markdown/",
+		"/api/plugins/document-one/documents/markdown", "/api/plugins/document-one/documents/markdown/",
+		"/api/plugins/document%2Done/documents/markdown", "/api/plugins/%64ocument-one/documents/markdown/",
 		"/api/plugins/%E5%AD%97/documents/markdown",
 	];
 	for (const path of exempt) assert.equal(bodyLimit(path), null, path);

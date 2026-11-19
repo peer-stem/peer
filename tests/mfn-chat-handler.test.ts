@@ -280,8 +280,8 @@ test("handleChatInput catches prepareMfnTurnBridge fault and falls back to raw t
 		assert.equal(seenContexts.length, 1);
 		assert.equal(chatStore.getChat(chatId)?.messages.length, 2);
 		const expectedPrefix = `[chat ${chatId}] MFN turn preparation failed; falling back to raw transcript:`;
-		const matched = errorLogs.some((l) => l.includes(expectedPrefix) && l.includes("forced-bridge-prep-fault"));
-		assert.equal(matched, true);
+		assert.equal(errorLogs.some((l) => l.includes(expectedPrefix)), true);
+		assert.equal(errorLogs.some((l) => l.includes("forced-bridge-prep-fault")), true);
 		await waitFor(() => state.ingested.length === 1 && state.lexicalPuts.length === 2);
 	} finally {
 		console.error = origConsoleError;

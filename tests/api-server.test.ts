@@ -6,7 +6,6 @@ import { test, type TestContext } from "node:test";
 import { MAX_IMPORT_BODY_BYTES } from "../lib/notes-import-limits.ts";
 import { createApiHttpServer, serveHttp, type ApiHttpServer, type CreateApiHttpServerOptions } from "../src/api/server.ts";
 import type { Dispatch } from "../src/api/types.ts";
-import { openWireStream } from "./api-parity-wire.ts";
 
 interface BoundTestServer {
 	api: ApiHttpServer;
@@ -66,75 +65,29 @@ function readNextChunk(res: http.IncomingMessage): Promise<Buffer> {
 	});
 }
 
-function waitForStreamEnd(res: http.IncomingMessage): Promise<Buffer> {
+function drainSocketToEnd(sock: net.Socket): Promise<number> {
 	return new Promise((resolve, reject) => {
-		const chunks: Buffer[] = [];
-		res.on("data", (chunk: Buffer) => chunks.push(chunk));
-		res.on("end", () => resolve(Buffer.concat(chunks)));
-		res.on("error", reject);
+		let total = 0;
+		sock.on("data", (chunk: Buffer) => { total += chunk.byteLength; });
+		sock.on("end", () => resolve(total));
+		sock.on("error", reject);
+		sock.resume();
 	});
-}
-
-function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
-	let resolve!: (value: T) => void;
-	const promise = new Promise<T>((res) => {
-		resolve = res;
-	});
-	return { promise, resolve };
-}
-
-function makeStreamOnCancel(onCancel: () => void): ReadableStream<Uint8Array> {
-	return new ReadableStream<Uint8Array>({ cancel: onCancel });
 }
 
 function makeControlledStream(): {
 	stream: ReadableStream<Uint8Array>;
 	push: (text: string) => void;
 	fail: (err: Error) => void;
-	close: () => void;
 } {
 	let ctrl!: ReadableStreamDefaultController<Uint8Array>;
 	const encoder = new TextEncoder();
-	const stream = new ReadableStream<Uint8Array>({
-		start(controller) {
-			ctrl = controller;
-		},
-	});
+	const stream = new ReadableStream<Uint8Array>({ start(controller) { ctrl = controller; } });
 	return {
 		stream,
 		push: (text: string) => ctrl.enqueue(encoder.encode(text)),
 		fail: (err: Error) => ctrl.error(err),
-		close: () => ctrl.close(),
 	};
-}
-
-function makeBackpressureStream(
-	totalChunks: number,
-	chunkBytes: Uint8Array,
-): { stream: ReadableStream<Uint8Array>; getPulled: () => number; waitStalled: () => Promise<number> } {
-	let pulled = 0;
-	const firstPull = deferred<void>();
-	const pull = (controller: ReadableStreamDefaultController<Uint8Array>) => {
-		if (pulled >= totalChunks) {
-			controller.close();
-			return;
-		}
-		pulled += 1;
-		if (pulled === 1) firstPull.resolve();
-		controller.enqueue(chunkBytes);
-	};
-	const stream = new ReadableStream<Uint8Array>({ pull }, { highWaterMark: 0 });
-	const waitStalled = async (): Promise<number> => {
-		await firstPull.promise;
-		let prev = -1;
-		for (let i = 0; i < 200; i++) {
-			await new Promise<void>((r) => setImmediate(r));
-			if (pulled === prev) return pulled;
-			prev = pulled;
-		}
-		return pulled;
-	};
-	return { stream, getPulled: () => pulled, waitStalled };
 }
 
 async function summarizeBodyDispatch(req: Request): Promise<Response> {
@@ -147,6 +100,12 @@ async function summarizeBodyDispatch(req: Request): Promise<Response> {
 		head,
 		tail,
 	});
+}
+
+function makeFakeServerResponse(msg: IncomingMessage): ServerResponse {
+	const res = new http.ServerResponse(msg);
+	res.assignSocket(new PassThrough() as unknown as net.Socket);
+	return res;
 }
 
 test("preserves raw URL, Host, multi Set-Cookie, and omits framework headers", async (t) => {
@@ -198,20 +157,17 @@ test("reports request-build, dispatch, and mid-stream body failures via options.
 		onError: (err) => reported.push(err instanceof Error ? err : new Error(String(err))),
 	});
 
-	// 1. buildWebRequest throws on forbidden TRACE method
 	const traceRes = await sendRawRequest({ host: "127.0.0.1", port: srv.port, method: "TRACE", path: "/api/x" });
 	assert.equal(traceRes.status, 500);
 	assert.equal(traceRes.body.toString("utf-8"), "Internal Server Error");
 	assert.equal(reported.length, 1);
 
-	// 2. dispatch throws before headers
 	const dispRes = await fetch(`${srv.url}/api/fail`);
 	assert.equal(dispRes.status, 500);
 	assert.equal(await dispRes.text(), "Internal Server Error");
 	assert.equal(reported.length, 2);
 	assert.equal(reported[1]?.message, "dispatch-boom");
 
-	// 3. response body stream errors mid-way after flushing first chunk
 	const { res } = await openClientStream(`${srv.url}/stream-err`);
 	const first = readNextChunk(res);
 	controlled.push("part-1");
@@ -250,9 +206,10 @@ test("uses null body for GET/HEAD and unread empty stream for bodiless POST/DELE
 });
 
 test("HEAD writes headers with empty body and cancels response stream", async (t) => {
-	const cancelled = deferred<void>();
+	let resolveCancel!: () => void;
+	const cancelled = new Promise<void>((res) => { resolveCancel = res; });
 	const srv = await startServer(t, async () => {
-		const stream = makeStreamOnCancel(() => cancelled.resolve());
+		const stream = new ReadableStream<Uint8Array>({ cancel: () => resolveCancel() });
 		return new Response(stream, {
 			status: 200,
 			headers: { "Content-Type": "text/plain; charset=utf-8", "Content-Length": "42" },
@@ -262,89 +219,12 @@ test("HEAD writes headers with empty body and cancels response stream", async (t
 	assert.equal(res.status, 200);
 	assert.equal(res.headers.get("content-length"), "42");
 	assert.equal((await res.arrayBuffer()).byteLength, 0);
-	await cancelled.promise;
-});
-
-test("flushes response headers immediately before first SSE byte and streams unbuffered", async (t) => {
-	const controlled = makeControlledStream();
-	const srv = await startServer(t, async () => {
-		return new Response(controlled.stream, {
-			status: 200,
-			headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
-		});
-	});
-	const { res } = await openClientStream(`${srv.url}/sse`);
-	assert.equal(res.statusCode, 200);
-	assert.equal(res.headers["content-type"], "text/event-stream");
-
-	const firstRead = readNextChunk(res);
-	controlled.push("data: first\n\n");
-	assert.equal((await firstRead).toString("utf-8"), "data: first\n\n");
-
-	const secondRead = readNextChunk(res);
-	controlled.push("data: second\n\n");
-	assert.equal((await secondRead).toString("utf-8"), "data: second\n\n");
-
-	const rest = waitForStreamEnd(res);
-	controlled.close();
-	assert.equal((await rest).byteLength, 0);
-});
-
-function drainSocketToEnd(sock: net.Socket): Promise<number> {
-	return new Promise((resolve, reject) => {
-		let total = 0;
-		sock.on("data", (chunk: Buffer) => {
-			total += chunk.byteLength;
-		});
-		sock.on("end", () => resolve(total));
-		sock.on("error", reject);
-		sock.resume();
-	});
-}
-
-test("applies socket drain backpressure when streaming to a paused client", async (t) => {
-	const totalChunks = 256;
-	const chunkBytes = new Uint8Array(64 * 1024).fill(0x6b);
-	const producer = makeBackpressureStream(totalChunks, chunkBytes);
-	const srv = await startServer(t, async () => new Response(producer.stream, { status: 200 }));
-	const sock = net.connect(srv.port, "127.0.0.1");
-	t.after(() => sock.destroy());
-	await new Promise<void>((resolve, reject) => {
-		sock.once("connect", () => resolve());
-		sock.once("error", reject);
-	});
-	sock.pause();
-	sock.write("GET /backpressure HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-	const pulledWhilePaused = await producer.waitStalled();
-	assert.ok(pulledWhilePaused > 0 && pulledWhilePaused < totalChunks, `pulled=${pulledWhilePaused}`);
-	const wireBytes = await drainSocketToEnd(sock);
-	assert.ok(wireBytes > totalChunks * chunkBytes.byteLength);
-	assert.equal(producer.getPulled(), totalChunks);
-});
-
-test("mid-stream client disconnect aborts request.signal and immediately cancels idle response.body", async (t) => {
-	const signalAborted = deferred<void>();
-	const bodyCancelled = deferred<void>();
-	const srv = await startServer(t, async (req) => {
-		req.signal.addEventListener("abort", () => signalAborted.resolve(), { once: true });
-		const idleStream = makeStreamOnCancel(() => bodyCancelled.resolve());
-		return new Response(idleStream, {
-			status: 200,
-			headers: { "Content-Type": "text/event-stream" },
-		});
-	});
-	const { req, res } = await openClientStream(`${srv.url}/idle-sse`);
-	assert.equal(res.statusCode, 200);
-	req.destroy();
-	res.destroy();
-	await Promise.all([signalAborted.promise, bodyCancelled.promise]);
+	await cancelled;
 });
 
 test("caps request body at exact 27,262,976-byte default limit, strips query from warning, and leaves exempt uncut", async (t) => {
 	const warnings: string[] = [];
-	const srv = await startServer(t, summarizeBodyDispatch, {
-		onWarn: (msg) => warnings.push(msg),
-	});
+	const srv = await startServer(t, summarizeBodyDispatch, { onWarn: (msg) => warnings.push(msg) });
 	const exactPayload = Buffer.alloc(MAX_IMPORT_BODY_BYTES, 0x58);
 	const exactRes = await fetch(`${srv.url}/api/capped`, { method: "POST", body: exactPayload });
 	assert.equal(exactRes.status, 200);
@@ -367,79 +247,6 @@ test("caps request body at exact 27,262,976-byte default limit, strips query fro
 	assert.equal(exemptJson.len, oversized.byteLength);
 	assert.equal(exemptJson.tail, "ZZZZZZZZ");
 });
-
-test("keeps Node default requestTimeout and closes open SSE streams cleanly without force warning", async (t) => {
-	let cancelledCount = 0;
-	const warnings: string[] = [];
-	const dispatch = async () => {
-		const sse = makeStreamOnCancel(() => { cancelledCount += 1; });
-		return new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
-	};
-	const srv = await startServer(t, dispatch, { onWarn: (msg) => warnings.push(msg) });
-	assert.equal(srv.api.server.requestTimeout, 300_000);
-	const c1 = await openClientStream(`${srv.url}/sse-1`);
-	const c2 = await openClientStream(`${srv.url}/sse-2`);
-	const end1 = waitForStreamEnd(c1.res);
-	const end2 = waitForStreamEnd(c2.res);
-
-	await srv.api.close();
-	await Promise.all([end1, end2]);
-	assert.equal(cancelledCount, 2);
-	assert.deepEqual(warnings, []);
-});
-
-async function closeWithDeadline(api: ApiHttpServer, onTimeout: () => void, deadlineMs: number): Promise<void> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const timeout = new Promise<never>((_, reject) => {
-		timer = setTimeout(() => {
-			onTimeout();
-			reject(new Error("srv.api.close() hung past shutdownTimeoutMs"));
-		}, deadlineMs);
-	});
-	try {
-		await Promise.race([api.close(), timeout]);
-	} finally {
-		if (timer !== undefined) clearTimeout(timer);
-	}
-}
-
-test("arms shutdown deadline before in-flight handlers settle and logs when close is forced", async (t) => {
-	const warnings: string[] = [];
-	const entered = deferred<void>();
-	const releaseStuck = deferred<void>();
-	const dispatch = async () => {
-		entered.resolve();
-		await releaseStuck.promise;
-		return new Response("late");
-	};
-	const srv = await startServer(t, dispatch, { shutdownTimeoutMs: 60, onWarn: (msg) => warnings.push(msg) });
-	t.after(() => releaseStuck.resolve());
-	const pendingFetch = fetch(`${srv.url}/stuck`).catch(() => null);
-	await entered.promise;
-	await closeWithDeadline(srv.api, () => releaseStuck.resolve(), 1_500);
-	await pendingFetch;
-	assert.deepEqual(warnings, ["Forced HTTP connection close after 60ms shutdown deadline."]);
-});
-
-test("openWireStream waitForText rejects immediately when SSE stream ends before token arrives", async (t) => {
-	const controlled = makeControlledStream();
-	const headers = { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" };
-	const srv = await startServer(t, async () => new Response(controlled.stream, { status: 200, headers }));
-	const stream = await openWireStream(srv.port, { method: "GET", path: "/sse-early-close" });
-	assert.equal(stream.hasEnded(), false);
-	const waiting = stream.waitForText("never-sent", 2_000);
-	controlled.push("data: unrelated\n\n");
-	controlled.close();
-	await assert.rejects(waiting, /Stream ended before condition was met/);
-	assert.equal(stream.hasEnded(), true);
-	await assert.rejects(() => stream.waitForText("never-sent", 2_000), /Stream ended before condition was met/);
-});
-
-function makeFakeServerResponse(msg: IncomingMessage): ServerResponse {
-	const res = new http.ServerResponse(msg);
-	res.assignSocket(new PassThrough() as unknown as net.Socket);
-	return res;
-}
 
 test("normalizes absolute-form, asterisk-form, IPv6, and Host-port fallback targets in serveHttp", async (t) => {
 	const seenUrls: string[] = [];

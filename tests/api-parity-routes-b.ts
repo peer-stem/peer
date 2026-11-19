@@ -1,95 +1,50 @@
-import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { tinyPdf } from "./helpers/tiny-pdf.ts";
 import type { ServerSide } from "./api-parity-stubs.ts";
-import { connectWireStream, countOccurrences, parseNdjsonStream, parseSseStream, sendWire, type LiveStreamHandle } from "./api-parity-wire.ts";
-import { assertDataDirsEqual, compareResponseHeaders, normalizeJsonValue, normalizeSseEvents, runParityRequest, type ParityHarness } from "./api-parity-compare.ts";
+import { runParityRequest, type ParityHarness } from "./api-parity-compare.ts";
 import { GOLDEN_NODE_DELETE, GOLDEN_TEACH_CHAT, WORKTREE_ROOT, encodeMultipartRequest } from "./api-test-helpers.ts";
+import {
+	openEventsWithPulse,
+	pulseEventsBusOnBoth,
+	pulseEventsBusPorts,
+	runChatSubroutesAndTurnSuite,
+	runSideChatsAndEventsSuite,
+	waitChatSettledOnBoth,
+	waitExtractionIdleOnBoth,
+	waitSideChatsSettledOnBoth,
+} from "./api-parity-routes-b-chats.ts";
+
+export {
+	openEventsWithPulse,
+	pulseEventsBusOnBoth,
+	pulseEventsBusPorts,
+	waitChatSettledOnBoth,
+	waitExtractionIdleOnBoth,
+	waitSideChatsSettledOnBoth,
+};
 
 const GOLDEN_JOB_ID = "job_murepie2_9d791321";
-const GOLDEN_DEMO_STEER_ID = "steer_job_mv28454n_25dc3185";
-const GOLDEN_PROSE_MSG_ID = "msg_mv27s2zx_8c815926";
 const GOLDEN_KEEP_NODE_ID = "n_465398b5356a";
 
-async function openNotifyEventsStream(port: number, timeoutMs: number): Promise<LiveStreamHandle> {
-	const conn = connectWireStream(port, { method: "GET", path: "/api/events" });
-	const pulseReq = { method: "DELETE", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body: "{}" };
-	const pulse = () => void sendWire(port, pulseReq).catch(() => {});
-	const pulser = setInterval(pulse, 80);
-	try {
-		if (!conn.headersArrived()) pulse();
-		return await conn.waitHeaders(timeoutMs);
-	} catch (err) {
-		conn.abort();
-		throw err;
-	} finally {
-		clearInterval(pulser);
+async function runAbortVariants(h: ParityHarness): Promise<void> {
+	const cases: Array<{ label: string; payload: unknown; status: number }> = [
+		{ label: "job settled", payload: { kind: "job", id: GOLDEN_JOB_ID }, status: 409 },
+		{ label: "plugin-worker missing", payload: { kind: "plugin-worker", id: "document-one" }, status: 404 },
+		{ label: "turn idle", payload: { kind: "turn", id: GOLDEN_TEACH_CHAT }, status: 409 },
+		{ label: "extraction idempotent", payload: { kind: "extraction", id: GOLDEN_TEACH_CHAT }, status: 200 },
+		{ label: "invalid id", payload: { kind: "job", id: "bad/id" }, status: 400 },
+	];
+	for (const item of cases) {
+		const req = { method: "POST", path: "/api/activity/abort", headers: { "Content-Type": "application/json" }, body: JSON.stringify(item.payload) };
+		await runParityRequest(h, {
+			label: `row 1 POST /api/activity/abort (${item.label})`,
+			pattern: "/api/activity/abort",
+			isWrite: true,
+			expectedStatus: item.status,
+			request: req,
+		});
 	}
-}
-
-async function waitPortIdleViaEvents(
-	port: number,
-	checkIdle: (port: number) => Promise<boolean>,
-	label: string,
-	timeoutMs: number,
-): Promise<void> {
-	if (await checkIdle(port)) return;
-	const deadline = Date.now() + timeoutMs;
-	const ev = await openNotifyEventsStream(port, Math.max(1, deadline - Date.now()));
-	try {
-		while (Date.now() < deadline) {
-			const seen = countOccurrences(ev.snapshotText(), "\n\n");
-			if (await checkIdle(port)) return;
-			const remaining = deadline - Date.now();
-			if (remaining <= 0) break;
-			await ev.waitForCount("\n\n", seen + 1, remaining);
-		}
-	} finally {
-		ev.abort();
-	}
-	throw new Error(`Timed out waiting for ${label}`);
-}
-
-export async function waitExtractionIdleOnBoth(h: ParityHarness, timeoutMs = 15_000): Promise<void> {
-	const isIdle = async (port: number) => {
-		const res = await sendWire(port, { method: "GET", path: "/api/graph/status" });
-		return ((JSON.parse(res.text) as { runs?: unknown[] }).runs ?? []).length === 0;
-	};
-	const label = "extraction runs to drain on both servers";
-	await Promise.all([
-		waitPortIdleViaEvents(h.pair.next.port, isIdle, label, timeoutMs),
-		waitPortIdleViaEvents(h.pair.api.port, isIdle, label, timeoutMs),
-	]);
-}
-
-export async function waitChatSettledOnBoth(
-	h: ParityHarness,
-	chatIds: Record<ServerSide, string>,
-	timeoutMs = 15_000,
-): Promise<void> {
-	const isSettled = (chatId: string) => async (port: number) => {
-		const res = await sendWire(port, { method: "GET", path: `/api/chats/${chatId}` });
-		const s = JSON.parse(res.text) as { turnInFlight?: boolean; compacting?: boolean };
-		return !s.turnInFlight && !s.compacting;
-	};
-	const label = "chat turn to settle on both servers";
-	await Promise.all([
-		waitPortIdleViaEvents(h.pair.next.port, isSettled(chatIds.next), label, timeoutMs),
-		waitPortIdleViaEvents(h.pair.api.port, isSettled(chatIds.api), label, timeoutMs),
-	]);
-}
-
-export async function waitSideChatsSettledOnBoth(h: ParityHarness, chatId: string, timeoutMs = 15_000): Promise<void> {
-	const isIdle = async (port: number) => {
-		const res = await sendWire(port, { method: "GET", path: `/api/chats/${chatId}/side-chats` });
-		return Object.keys((JSON.parse(res.text) as { answering?: Record<string, string> }).answering ?? {}).length === 0;
-	};
-	const label = "side-chat answer to settle on both servers";
-	await Promise.all([
-		waitPortIdleViaEvents(h.pair.next.port, isIdle, label, timeoutMs),
-		waitPortIdleViaEvents(h.pair.api.port, isIdle, label, timeoutMs),
-	]);
 }
 
 async function runActivityAndJobsSuite(h: ParityHarness): Promise<void> {
@@ -113,26 +68,6 @@ async function runActivityAndJobsSuite(h: ParityHarness): Promise<void> {
 	await runAbortVariants(h);
 }
 
-async function runAbortVariants(h: ParityHarness): Promise<void> {
-	const cases: Array<{ label: string; payload: unknown; status: number }> = [
-		{ label: "job settled", payload: { kind: "job", id: GOLDEN_JOB_ID }, status: 409 },
-		{ label: "plugin-worker missing", payload: { kind: "plugin-worker", id: "document-one" }, status: 404 },
-		{ label: "turn idle", payload: { kind: "turn", id: GOLDEN_TEACH_CHAT }, status: 409 },
-		{ label: "extraction idempotent", payload: { kind: "extraction", id: GOLDEN_TEACH_CHAT }, status: 200 },
-		{ label: "invalid id", payload: { kind: "job", id: "bad/id" }, status: 400 },
-	];
-	for (const item of cases) {
-		const req = { method: "POST", path: "/api/activity/abort", headers: { "Content-Type": "application/json" }, body: JSON.stringify(item.payload) };
-		await runParityRequest(h, {
-			label: `row 1 POST /api/activity/abort (${item.label})`,
-			pattern: "/api/activity/abort",
-			isWrite: true,
-			expectedStatus: item.status,
-			request: req,
-		});
-	}
-}
-
 async function runGraphReadAndSettingsSuite(h: ParityHarness): Promise<void> {
 	await runParityRequest(h, { label: "row 20 GET /api/graph/costs", pattern: "/api/graph/costs", expectedStatus: 200, request: { method: "GET", path: "/api/graph/costs" } });
 	await runParityRequest(h, { label: "row 26 GET /api/graph", pattern: "/api/graph", expectedStatus: 200, request: { method: "GET", path: "/api/graph" } });
@@ -151,6 +86,23 @@ async function runGraphReadAndSettingsSuite(h: ParityHarness): Promise<void> {
 		isWrite: true,
 		expectedStatus: 200,
 		request: { method: "PUT", path: "/api/graph/positions", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ [GOLDEN_KEEP_NODE_ID]: { x: 42.5, y: -17.25 } }) },
+	});
+}
+
+async function runDeleteFolderAndNode(h: ParityHarness, folderIds: Record<ServerSide, string>): Promise<void> {
+	await runParityRequest(h, {
+		label: "row 27 DELETE /api/graph/sources (delete empty folder)",
+		pattern: "/api/graph/sources",
+		isWrite: true,
+		expectedStatus: 200,
+		request: (side) => ({ method: "DELETE", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sourceIds: [], folderIds: [folderIds[side]], deleteSessions: false }) }),
+	});
+	await runParityRequest(h, {
+		label: `row 23 DELETE /api/graph/nodes/${GOLDEN_NODE_DELETE}`,
+		pattern: "/api/graph/nodes/[id]",
+		isWrite: true,
+		expectedStatus: 200,
+		request: { method: "DELETE", path: `/api/graph/nodes/${GOLDEN_NODE_DELETE}` },
 	});
 }
 
@@ -174,23 +126,6 @@ async function runGraphSourcesAndNodeDeleteSuite(h: ParityHarness): Promise<void
 		request: (side) => ({ method: "POST", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "rename-folder", id: folderIds[side], name: "Parity Folder Renamed" }) }),
 	});
 	await runDeleteFolderAndNode(h, folderIds);
-}
-
-async function runDeleteFolderAndNode(h: ParityHarness, folderIds: Record<ServerSide, string>): Promise<void> {
-	await runParityRequest(h, {
-		label: "row 27 DELETE /api/graph/sources (delete empty folder)",
-		pattern: "/api/graph/sources",
-		isWrite: true,
-		expectedStatus: 200,
-		request: (side) => ({ method: "DELETE", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sourceIds: [], folderIds: [folderIds[side]], deleteSessions: false }) }),
-	});
-	await runParityRequest(h, {
-		label: `row 23 DELETE /api/graph/nodes/${GOLDEN_NODE_DELETE}`,
-		pattern: "/api/graph/nodes/[id]",
-		isWrite: true,
-		expectedStatus: 200,
-		request: { method: "DELETE", path: `/api/graph/nodes/${GOLDEN_NODE_DELETE}` },
-	});
 }
 
 async function runGraphImportAndExtractSuite(h: ParityHarness): Promise<void> {
@@ -231,33 +166,6 @@ async function runGraphImportAndExtractSuite(h: ParityHarness): Promise<void> {
 	});
 }
 
-async function runChatsCrudSuite(h: ParityHarness): Promise<Record<ServerSide, string>> {
-	await runParityRequest(h, { label: "row 15 GET /api/chats", pattern: "/api/chats", expectedStatus: 200, request: { method: "GET", path: "/api/chats" } });
-	const created = await runParityRequest(h, {
-		label: "row 15 POST /api/chats (teach)",
-		pattern: "/api/chats",
-		isWrite: true,
-		expectedStatus: 200,
-		request: { method: "POST", path: "/api/chats", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Parity Teach Session" }) },
-	});
-	const teachIds: Record<ServerSide, string> = {
-		next: (JSON.parse(created.nextRes.text) as { id: string }).id,
-		api: (JSON.parse(created.apiRes.text) as { id: string }).id,
-	};
-	const disposable = await runParityRequest(h, {
-		label: "row 15 POST /api/chats (disposable)",
-		isWrite: true,
-		expectedStatus: 200,
-		request: { method: "POST", path: "/api/chats", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Disposable Session", kind: "practice" }) },
-	});
-	const dispIds: Record<ServerSide, string> = {
-		next: (JSON.parse(disposable.nextRes.text) as { id: string }).id,
-		api: (JSON.parse(disposable.apiRes.text) as { id: string }).id,
-	};
-	await runChatItemMutations(h, teachIds, dispIds);
-	return teachIds;
-}
-
 async function runChatItemMutations(
 	h: ParityHarness,
 	teachIds: Record<ServerSide, string>,
@@ -294,196 +202,31 @@ async function runChatItemMutations(
 	});
 }
 
-async function runChatSubroutesAndTurnSuite(h: ParityHarness, teachIds: Record<ServerSide, string>): Promise<void> {
-	const uiBody = JSON.stringify({ input: { messageId: GOLDEN_DEMO_STEER_ID, inverted: true } });
-	await runParityRequest(h, {
-		label: "row 4 POST /api/chats/[id]/artifact-ui",
-		pattern: "/api/chats/[id]/artifact-ui",
+async function runChatsCrudSuite(h: ParityHarness): Promise<Record<ServerSide, string>> {
+	await runParityRequest(h, { label: "row 15 GET /api/chats", pattern: "/api/chats", expectedStatus: 200, request: { method: "GET", path: "/api/chats" } });
+	const created = await runParityRequest(h, {
+		label: "row 15 POST /api/chats (teach)",
+		pattern: "/api/chats",
 		isWrite: true,
 		expectedStatus: 200,
-		request: { method: "POST", path: `/api/chats/${GOLDEN_TEACH_CHAT}/artifact-ui`, headers: { "Content-Type": "application/json" }, body: uiBody },
+		request: { method: "POST", path: "/api/chats", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Parity Teach Session" }) },
 	});
-	await runParityRequest(h, {
-		label: "row 6 GET /api/chats/[id]/images/[snapshotId] (missing)",
-		pattern: "/api/chats/[id]/images/[snapshotId]",
-		expectedStatus: 404,
-		request: { method: "GET", path: `/api/chats/${GOLDEN_TEACH_CHAT}/images/${"0".repeat(64)}` },
-	});
-	await runParityRequest(h, {
-		label: "row 7 GET /api/chats/[id]/markdown",
-		pattern: "/api/chats/[id]/markdown",
-		expectedStatus: 200,
-		request: { method: "GET", path: `/api/chats/${GOLDEN_TEACH_CHAT}/markdown` },
-	});
-	await runChatTurnAndSettledChecks(h, teachIds);
-}
-
-async function runChatTurnAndSettledChecks(h: ParityHarness, teachIds: Record<ServerSide, string>): Promise<void> {
-	const turnOut = await runParityRequest(h, {
-		label: "row 3 POST /api/chat",
-		pattern: "/api/chat",
+	const teachIds: Record<ServerSide, string> = {
+		next: (JSON.parse(created.nextRes.text) as { id: string }).id,
+		api: (JSON.parse(created.apiRes.text) as { id: string }).id,
+	};
+	const disposable = await runParityRequest(h, {
+		label: "row 15 POST /api/chats (disposable)",
 		isWrite: true,
 		expectedStatus: 200,
-		awaitBeforeUpstreamCheck: async () => {
-			await waitChatSettledOnBoth(h, teachIds);
-			await waitExtractionIdleOnBoth(h);
-		},
-		request: (side) => ({
-			method: "POST",
-			path: "/api/chat",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ chatId: teachIds[side], input: { type: "text", text: "Hello parity tutor" } }),
-		}),
+		request: { method: "POST", path: "/api/chats", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Disposable Session", kind: "practice" }) },
 	});
-	assert.deepEqual(
-		normalizeSseEvents(h, "api", parseSseStream(turnOut.apiRes.text)),
-		normalizeSseEvents(h, "next", parseSseStream(turnOut.nextRes.text)),
-		"POST /api/chat SSE stream mismatch",
-	);
-	await runParityRequest(h, {
-		label: "row 14 GET /api/chats/[id]/stream (settled)",
-		pattern: "/api/chats/[id]/stream",
-		expectedStatus: 200,
-		request: (side) => ({ method: "GET", path: `/api/chats/${teachIds[side]}/stream` }),
-	});
-	await runDismissAndSteerChecks(h, teachIds);
-}
-
-async function runDismissAndSteerChecks(h: ParityHarness, teachIds: Record<ServerSide, string>): Promise<void> {
-	await runParityRequest(h, {
-		label: "row 5 POST /api/chats/[id]/dismiss (no active problem)",
-		pattern: "/api/chats/[id]/dismiss",
-		isWrite: true,
-		expectedStatus: 400,
-		request: (side) => ({
-			method: "POST",
-			path: `/api/chats/${teachIds[side]}/dismiss`,
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ input: { type: "dismiss-problem", problemCallId: "call_none" } }),
-		}),
-	});
-	await runParityRequest(h, {
-		label: "row 13 POST /api/chats/[id]/steer (settled)",
-		pattern: "/api/chats/[id]/steer",
-		isWrite: true,
-		expectedStatus: 409,
-		request: (side) => ({
-			method: "POST",
-			path: `/api/chats/${teachIds[side]}/steer`,
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ input: { type: "steer", id: "steer_parity_1", text: "Wait" } }),
-		}),
-	});
-}
-
-async function runSideChatsAndEventsSuite(h: ParityHarness): Promise<void> {
-	await runParityRequest(h, {
-		label: "row 9 PUT /api/chats/[id]/settings (golden teach)",
-		isWrite: true,
-		expectedStatus: 200,
-		request: {
-			method: "PUT",
-			path: `/api/chats/${GOLDEN_TEACH_CHAT}/settings`,
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ model: { provider: "custom", id: "stub-model" }, thinkingLevel: "off" }),
-		},
-	});
-	const sideUrl = `/api/chats/${GOLDEN_TEACH_CHAT}/side-chats`;
-	await runParityRequest(h, { label: "row 10 GET /api/chats/[id]/side-chats", pattern: "/api/chats/[id]/side-chats", expectedStatus: 200, request: { method: "GET", path: sideUrl } });
-	const askBody = JSON.stringify({
-		anchor: { messageId: GOLDEN_PROSE_MSG_ID, partId: `${GOLDEN_PROSE_MSG_ID}-t0`, blockIndex: 0, blockText: "Parity quote" },
-		text: "Can you clarify this passage?",
-	});
-	h.coverage.record("/api/chats/[id]/side-chats", "POST");
-	h.stub.setSide("next");
-	const nextAsk = await sendWire(h.pair.next.port, { method: "POST", path: sideUrl, headers: { "Content-Type": "application/json" }, body: askBody });
-	h.stub.setSide("api");
-	const apiAsk = await sendWire(h.pair.api.port, { method: "POST", path: sideUrl, headers: { "Content-Type": "application/json" }, body: askBody });
-	assert.equal(apiAsk.status, 200);
-	assert.equal(nextAsk.status, 200);
-	compareResponseHeaders(h, nextAsk.headers, apiAsk.headers, { requestLabel: "row 10 POST side-chats" });
-	const nextEvents = parseNdjsonStream(nextAsk.text);
-	assert.deepEqual(
-		normalizeJsonValue(h, "api", parseNdjsonStream(apiAsk.text)),
-		normalizeJsonValue(h, "next", nextEvents),
-		"POST side-chats NDJSON mismatch",
-	);
-	const createdThreadId = (nextEvents[0] as { thread: { id: string } }).thread.id;
-	await waitSideChatsSettledOnBoth(h, GOLDEN_TEACH_CHAT);
-	assertDataDirsEqual(h, "row 10 POST side-chats");
-	await runSideChatThreadSubroutes(h, createdThreadId);
-	await runEventsQuickCheck(h);
-}
-
-async function runSideChatThreadSubroutes(h: ParityHarness, threadId: string): Promise<void> {
-	const threadUrl = `/api/chats/${GOLDEN_TEACH_CHAT}/side-chats/${threadId}`;
-	await runParityRequest(h, {
-		label: "row 11 PATCH /api/chats/[id]/side-chats/[threadId]",
-		pattern: "/api/chats/[id]/side-chats/[threadId]",
-		isWrite: true,
-		expectedStatus: 200,
-		request: { method: "PATCH", path: threadUrl, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ open: false }) },
-	});
-	const watchOut = await runParityRequest(h, {
-		label: "row 11 GET /api/chats/[id]/side-chats/[threadId]",
-		pattern: "/api/chats/[id]/side-chats/[threadId]",
-		expectedStatus: 200,
-		request: { method: "GET", path: threadUrl },
-	});
-	assert.deepEqual(
-		normalizeJsonValue(h, "api", parseNdjsonStream(watchOut.apiRes.text)),
-		normalizeJsonValue(h, "next", parseNdjsonStream(watchOut.nextRes.text)),
-	);
-	await runParityRequest(h, {
-		label: "row 12 POST /api/chats/[id]/side-chats/[threadId]/stop",
-		pattern: "/api/chats/[id]/side-chats/[threadId]/stop",
-		isWrite: true,
-		expectedStatus: 409,
-		request: { method: "POST", path: `${threadUrl}/stop` },
-	});
-}
-
-export async function pulseEventsBusPorts(nextPort: number, apiPort: number): Promise<void> {
-	const body = JSON.stringify({ sourceIds: ["src_event_pulse_noop"], folderIds: [], deleteSessions: false });
-	await Promise.all([
-		sendWire(nextPort, { method: "DELETE", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body }),
-		sendWire(apiPort, { method: "DELETE", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body }),
-	]);
-}
-
-export function pulseEventsBusOnBoth(h: ParityHarness): Promise<void> {
-	return pulseEventsBusPorts(h.pair.next.port, h.pair.api.port);
-}
-
-export async function openEventsWithPulse(
-	nextPort: number,
-	apiPort: number,
-	headers?: Record<string, string>,
-): Promise<{ nextEv: LiveStreamHandle; apiEv: LiveStreamHandle }> {
-	const nextConn = connectWireStream(nextPort, { method: "GET", path: "/api/events", headers });
-	const apiConn = connectWireStream(apiPort, { method: "GET", path: "/api/events", headers });
-	const apiEv = await apiConn.waitHeaders(5_000);
-	const pulser = setInterval(() => {
-		void pulseEventsBusPorts(nextPort, apiPort).catch(() => {});
-	}, 80);
-	try {
-		await pulseEventsBusPorts(nextPort, apiPort);
-		const nextEv = await nextConn.waitHeaders(5_000);
-		return { nextEv, apiEv };
-	} finally {
-		clearInterval(pulser);
-	}
-}
-
-async function runEventsQuickCheck(h: ParityHarness): Promise<void> {
-	h.coverage.record("/api/events", "GET");
-	const { nextEv, apiEv } = await openEventsWithPulse(h.pair.next.port, h.pair.api.port);
-	try {
-		compareResponseHeaders(h, nextEv.headers, apiEv.headers, { requestLabel: "row 18 GET /api/events" });
-	} finally {
-		nextEv.abort();
-		apiEv.abort();
-	}
+	const dispIds: Record<ServerSide, string> = {
+		next: (JSON.parse(disposable.nextRes.text) as { id: string }).id,
+		api: (JSON.parse(disposable.apiRes.text) as { id: string }).id,
+	};
+	await runChatItemMutations(h, teachIds, dispIds);
+	return teachIds;
 }
 
 export async function runRoutesGroupB(h: ParityHarness): Promise<Record<ServerSide, string>> {
