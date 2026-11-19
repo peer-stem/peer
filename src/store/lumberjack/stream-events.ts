@@ -14,6 +14,8 @@ export interface ParsedMutationBatch {
 	paths: string[];
 }
 
+const REPLAY_RING_CAPACITY = 1024n;
+
 function parseBigIntField(yaml: string, key: string): bigint {
 	const re = new RegExp(`^${key}:\\s*([0-9]+)`, "m");
 	const match = re.exec(yaml);
@@ -54,55 +56,122 @@ export function pollLumberJackMutations(forest: LumberJackForest, cursor: Stream
 	return { status: res.status, epoch, oldest, maxSequence: maxSeq, paths };
 }
 
-function dispatchPathNotification(mutatedPath: string): void {
+type DispatchedStreamEvent =
+	| { type: "record-changed"; chatId: string }
+	| { type: "sources-changed" | "activity-changed" | "jobs-changed" };
+
+function classifyMutatedPath(mutatedPath: string): { key: string; event: DispatchedStreamEvent } | null {
 	const rel = normalizeMutatedPath(mutatedPath);
 	if (rel.startsWith("sessions/")) {
 		const chatId = rel.split("/")[1];
-		if (chatId) emit("record-changed", { chatId });
-	} else if (rel.startsWith("knowledge/sources")) {
-		emit("sources-changed", {});
-	} else if (rel.startsWith("knowledge")) {
-		emit("activity-changed", {});
-	} else if (rel.startsWith("jobs/")) {
-		emit("jobs-changed", {});
+		return chatId ? { key: `record-changed:${chatId}`, event: { type: "record-changed", chatId } } : null;
 	}
+	if (rel.startsWith("knowledge/sources") || rel === "config/source-organization") {
+		return { key: "sources-changed", event: { type: "sources-changed" } };
+	}
+	if (rel.startsWith("knowledge")) {
+		return { key: "activity-changed", event: { type: "activity-changed" } };
+	}
+	if (rel.startsWith("jobs/")) {
+		return { key: "jobs-changed", event: { type: "jobs-changed" } };
+	}
+	return null;
+}
+
+function dispatchBatchNotifications(forest: LumberJackForest, paths: readonly string[]): void {
+	const uniqueKeys = new Map<string, DispatchedStreamEvent>();
+	for (const mutatedPath of paths) {
+		const mapped = classifyMutatedPath(mutatedPath);
+		if (!mapped || uniqueKeys.has(mapped.key)) continue;
+		uniqueKeys.set(mapped.key, mapped.event);
+	}
+	for (const [key, event] of uniqueKeys) {
+		if (forest.consumeStoreEmittedEvent?.(key)) continue;
+		if (event.type === "record-changed") {
+			emit("record-changed", { chatId: event.chatId });
+		} else {
+			emit(event.type, {});
+		}
+	}
+}
+
+interface BridgeCursorState {
+	cursor: StreamPollCursor;
+	awaitingSeedOffset: boolean;
+}
+
+function syncInitialCursorToHead(forest: LumberJackForest): BridgeCursorState {
+	if (!forest.isOpen) return { cursor: { epoch: 0n, after: 0n }, awaitingSeedOffset: false };
+	try {
+		const first = pollLumberJackMutations(forest, { epoch: 0n, after: 0n });
+		if (first.status !== LJ_STATUS.GAP) {
+			return {
+				cursor: { epoch: first.epoch, after: first.maxSequence },
+				awaitingSeedOffset: first.maxSequence === 0n && first.oldest === 0n,
+			};
+		}
+		const resumeAfter = first.oldest > 0n ? first.oldest - 1n : 0n;
+		const second = pollLumberJackMutations(forest, { epoch: first.epoch, after: resumeAfter });
+		const headAfter = second.maxSequence > resumeAfter ? second.maxSequence : resumeAfter;
+		return { cursor: { epoch: second.epoch || first.epoch, after: headAfter }, awaitingSeedOffset: false };
+	} catch {
+		return { cursor: { epoch: 0n, after: 0n }, awaitingSeedOffset: false };
+	}
+}
+
+function handleGapPoll(forest: LumberJackForest, state: BridgeCursorState, batch: ParsedMutationBatch): ParsedMutationBatch {
+	const resumeAfter = batch.oldest > 0n ? batch.oldest - 1n : 0n;
+	const catchUp = pollLumberJackMutations(forest, { epoch: batch.epoch, after: resumeAfter });
+	const nextAfter = catchUp.maxSequence > resumeAfter ? catchUp.maxSequence : resumeAfter;
+	const sameEpoch = state.cursor.epoch === 0n || batch.epoch === state.cursor.epoch;
+	const isPostReopenSeed =
+		state.awaitingSeedOffset && sameEpoch && nextAfter - resumeAfter < REPLAY_RING_CAPACITY;
+	state.cursor = { epoch: batch.epoch, after: nextAfter };
+	state.awaitingSeedOffset = false;
+	if (isPostReopenSeed) {
+		dispatchBatchNotifications(forest, catchUp.paths);
+		return catchUp;
+	}
+	emit("chats-changed", {});
+	emit("sources-changed", {});
+	return batch;
 }
 
 export function startLumberJackStreamBridge(
 	forest: LumberJackForest,
 	intervalMs = 250,
 ): { stop(): void; pollOnce(): ParsedMutationBatch } {
-	let cursor: StreamPollCursor = { epoch: 0n, after: 0n };
+	const state = syncInitialCursorToHead(forest);
+	const detachBridge = forest.registerStreamBridge?.() ?? (() => {});
+	let stopped = false;
+
 	const pollOnce = (): ParsedMutationBatch => {
 		if (!forest.isOpen) {
-			return { status: LJ_STATUS.CLOSED, epoch: cursor.epoch, oldest: 0n, maxSequence: cursor.after, paths: [] };
+			return { status: LJ_STATUS.CLOSED, epoch: state.cursor.epoch, oldest: 0n, maxSequence: state.cursor.after, paths: [] };
 		}
-		const batch = pollLumberJackMutations(forest, cursor);
-		if (batch.status === LJ_STATUS.GAP) {
-			cursor = { epoch: batch.epoch, after: batch.oldest > 0n ? batch.oldest - 1n : 0n };
-			emit("chats-changed", {});
-			emit("sources-changed", {});
-			return batch;
+		const batch = pollLumberJackMutations(forest, state.cursor);
+		if (batch.status === LJ_STATUS.GAP) return handleGapPoll(forest, state, batch);
+		if (batch.maxSequence > state.cursor.after) {
+			state.cursor = { epoch: batch.epoch, after: batch.maxSequence };
+			state.awaitingSeedOffset = false;
+		} else {
+			state.cursor = { epoch: batch.epoch, after: state.cursor.after };
 		}
-		const nextAfter = batch.maxSequence > cursor.after ? batch.maxSequence : cursor.after;
-		cursor = { epoch: batch.epoch, after: nextAfter };
-		for (const p of batch.paths) {
-			dispatchPathNotification(p);
-		}
+		dispatchBatchNotifications(forest, batch.paths);
 		return batch;
 	};
+
+	const stop = (): void => {
+		if (stopped) return;
+		stopped = true;
+		clearInterval(timer);
+		detachClose();
+		detachBridge();
+	};
 	const timer = setInterval(() => {
-		try {
-			pollOnce();
-		} catch (err) {
-			console.error("[lumberjack-stream] poll error:", err);
-		}
+		try { pollOnce(); } catch (err) { console.error("[lumberjack-stream] poll error:", err); }
 	}, intervalMs);
 	timer.unref();
-	return {
-		pollOnce,
-		stop() {
-			clearInterval(timer);
-		},
-	};
+	const detachClose = forest.onClose?.(stop) ?? (() => {});
+	return { pollOnce, stop };
 }

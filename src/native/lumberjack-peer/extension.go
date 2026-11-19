@@ -18,9 +18,8 @@ import (
 )
 
 const (
-	peerSlotKey       = "peer_record"
-	peerRootLedgers   = "peer_ledgers"
-	maxObjectBytes    = 64 * 1024 * 1024
+	peerSlotKey     = "peer_record"
+	peerRootLedgers = "peer_ledgers"
 )
 
 var (
@@ -73,6 +72,12 @@ func (inst *peerInstance) Close(context.Context) error {
 	}
 	hostMu.Unlock()
 	return nil
+}
+
+func lookupHostByRootID(rootID string) extension.Host {
+	hostMu.RLock()
+	defer hostMu.RUnlock()
+	return hostsByRoot[rootID]
 }
 
 func dropCachedHandle(h uint64) {
@@ -151,8 +156,8 @@ func ic_lj_peer_exec(h C.lj_handle_t, req C.lj_cstr, reqLen C.int64_t, out **C.c
 		return C.LJ_CODEC
 	}
 	res, opSt, errMsg := dispatchPeerOp(host, env.Op, env.Payload)
-	if opSt != C.LJ_OK {
-		return writeError(out, outLen, opSt, errMsg)
+	if opSt != stOK {
+		return writeError(out, outLen, C.lj_status_t(opSt), errMsg)
 	}
 	return writeResponse(out, outLen, res)
 }

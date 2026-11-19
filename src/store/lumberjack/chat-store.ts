@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type {
 	ChatRecord,
 	ChatSettings,
@@ -13,30 +12,27 @@ import { CURRENT_CHAT_VERSION } from "../../core/contracts.ts";
 import { emit } from "../../core/events.ts";
 import type { LhMessage } from "../../core/native-messages.ts";
 import { activeProblemOf, danglingQuestionOf } from "../../core/native-messages.ts";
-import { phaseAt3Lh } from "../../core/phases.ts";
+import { phaseAt3Lh, type Phase3 } from "../../core/phases.ts";
 import type { ChatStore } from "../../core/ports.ts";
-import type { EntryWire, LumberJackForest, UpsertNodeInput } from "./binding.ts";
+import type { LumberJackForest, NodeSnapshot, UpsertNodeInput } from "./binding.ts";
+import {
+	appendCanonicalExtractionUsage,
+	appendCanonicalTurnUsage,
+	readCanonicalSessionEvents,
+	syncSessionMainEntries,
+	syncSessionSideChatEvents,
+} from "./chat-events.ts";
+import { hydrateSessionImages, storeSessionImageObject, type StoredImageRef } from "./chat-images.ts";
 
-interface StoredImageRef {
-	mimeType: ImageSnapshot["mimeType"];
-	sha256: string;
-	width: number;
-	height: number;
-}
-
-interface SessionSlotRecord {
+interface SessionHeaderSlot {
 	version: number;
 	id: string;
 	title: string;
 	createdAt: string;
 	updatedAt: string;
 	kind?: ChatRecord["kind"];
-	messages: LhMessage[];
 	tree?: PlanTree;
-	turns?: TurnUsage[];
-	extractions?: ExtractionRunUsage[];
 	settings?: ChatSettings;
-	sideChats?: SideChatThread[];
 	imageRefs?: Record<string, StoredImageRef>;
 }
 
@@ -45,57 +41,35 @@ export interface LumberJackChatStore extends ChatStore {
 }
 
 const VALID_ID_RE = /^[A-Za-z0-9_-]+$/;
-const SHA256_RE = /^[a-f0-9]{64}$/;
 const isValidId = (v: unknown): v is string => typeof v === "string" && VALID_ID_RE.test(v);
-
-function normalizeSessionHeader(slot: { title?: unknown; createdAt?: unknown; updatedAt?: unknown }): {
-	title: string;
-	createdAt: string;
-	updatedAt: string;
-} {
-	const createdAt = typeof slot.createdAt === "string" ? slot.createdAt : "";
-	const updatedAt = typeof slot.updatedAt === "string" ? slot.updatedAt : createdAt;
-	const title = typeof slot.title === "string" && slot.title.trim() ? slot.title : "Untitled session";
-	return { title, createdAt, updatedAt };
-}
 
 function sessionPathFor(id: string): string {
 	if (!isValidId(id)) throw new Error(`Invalid chat id: ${id}`);
 	return `sessions/${id}`;
 }
 
-function rankForIndex(index: number): string {
-	return String(index).padStart(8, "0");
+function normalizeHeaderFields(raw: { title?: unknown; createdAt?: unknown; updatedAt?: unknown }): {
+	title: string;
+	createdAt: string;
+	updatedAt: string;
+} {
+	const createdAt = typeof raw.createdAt === "string" ? raw.createdAt : "";
+	const updatedAt = typeof raw.updatedAt === "string" ? raw.updatedAt : createdAt;
+	const title = typeof raw.title === "string" && raw.title.trim() ? raw.title : "Untitled session";
+	return { title, createdAt, updatedAt };
 }
 
-function appendSideThreadEntries(entries: EntryWire[], thread: SideChatThread): void {
-	const anchorId = thread.anchor?.messageId ?? (thread as { anchorMessageId?: string }).anchorMessageId ?? "";
-	for (let j = 0; j < thread.messages.length; j++) {
-		const sm = thread.messages[j]!;
-		entries.push({
-			id: sm.id || `${thread.id}_${j}`,
-			parent_id: anchorId,
-			rank: `${thread.id}:${rankForIndex(j)}`,
-			content: sm,
-			metadata: { channel: "side-chat", threadId: thread.id, role: sm.role },
-		});
-	}
-}
-
-function buildSessionEntries(messages: LhMessage[], sideChats?: SideChatThread[]): EntryWire[] {
-	const entries: EntryWire[] = [];
-	for (let i = 0; i < messages.length; i++) {
-		const msg = messages[i]!;
-		entries.push({
-			id: msg.id || `msg_${i}`,
-			rank: rankForIndex(i),
-			content: msg,
-			metadata: { channel: "main", role: (msg as { role?: string }).role ?? "unknown" },
-		});
-	}
-	if (!sideChats) return entries;
-	for (const thread of sideChats) appendSideThreadEntries(entries, thread);
-	return entries;
+function deriveSummaryMetadata(header: SessionHeaderSlot, messages: readonly LhMessage[]): Record<string, unknown> {
+	return {
+		title: header.title,
+		kind: header.kind ?? "teach",
+		createdAt: header.createdAt,
+		updatedAt: header.updatedAt,
+		messageCount: messages.length,
+		phase: phaseAt3Lh(messages),
+		pendingQuestion: danglingQuestionOf(messages) !== null,
+		pendingProblem: activeProblemOf(messages) !== null,
+	};
 }
 
 function buildPlanDagUpserts(chatId: string, tree: PlanTree): UpsertNodeInput[] {
@@ -107,7 +81,7 @@ function buildPlanDagUpserts(chatId: string, tree: PlanTree): UpsertNodeInput[] 
 		list.push(`plans/${chatId}/${edge.from}`);
 		prereqsByTarget.set(edge.to, list);
 	}
-	const validNodes = (Array.isArray(tree.nodes) ? tree.nodes : []).filter((planNode) => isValidId(planNode?.id));
+	const validNodes = (Array.isArray(tree.nodes) ? tree.nodes : []).filter((n) => isValidId(n?.id));
 	return validNodes.map((planNode) => ({
 		path: `plans/${chatId}/${planNode.id}`,
 		type: "leaf" as const,
@@ -124,98 +98,78 @@ function buildPlanDagUpserts(chatId: string, tree: PlanTree): UpsertNodeInput[] 
 	}));
 }
 
-function hydrateImages(
+function readHeaderNode(forest: LumberJackForest, id: string): { snap: NodeSnapshot; header: SessionHeaderSlot } | null {
+	if (!isValidId(id)) return null;
+	const snap = forest.getNode(`sessions/${id}`);
+	if (!snap?.slot || typeof snap.slot !== "object") return null;
+	const header = snap.slot as SessionHeaderSlot;
+	if (typeof header.version === "number" && header.version > CURRENT_CHAT_VERSION) return null;
+	return { snap, header };
+}
+
+function requireHeader(forest: LumberJackForest, id: string): SessionHeaderSlot {
+	const found = readHeaderNode(forest, id);
+	if (!found) throw new Error(`Chat not found: ${id}`);
+	return found.header;
+}
+
+function writeSessionHeader(
 	forest: LumberJackForest,
-	refs?: Record<string, StoredImageRef>,
-): Record<string, ImageSnapshot> | undefined {
-	if (!refs) return undefined;
-	const keys = Object.keys(refs);
-	if (keys.length === 0) return undefined;
-	const out: Record<string, ImageSnapshot> = {};
-	for (const snapshotId of keys) {
-		const ref = refs[snapshotId]!;
-		const obj = forest.getObject(ref.sha256);
-		if (obj.found && obj.data_base64 !== undefined) {
-			out[snapshotId] = { mimeType: ref.mimeType, data: obj.data_base64, width: ref.width, height: ref.height };
-		}
-	}
-	return Object.keys(out).length > 0 ? out : undefined;
+	header: SessionHeaderSlot,
+	messagesForMeta?: readonly LhMessage[],
+): void {
+	const stamped: SessionHeaderSlot = { ...header, version: CURRENT_CHAT_VERSION };
+	const metadata = messagesForMeta
+		? deriveSummaryMetadata(stamped, messagesForMeta)
+		: { title: stamped.title, kind: stamped.kind ?? "teach", createdAt: stamped.createdAt, updatedAt: stamped.updatedAt };
+	forest.upsertNode({
+		path: sessionPathFor(header.id),
+		type: "leaf",
+		kind: "session",
+		metadata,
+		slot: stamped,
+	});
 }
 
-function slotToChatRecord(forest: LumberJackForest, slot: SessionSlotRecord): ChatRecord | null {
-	if (typeof slot.version === "number" && slot.version > CURRENT_CHAT_VERSION) return null;
-	const images = hydrateImages(forest, slot.imageRefs);
-	const { imageRefs: _refs, ...rest } = slot;
-	return images ? { ...rest, imageSnapshots: images } : rest;
+function assembleChatRecord(forest: LumberJackForest, header: SessionHeaderSlot): ChatRecord {
+	const nodePath = sessionPathFor(header.id);
+	const events = readCanonicalSessionEvents(forest, nodePath);
+	const images = hydrateSessionImages(forest, header.imageRefs);
+	const { imageRefs: _refs, ...restHeader } = header;
+	return {
+		...restHeader,
+		messages: events.messages,
+		...(events.sideChats ? { sideChats: events.sideChats } : {}),
+		...(events.turns ? { turns: events.turns } : {}),
+		...(events.extractions ? { extractions: events.extractions } : {}),
+		...(images ? { imageSnapshots: images } : {}),
+	};
 }
 
-function toChatSummary(slot: SessionSlotRecord): ChatSummary | null {
-	if (typeof slot.version === "number" && slot.version > CURRENT_CHAT_VERSION) return null;
+function summaryFromNode(forest: LumberJackForest, snap: NodeSnapshot): ChatSummary | null {
+	if (!snap.slot || typeof snap.slot !== "object") return null;
+	const header = snap.slot as SessionHeaderSlot;
+	if (typeof header.version === "number" && header.version > CURRENT_CHAT_VERSION) return null;
 	try {
-		const { title, createdAt, updatedAt } = normalizeSessionHeader(slot);
+		const { title, createdAt, updatedAt } = normalizeHeaderFields(header);
+		const meta = snap.metadata ?? {};
+		const hasFastMeta = typeof meta.messageCount === "number" && typeof meta.phase === "string";
+		const messages = hasFastMeta ? null : readCanonicalSessionEvents(forest, snap.path).messages;
 		return {
-			id: slot.id,
+			id: header.id,
 			title,
 			createdAt,
 			updatedAt,
-			kind: slot.kind ?? "teach",
-			messageCount: slot.messages.length,
-			phase: phaseAt3Lh(slot.messages),
-			pendingQuestion: danglingQuestionOf(slot.messages) !== null,
-			pendingProblem: activeProblemOf(slot.messages) !== null,
-			...(slot.settings ? { settings: slot.settings } : {}),
+			kind: header.kind ?? "teach",
+			messageCount: hasFastMeta ? (meta.messageCount as number) : messages!.length,
+			phase: hasFastMeta ? (meta.phase as Phase3) : phaseAt3Lh(messages!),
+			pendingQuestion: hasFastMeta ? Boolean(meta.pendingQuestion) : danglingQuestionOf(messages!) !== null,
+			pendingProblem: hasFastMeta ? Boolean(meta.pendingProblem) : activeProblemOf(messages!) !== null,
+			...(header.settings ? { settings: header.settings } : {}),
 		};
 	} catch {
 		return null;
 	}
-}
-
-function readSessionSlot(forest: LumberJackForest, id: string): SessionSlotRecord | null {
-	if (!isValidId(id)) return null;
-	const snap = forest.getNode(`sessions/${id}`);
-	if (!snap?.slot || typeof snap.slot !== "object") return null;
-	const slot = snap.slot as SessionSlotRecord;
-	if (typeof slot.version === "number" && slot.version > CURRENT_CHAT_VERSION) return null;
-	return slot;
-}
-
-function requireSessionSlot(forest: LumberJackForest, id: string): SessionSlotRecord {
-	const slot = readSessionSlot(forest, id);
-	if (!slot) throw new Error(`Chat not found: ${id}`);
-	return slot;
-}
-
-function writeSessionSlot(forest: LumberJackForest, slot: SessionSlotRecord, syncEntries = false): void {
-	const stamped: SessionSlotRecord = { ...slot, version: CURRENT_CHAT_VERSION };
-	const nodePath = sessionPathFor(slot.id);
-	forest.upsertNode({
-		path: nodePath,
-		type: "leaf",
-		kind: "session",
-		metadata: { title: stamped.title, kind: stamped.kind ?? "teach", updatedAt: stamped.updatedAt },
-		slot: stamped,
-	});
-	if (syncEntries) {
-		forest.setEntries(nodePath, "main", buildSessionEntries(stamped.messages, stamped.sideChats));
-	}
-}
-
-function storeImageOnSlot(
-	forest: LumberJackForest,
-	slot: SessionSlotRecord,
-	snapshotId: string,
-	image: ImageSnapshot,
-): boolean {
-	const digest = createHash("sha256").update(Buffer.from(image.data, "base64")).digest("hex");
-	if (!SHA256_RE.test(snapshotId) || digest !== snapshotId) {
-		throw new Error("Invalid image snapshot identity");
-	}
-	const receipt = forest.putObject(snapshotId, image.mimeType, image.data);
-	slot.imageRefs = {
-		...slot.imageRefs,
-		[snapshotId]: { mimeType: image.mimeType, sha256: snapshotId, width: image.width, height: image.height },
-	};
-	return receipt.existed;
 }
 
 function importFullChatRecord(
@@ -226,19 +180,35 @@ function importFullChatRecord(
 	if (typeof record.version === "number" && record.version > CURRENT_CHAT_VERSION) {
 		return { imported: false, objectsDeduplicated: 0, objectsStored: 0 };
 	}
-	const { imageSnapshots, ...rest } = record;
-	const slot: SessionSlotRecord = { ...rest, ...normalizeSessionHeader(record), version: CURRENT_CHAT_VERSION };
+	const { title, createdAt, updatedAt } = normalizeHeaderFields(record);
+	let imageRefs: Record<string, StoredImageRef> | undefined;
 	let objectsDeduplicated = 0;
 	let objectsStored = 0;
-	if (imageSnapshots) {
-		for (const [snapId, img] of Object.entries(imageSnapshots)) {
-			if (storeImageOnSlot(forest, slot, snapId, img)) objectsDeduplicated++;
-			else objectsStored++;
-		}
+	for (const [snapId, img] of Object.entries(record.imageSnapshots ?? {})) {
+		const stored = storeSessionImageObject(forest, imageRefs, snapId, img);
+		imageRefs = stored.nextRefs;
+		if (stored.existed) objectsDeduplicated++;
+		else objectsStored++;
 	}
-	writeSessionSlot(forest, slot, true);
-	if (slot.tree && Array.isArray(slot.tree.nodes) && slot.tree.nodes.length > 0) {
-		const dag = buildPlanDagUpserts(slot.id, slot.tree);
+	const header: SessionHeaderSlot = {
+		version: CURRENT_CHAT_VERSION,
+		id: record.id,
+		title,
+		createdAt,
+		updatedAt,
+		...(record.kind ? { kind: record.kind } : {}),
+		...(record.tree ? { tree: record.tree } : {}),
+		...(record.settings ? { settings: record.settings } : {}),
+		...(imageRefs ? { imageRefs } : {}),
+	};
+	const nodePath = sessionPathFor(record.id);
+	writeSessionHeader(forest, header, record.messages);
+	syncSessionMainEntries(forest, nodePath, record.messages);
+	if (record.sideChats?.length) syncSessionSideChatEvents(forest, nodePath, record.sideChats);
+	for (const t of record.turns ?? []) appendCanonicalTurnUsage(forest, nodePath, t);
+	for (const ex of record.extractions ?? []) appendCanonicalExtractionUsage(forest, nodePath, ex);
+	if (header.tree && Array.isArray(header.tree.nodes) && header.tree.nodes.length > 0) {
+		const dag = buildPlanDagUpserts(header.id, header.tree);
 		if (dag.length > 0) forest.batchUpsertNodes(dag);
 	}
 	return { imported: true, objectsDeduplicated, objectsStored };
@@ -246,18 +216,20 @@ function importFullChatRecord(
 
 function createChatInForest(forest: LumberJackForest, title: string, kind?: "practice"): ChatRecord {
 	const now = new Date().toISOString();
-	const slot: SessionSlotRecord = {
+	const header: SessionHeaderSlot = {
 		version: CURRENT_CHAT_VERSION,
 		id: `chat_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 8)}`,
 		title: title.trim() || "Untitled session",
 		createdAt: now,
 		updatedAt: now,
-		messages: [],
 		...(kind === "practice" ? { kind: "practice" as const } : {}),
 	};
-	writeSessionSlot(forest, slot, true);
+	const nodePath = sessionPathFor(header.id);
+	writeSessionHeader(forest, header, []);
+	syncSessionMainEntries(forest, nodePath, []);
+	forest.noteStoreEmittedEvent(`record-changed:${header.id}`);
 	emit("chats-changed", {});
-	return slot;
+	return { ...header, messages: [] };
 }
 
 function deleteChatFromForest(forest: LumberJackForest, id: string): boolean {
@@ -267,66 +239,55 @@ function deleteChatFromForest(forest: LumberJackForest, id: string): boolean {
 	}
 	forest.deleteNode(`plans/${id}`);
 	const deleted = forest.deleteNode(`sessions/${id}`);
-	if (deleted) emit("chats-changed", {});
+	if (deleted) {
+		forest.noteStoreEmittedEvent(`record-changed:${id}`);
+		emit("chats-changed", {});
+	}
 	return deleted;
 }
 
-function listSessionSummaries(forest: LumberJackForest): ChatSummary[] {
-	const summaries: ChatSummary[] = [];
-	for (const node of forest.listChildren("sessions")) {
-		const summary = node.slot ? toChatSummary(node.slot as SessionSlotRecord) : null;
-		if (summary) summaries.push(summary);
-	}
-	return summaries.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+function saveChatMessages(forest: LumberJackForest, id: string, messages: LhMessage[]): void {
+	const header = requireHeader(forest, id);
+	header.updatedAt = new Date().toISOString();
+	writeSessionHeader(forest, header, messages);
+	syncSessionMainEntries(forest, sessionPathFor(id), messages);
 }
 
-function saveSessionMessages(forest: LumberJackForest, id: string, messages: LhMessage[]): void {
-	const slot = requireSessionSlot(forest, id);
-	slot.messages = messages;
-	slot.updatedAt = new Date().toISOString();
-	writeSessionSlot(forest, slot, true);
+function saveChatImage(forest: LumberJackForest, id: string, snapshotId: string, image: ImageSnapshot): void {
+	const header = requireHeader(forest, id);
+	if (header.imageRefs?.[snapshotId]) return;
+	header.imageRefs = storeSessionImageObject(forest, header.imageRefs, snapshotId, image).nextRefs;
+	writeSessionHeader(forest, header);
 }
 
-function saveSessionTree(forest: LumberJackForest, id: string, tree: PlanTree): void {
-	const slot = requireSessionSlot(forest, id);
-	slot.tree = tree;
-	writeSessionSlot(forest, slot, false);
+function saveChatPlanTree(forest: LumberJackForest, id: string, tree: PlanTree): void {
+	const header = requireHeader(forest, id);
+	header.tree = tree;
+	writeSessionHeader(forest, header);
 	const dag = buildPlanDagUpserts(id, tree);
 	if (dag.length > 0) forest.batchUpsertNodes(dag);
 }
 
-function appendSessionTurnUsage(forest: LumberJackForest, id: string, entry: TurnUsage): void {
-	const slot = requireSessionSlot(forest, id);
-	if ((slot.turns ?? []).some((t) => t.id === entry.id)) return;
-	slot.turns = [...(slot.turns ?? []), entry];
-	writeSessionSlot(forest, slot, false);
-}
-
-function appendSessionExtractionUsage(forest: LumberJackForest, id: string, entry: ExtractionRunUsage): void {
-	const slot = requireSessionSlot(forest, id);
-	if ((slot.extractions ?? []).some((e) => e.startedAt === entry.startedAt)) return;
-	slot.extractions = [...(slot.extractions ?? []), entry];
-	writeSessionSlot(forest, slot, false);
-}
-
-function renameSessionInForest(forest: LumberJackForest, id: string, title: string): ChatRecord {
-	const slot = requireSessionSlot(forest, id);
-	slot.title = title.trim() || "Untitled session";
-	writeSessionSlot(forest, slot, false);
+function renameChatHeader(forest: LumberJackForest, id: string, title: string): ChatRecord {
+	const header = requireHeader(forest, id);
+	header.title = title.trim() || "Untitled session";
+	forest.noteStoreEmittedEvent(`record-changed:${id}`);
+	writeSessionHeader(forest, header);
 	emit("chats-changed", {});
-	return slotToChatRecord(forest, slot)!;
+	return assembleChatRecord(forest, header);
 }
 
-function updateSessionSideChats(
+function mutateSideChats(
 	forest: LumberJackForest,
 	id: string,
-	update: (current: SideChatThread[]) => SideChatThread[],
+	update: (threads: SideChatThread[]) => SideChatThread[],
 ): SideChatThread[] | null {
-	const slot = readSessionSlot(forest, id);
-	if (!slot) return null;
-	const next = update(slot.sideChats ?? []);
-	slot.sideChats = next;
-	writeSessionSlot(forest, slot, true);
+	const found = readHeaderNode(forest, id);
+	if (!found) return null;
+	const nodePath = sessionPathFor(id);
+	const current = readCanonicalSessionEvents(forest, nodePath).sideChats ?? [];
+	const next = update(current);
+	syncSessionSideChatEvents(forest, nodePath, next);
 	return next;
 }
 
@@ -334,28 +295,34 @@ export function createLumberJackChatStore(forest: LumberJackForest): LumberJackC
 	return {
 		createChat: (title, kind) => createChatInForest(forest, title, kind),
 		getChat: (id) => {
-			const slot = readSessionSlot(forest, id);
-			return slot ? slotToChatRecord(forest, slot) : null;
+			const found = readHeaderNode(forest, id);
+			return found ? assembleChatRecord(forest, found.header) : null;
 		},
-		listChats: () => listSessionSummaries(forest),
-		saveMessages: (id, messages) => saveSessionMessages(forest, id, messages),
-		saveImageSnapshot: (id, snapshotId, image) => {
-			const slot = requireSessionSlot(forest, id);
-			if (slot.imageRefs?.[snapshotId]) return;
-			storeImageOnSlot(forest, slot, snapshotId, image);
-			writeSessionSlot(forest, slot, false);
+		listChats: () =>
+			forest
+				.listChildren("sessions")
+				.map((snap) => summaryFromNode(forest, snap))
+				.filter((s): s is ChatSummary => s !== null)
+				.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "")),
+		saveMessages: (id, messages) => saveChatMessages(forest, id, messages),
+		saveImageSnapshot: (id, snapshotId, image) => saveChatImage(forest, id, snapshotId, image),
+		saveTree: (id, tree) => saveChatPlanTree(forest, id, tree),
+		appendTurnUsage: (id, entry) => {
+			requireHeader(forest, id);
+			appendCanonicalTurnUsage(forest, sessionPathFor(id), entry);
 		},
-		saveTree: (id, tree) => saveSessionTree(forest, id, tree),
-		appendTurnUsage: (id, entry) => appendSessionTurnUsage(forest, id, entry),
-		appendExtractionUsage: (id, entry) => appendSessionExtractionUsage(forest, id, entry),
+		appendExtractionUsage: (id, entry) => {
+			requireHeader(forest, id);
+			appendCanonicalExtractionUsage(forest, sessionPathFor(id), entry);
+		},
 		saveSettings: (id, settings) => {
-			const slot = requireSessionSlot(forest, id);
-			slot.settings = settings;
-			writeSessionSlot(forest, slot, false);
+			const header = requireHeader(forest, id);
+			header.settings = settings;
+			writeSessionHeader(forest, header);
 		},
-		renameChat: (id, title) => renameSessionInForest(forest, id, title),
+		renameChat: (id, title) => renameChatHeader(forest, id, title),
 		deleteChat: (id) => deleteChatFromForest(forest, id),
-		updateSideChats: (id, update) => updateSessionSideChats(forest, id, update),
+		updateSideChats: (id, update) => mutateSideChats(forest, id, update),
 		importChatRecord: (record) => importFullChatRecord(forest, record),
 	};
 }

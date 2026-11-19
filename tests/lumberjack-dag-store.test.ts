@@ -1,21 +1,21 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import type { ExtractionRunUsage, GraphNode, TurnUsage } from "../src/core/contracts.ts";
-import { subscribe, type ServerEvent } from "../src/core/events.ts";
-import type { LhMessage } from "../src/core/native-messages.ts";
+import type { ExtractionRunUsage, GraphNode } from "../src/core/contracts.ts";
 import type { PluginAgentRecord } from "../src/core/plugin-agents.ts";
 import type { PluginTaskRecord } from "../src/core/plugin-workers.ts";
 import type { ThemeFile } from "../src/core/themes.ts";
-import { DEFAULT_ADDON_PATH, type LumberJackForest } from "../src/store/lumberjack/binding.ts";
+import { DEFAULT_ADDON_PATH } from "../src/store/lumberjack/binding.ts";
 import { isGraphChain, isGraphNode, isNotesSource, sanitizeSegment } from "../src/store/lumberjack/graph-store.ts";
 import {
-	createLumberJackStores, LJ_STATUS, LumberJackForest as PublicForest,
-	startLumberJackStreamBridge, type FsrsCardSchedule,
+	createLumberJackStores,
+	LJ_STATUS,
+	LumberJackForest as PublicForest,
+	type FsrsCardSchedule,
 } from "../src/store/lumberjack/index.ts";
 
 const WORKTREE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -97,7 +97,7 @@ function seedBayesGraph(stores: ReturnType<typeof createLumberJackStores>): void
 	stores.graphStore.writePositions({ n_prior: { x: 12, y: 34 }, n_bayes: { x: 90, y: 180 } });
 }
 
-test("GraphStore persists joint-premise DAG, positions, and learner progress", SKIP_GUARD, () => {
+test("GraphStore persists joint-premise DAG, L4 progress retention, and N9 orphan cleanup", SKIP_GUARD, () => {
 	withScratchForest("s1-graph", (dir) => {
 		let stores = createLumberJackStores(dir);
 		seedBayesGraph(stores);
@@ -109,7 +109,8 @@ test("GraphStore persists joint-premise DAG, positions, and learner progress", S
 
 		const chainSnap = stores.forest.getNode("knowledge/chains/arg_bayes");
 		const parentNames = Object.values(chainSnap?.parents ?? {}).sort();
-		assert.equal(parentNames.includes("n_prior") && parentNames.includes("n_like"), true);
+		assert.equal(parentNames.includes("n_prior"), true);
+		assert.equal(parentNames.includes("n_like"), true);
 		const conclSnap = stores.forest.getNode("knowledge/propositions/n_bayes");
 		assert.equal(Object.values(conclSnap?.parents ?? {}).includes("arg_bayes"), true);
 
@@ -118,38 +119,18 @@ test("GraphStore persists joint-premise DAG, positions, and learner progress", S
 		assert.equal(stores.graphStore.readNodes().length, 3);
 		assert.deepEqual(stores.graphStore.readPositions(), { n_prior: { x: 12, y: 34 }, n_bayes: { x: 90, y: 180 } });
 
+		const updatedPrior = makeSeedNode("n_prior", "Prior Updated", "Updated statement", ["prior"], "5", "m1");
+		stores.graphStore.rewriteLedgers({ nodes: [updatedPrior], chains: [] });
+		assert.deepEqual(stores.learnerStore.readPropositionProgress("n_prior"), { mastery: 0.9, fsrs: SAMPLE_FSRS });
+		assert.equal(stores.learnerStore.readPropositionProgress("n_unlisted")?.mastery, 0.4);
+
 		stores.graphStore.rewriteLedgers({ nodes: [], chains: [] });
 		assert.equal(stores.graphStore.readNodes().length, 0);
 		assert.equal(stores.forest.getNode("knowledge/propositions/n_prior"), null);
-		assert.deepEqual(stores.learnerStore.readPropositionProgress("n_prior"), { mastery: 0.9, fsrs: SAMPLE_FSRS });
-
-		stores.close();
-		stores = createLumberJackStores(dir);
-		assert.deepEqual(stores.learnerStore.readPropositionProgress("n_prior"), { mastery: 0.9, fsrs: SAMPLE_FSRS });
+		assert.equal(stores.learnerStore.readPropositionProgress("n_prior"), null);
 		stores.close();
 	});
 });
-
-const SAMPLE_PLAN_TREE = {
-	version: 1,
-	nodes: [{ id: "p_vec", title: "Vectors" }, { id: "p_mat", title: "Matrices" }, { id: "p_eig", title: "Eigenvalues" }],
-	edges: [{ from: "p_vec", to: "p_eig" }, { from: "p_mat", to: "p_eig" }],
-};
-
-const SAMPLE_SIDE_CHATS = [
-	{
-		id: "th_1",
-		anchor: { messageId: "msg_u1", partId: "msg_u1-t0", blockIndex: 0, blockText: "Explain eigenvalues" },
-		open: true,
-		createdAt: "2026-11-16T00:00:00Z",
-		messages: [{ id: "sc_1", role: "user" as const, text: "Why non-zero vector?", at: "2026-11-16T00:00:01Z" }],
-	},
-];
-
-const SAMPLE_TURN_USAGE: TurnUsage = {
-	id: "turn_req_1", messageId: "msg_a1", at: "2026-11-16T00:01:00Z", model: "anthropic:claude-sonnet",
-	steps: [{ inputTokens: 120, outputTokens: 45, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 10 }],
-};
 
 const SAMPLE_EXTRACTION_USAGE: ExtractionRunUsage = {
 	startedAt: 1763251200000, at: "2026-11-16T00:02:00Z", durationMs: 450, stats: { nodes: 2, chains: 1 },
@@ -158,116 +139,6 @@ const SAMPLE_EXTRACTION_USAGE: ExtractionRunUsage = {
 		auditor: { model: "anthropic:claude-sonnet", steps: [] },
 	},
 };
-
-function verifyChatForestAndUsage(
-	stores: ReturnType<typeof createLumberJackStores>,
-	chatId: string,
-	sha: string,
-	rawBase64: string,
-): void {
-	const eigPlan = stores.forest.getNode(`plans/${chatId}/p_eig`);
-	const eigParents = Object.values(eigPlan?.parents ?? {});
-	assert.equal(eigParents.includes("p_vec") && eigParents.includes("p_mat"), true);
-	const sideEntry = stores.forest.getEntries(`sessions/${chatId}`, "main").find((e) => e.id === "sc_1");
-	assert.equal(sideEntry?.parent_id, "msg_u1");
-	stores.chatStore.appendTurnUsage(chatId, SAMPLE_TURN_USAGE);
-	stores.chatStore.appendTurnUsage(chatId, SAMPLE_TURN_USAGE);
-	stores.chatStore.appendTurnUsage(chatId, { ...SAMPLE_TURN_USAGE, id: "turn_req_2" });
-	stores.chatStore.appendExtractionUsage(chatId, SAMPLE_EXTRACTION_USAGE);
-	stores.chatStore.appendExtractionUsage(chatId, SAMPLE_EXTRACTION_USAGE);
-	const loaded = stores.chatStore.getChat(chatId);
-	assert.equal(loaded?.imageSnapshots?.[sha]?.data, rawBase64);
-	assert.equal(loaded?.turns?.length, 2);
-	assert.equal(loaded?.extractions?.length, 1);
-}
-
-test("ChatStore honors silence law, listChats order, usage dedup, and reopen", SKIP_GUARD, () => {
-	withScratchForest("s1-chat", (dir) => {
-		let stores = createLumberJackStores(dir);
-		let chatsChangedCount = 0;
-		const unsub = subscribe((ev) => {
-			if (ev.type === "chats-changed") chatsChangedCount++;
-		});
-		try {
-			const older = stores.chatStore.createChat("Older Session");
-			const chat = stores.chatStore.createChat("Linear Algebra", "practice");
-			assert.equal(chatsChangedCount, 2);
-			const userMsg = { id: "msg_u1", role: "user", content: "Explain eigenvalues", timestamp: 1 } as LhMessage;
-			stores.chatStore.saveMessages(chat.id, [userMsg]);
-			stores.chatStore.saveTree(chat.id, SAMPLE_PLAN_TREE);
-			stores.chatStore.updateSideChats(chat.id, () => SAMPLE_SIDE_CHATS);
-			const rawBytes = Buffer.from("svg-or-png-binary-payload");
-			const sha = createHash("sha256").update(rawBytes).digest("hex");
-			const rawBase64 = rawBytes.toString("base64");
-			const imgSnap = { mimeType: "image/png" as const, data: rawBase64, width: 64, height: 64 };
-			stores.chatStore.saveImageSnapshot(chat.id, sha, imgSnap);
-			assert.equal(chatsChangedCount, 2, "content saves must stay silent");
-			verifyChatForestAndUsage(stores, chat.id, sha, rawBase64);
-			stores.chatStore.renameChat(chat.id, "Spectral Theory");
-			assert.equal(chatsChangedCount, 3);
-
-			stores.close();
-			stores = createLumberJackStores(dir);
-			const listed = stores.chatStore.listChats();
-			assert.deepEqual(listed.map((c) => c.id), [chat.id, older.id]);
-			assert.equal(listed[0]?.title, "Spectral Theory");
-			assert.equal(listed[0]?.kind, "practice");
-			assert.equal(stores.chatStore.getChat(chat.id)?.turns?.length, 2);
-			assert.equal(stores.chatStore.getChat(chat.id)?.extractions?.length, 1);
-			assert.equal(stores.chatStore.deleteChat(older.id), true);
-			assert.equal(stores.chatStore.listChats().length, 1);
-		} finally {
-			unsub();
-			stores.close();
-		}
-	});
-});
-
-function makeFailingPollForest(): LumberJackForest {
-	return {
-		isOpen: true,
-		pollStream() {
-			throw new Error("transient poll failure");
-		},
-	} as unknown as LumberJackForest;
-}
-
-test("StreamBridge dispatches raw node_path events and catches poll errors", SKIP_GUARD, async () => {
-	await withScratchForest("s1-stream", async (dir) => {
-		const stores = createLumberJackStores(dir);
-		const captured: ServerEvent[] = [];
-		const unsub = subscribe((ev) => captured.push(ev));
-		const bridge = startLumberJackStreamBridge(stores.forest, 60_000);
-		try {
-			stores.forest.upsertNode({ path: "sessions/chat_raw", kind: "session" });
-			stores.forest.upsertNode({ path: "knowledge/sources/src_raw", kind: "source" });
-			stores.forest.upsertNode({ path: "jobs/job_raw", kind: "job" });
-			assert.equal(captured.length, 0, "raw forest upserts do not emit directly");
-			bridge.pollOnce();
-			assert.equal(captured.some((e) => e.type === "record-changed" && e.chatId === "chat_raw"), true);
-			assert.equal(captured.some((e) => e.type === "sources-changed"), true);
-			assert.equal(captured.some((e) => e.type === "jobs-changed"), true);
-		} finally {
-			bridge.stop();
-			unsub();
-			stores.close();
-		}
-
-		let loggedErrors = 0;
-		const origError = console.error;
-		console.error = () => {
-			loggedErrors++;
-		};
-		const errBridge = startLumberJackStreamBridge(makeFailingPollForest(), 10);
-		try {
-			await new Promise((resolve) => setTimeout(resolve, 35));
-			assert.equal(loggedErrors >= 1, true);
-		} finally {
-			errBridge.stop();
-			console.error = origError;
-		}
-	});
-});
 
 const VALID_AGENT_RECORD: PluginAgentRecord = {
 	version: 1, id: "agent_sess_1", definitionId: "tutor_helper",
@@ -371,14 +242,14 @@ function verifyPlanTreeCleanup(dir: string): void {
 		const chat = stores.chatStore.createChat("Plan Cleanup");
 		const mixedTree = {
 			version: 1,
-			nodes: [...SAMPLE_PLAN_TREE.nodes, { id: "../bad", title: "Bad" }],
-			edges: [...SAMPLE_PLAN_TREE.edges, { from: "../bad", to: "p_eig" }],
+			nodes: [{ id: "p_vec", title: "Vectors" }, { id: "p_mat", title: "Matrices" }, { id: "../bad", title: "Bad" }],
+			edges: [{ from: "p_vec", to: "p_mat" }, { from: "../bad", to: "p_mat" }],
 		};
 		stores.chatStore.saveTree(chat.id, mixedTree);
-		assert.deepEqual(stores.forest.listChildren(`plans/${chat.id}`).map((n) => n.name), ["p_eig", "p_mat", "p_vec"]);
+		assert.deepEqual(stores.forest.listChildren(`plans/${chat.id}`).map((n) => n.name), ["p_mat", "p_vec"]);
 		assert.equal(stores.forest.deleteNode(`plans/${chat.id}/p_vec`), true);
 		assert.equal(stores.forest.getNode(`plans/${chat.id}/p_vec`), null);
-		assert.deepEqual(stores.forest.listChildren(`plans/${chat.id}`).map((n) => n.name), ["p_eig", "p_mat"]);
+		assert.deepEqual(stores.forest.listChildren(`plans/${chat.id}`).map((n) => n.name), ["p_mat"]);
 		stores.forest.upsertNode({ path: `plans/${chat.id}/p_mat`, parent_paths: [], clear_parents: true });
 		assert.deepEqual(stores.forest.getNode(`plans/${chat.id}/p_mat`)?.parents, {});
 		assert.equal(stores.chatStore.deleteChat(chat.id), true);

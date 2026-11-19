@@ -1,10 +1,5 @@
 package main
 
-/*
-#include "lumberjack_peer.h"
-*/
-import "C"
-
 import (
 	"context"
 	"encoding/json"
@@ -17,6 +12,16 @@ import (
 	"github.com/NeoTecDigital/LumberJack/extension"
 )
 
+const (
+	stOK       = 0
+	stInvalid  = 1
+	stNotFound = 4
+	stInternal = 7
+	stCodec    = 12
+)
+
+const peerPrincipal = "system"
+
 type upsertNodeInput struct {
 	Path            string                 `json:"path"`
 	Type            string                 `json:"type,omitempty"`
@@ -26,15 +31,7 @@ type upsertNodeInput struct {
 	ParentPaths     []string               `json:"parent_paths,omitempty"`
 	ClearParents    bool                   `json:"clear_parents,omitempty"`
 	Slot            json.RawMessage        `json:"slot,omitempty"`
-}
-
-type entryWire struct {
-	ID        string                 `json:"id"`
-	ParentID  string                 `json:"parent_id,omitempty"`
-	Rank      string                 `json:"rank,omitempty"`
-	Content   interface{}            `json:"content"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
-	Timestamp string                 `json:"timestamp,omitempty"`
+	ClearSlot       bool                   `json:"clear_slot,omitempty"`
 }
 
 type nodeSnapshot struct {
@@ -49,7 +46,7 @@ type nodeSnapshot struct {
 	Slot       json.RawMessage        `json:"slot,omitempty"`
 }
 
-func dispatchPeerOp(host extension.Host, op string, payload json.RawMessage) (any, C.lj_status_t, string) {
+func dispatchPeerOp(host extension.Host, op string, payload json.RawMessage) (any, int, string) {
 	switch op {
 	case "upsert_node":
 		return handleUpsertNode(host, payload)
@@ -63,18 +60,20 @@ func dispatchPeerOp(host extension.Host, op string, payload json.RawMessage) (an
 		return handleDeleteNode(host, payload)
 	case "set_entries":
 		return handleSetEntries(host, payload)
+	case "append_entries":
+		return handleAppendEntries(host, payload)
 	case "get_entries":
 		return handleGetEntries(host, payload)
+	case "list_events":
+		return handleListEvents(host, payload)
+	case "delete_event":
+		return handleDeleteEvent(host, payload)
 	case "set_root_slot":
 		return handleSetRootSlot(host, payload)
 	case "get_root_slot":
 		return handleGetRootSlot(host)
-	case "put_object":
-		return handlePutObject(host, payload)
-	case "get_object":
-		return handleGetObject(host, payload)
 	default:
-		return nil, C.LJ_INVALID, "unknown peer op: " + op
+		return nil, stInvalid, "unknown peer op: " + op
 	}
 }
 
@@ -94,12 +93,12 @@ func cleanSegments(raw string) ([]string, error) {
 
 func stepPathNode(cur *core.Node, part string, asBranch bool) (*core.Node, error) {
 	if asBranch {
-		return cur.AddBranchChild(part, "peer-system")
+		return cur.AddBranchChild(part, peerPrincipal)
 	}
 	if existing := cur.ChildNamed(part); existing != nil {
 		return existing, nil
 	}
-	return cur.AddChildNode(part, core.LeafNode, "peer-system")
+	return cur.AddChildNode(part, core.LeafNode, peerPrincipal)
 }
 
 func ensurePathNode(root *core.Node, rawPath string, wantBranch bool) (*core.Node, error) {
@@ -199,7 +198,9 @@ func applyUpsertInTx(tx extension.Tx, in upsertNodeInput) (*core.Node, error) {
 	if err := applyParentsOnNode(tx.Root(), node, in.ParentPaths, in.ClearParents); err != nil {
 		return nil, err
 	}
-	if len(in.Slot) > 0 {
+	if in.ClearSlot {
+		tx.DeleteSlot(node.ID, peerSlotKey)
+	} else if len(in.Slot) > 0 {
 		if err := tx.SetSlot(node.ID, peerSlotKey, in.Slot); err != nil {
 			return nil, err
 		}
@@ -245,10 +246,10 @@ func applyParentsOnNode(root *core.Node, node *core.Node, parentPaths []string, 
 	return nil
 }
 
-func handleUpsertNode(host extension.Host, payload json.RawMessage) (any, C.lj_status_t, string) {
+func handleUpsertNode(host extension.Host, payload json.RawMessage) (any, int, string) {
 	var in upsertNodeInput
 	if err := json.Unmarshal(payload, &in); err != nil {
-		return nil, C.LJ_CODEC, err.Error()
+		return nil, stCodec, err.Error()
 	}
 	var snap nodeSnapshot
 	op := extension.WriteOp{Key: "upsert:" + in.Path, Origin: "peer"}
@@ -261,10 +262,10 @@ func handleUpsertNode(host extension.Host, payload json.RawMessage) (any, C.lj_s
 		return nil
 	})
 	if err != nil {
-		return nil, C.LJ_INVALID, err.Error()
+		return nil, stInvalid, err.Error()
 	}
 	host.Publish("peer_node_upserted", strings.Trim(in.Path, "/"))
-	return snap, C.LJ_OK, ""
+	return snap, stOK, ""
 }
 
 func applyBatchInTx(tx extension.Tx, nodes []upsertNodeInput) error {
@@ -281,20 +282,20 @@ func applyBatchInTx(tx extension.Tx, nodes []upsertNodeInput) error {
 	return nil
 }
 
-func handleBatchUpsertNodes(host extension.Host, payload json.RawMessage) (any, C.lj_status_t, string) {
+func handleBatchUpsertNodes(host extension.Host, payload json.RawMessage) (any, int, string) {
 	var req struct {
 		Nodes []upsertNodeInput `json:"nodes"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
-		return nil, C.LJ_CODEC, err.Error()
+		return nil, stCodec, err.Error()
 	}
 	op := extension.WriteOp{Key: "batch_upsert", Origin: "peer"}
 	_, err := host.Change(context.Background(), op, func(tx extension.Tx) error {
 		return applyBatchInTx(tx, req.Nodes)
 	})
 	if err != nil {
-		return nil, C.LJ_INVALID, err.Error()
+		return nil, stInvalid, err.Error()
 	}
 	host.Publish("peer_batch_upserted", "knowledge")
-	return map[string]int{"count": len(req.Nodes)}, C.LJ_OK, ""
+	return map[string]int{"count": len(req.Nodes)}, stOK, ""
 }
