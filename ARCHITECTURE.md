@@ -30,7 +30,7 @@ Browser Window (Client = Host)     Node Process (src/api -> src/server)
 | `src/api/` | Standalone `node:http` + Web `Request -> Response` router, desktop gate, stream passthrough, static asset delivery (`src/api/static.ts`) | HTTP transport only | Render HTML or hold application state |
 | `src/client/` | Native ES module CloudCanvas UI: stores (`state/`), views (`views/`), markdown blocks (`blocks/`), interactive DAG (`graph-canvas.ts`) | Browser DOM & working view models | Import React/Next or call storage directly |
 | `extern/cloudcanvas` | CloudCanvas DOM runtime engine (`69076f7`, v0.7.1) | Submodule (read-only) | Be modified in-place |
-| `extern/cloudcanvas-lib` | CloudCanvas widgets, archetypes, and board (`155271b`, v0.7.1) | Submodule (read-only) | Be modified in-place |
+| `extern/cloudcanvas-lib` | CloudCanvas widgets, archetypes, and board (`d5a5fa1`, v0.7.1+) | Submodule (read-only) | Be modified in-place |
 | `extern/lumberjack` | LumberJack DAG & event engine (`f4e8055`, C-ABI v2) | Submodule (read-only) | Be modified in-place |
 | `extern/mfn` | Multi-Focal Network 2.0 (`489ca2f`, 5 layers + gateway) | Submodule (read-only) | Be modified in-place |
 

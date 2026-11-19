@@ -4,11 +4,7 @@ import http from "node:http";
 import net from "node:net";
 import * as path from "node:path";
 import { writeCliStubs, type ServerSide } from "./api-parity-stubs.ts";
-import {
-	WORKTREE_ROOT,
-	buildScratchChildEnv,
-	createScratchDir,
-} from "./api-test-helpers.ts";
+import { WORKTREE_ROOT, buildScratchChildEnv, createScratchDir } from "./api-test-helpers.ts";
 
 export { WORKTREE_ROOT };
 export const STANDALONE_DIR = path.join(WORKTREE_ROOT, ".next", "standalone");
@@ -295,15 +291,8 @@ async function spawnSideOnce(spec: SpawnSideSpec): Promise<ServerInstance> {
 		throw err;
 	}
 	return {
-		side: spec.side,
-		pid: child.pid,
-		port,
-		dataDir,
-		authFile,
-		logs: collector.read,
-		clearLogs: collector.clear,
-		waitForLog: collector.waitFor,
-		stop,
+		side: spec.side, pid: child.pid, port, dataDir, authFile,
+		logs: collector.read, clearLogs: collector.clear, waitForLog: collector.waitFor, stop,
 	};
 }
 
@@ -344,10 +333,7 @@ export async function startParityPair(gate?: GateEnvOptions): Promise<ParityPair
 	const api = apiSrv;
 	let stoppedAll: Promise<void> | null = null;
 	return {
-		runDir,
-		binDir,
-		next,
-		api,
+		runDir, binDir, next, api,
 		stopAll: () => {
 			stoppedAll ??= stopPairAndClean(next, api, runDir);
 			return stoppedAll;

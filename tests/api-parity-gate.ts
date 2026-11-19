@@ -4,56 +4,23 @@ import type { RouteRecord } from "../src/api/types.ts";
 import { startParityPair, type GateEnvOptions, type ParityPair } from "./api-parity-servers.ts";
 import type { ServerSide } from "./api-parity-stubs.ts";
 import { normalizeRawHeaders, sendWire, type WireResponse } from "./api-parity-wire.ts";
-import {
-	compareResponseHeaders,
-	createParityHarness,
-	runParityRequest,
-	type ParityHarness,
-} from "./api-parity-compare.ts";
-import {
-	CONCRETE_ROUTE_PATHS,
-	DESKTOP_SECRET,
-	DOC_MARKDOWN_PATH,
-} from "./api-test-helpers.ts";
+import { compareResponseHeaders, createParityHarness, runParityRequest, type ParityHarness } from "./api-parity-compare.ts";
+import { CONCRETE_ROUTE_PATHS, DESKTOP_SECRET, DOC_MARKDOWN_PATH } from "./api-test-helpers.ts";
 
 const ALL_SEVEN_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
 
 const MATCHER_PATHS_FROM_PROXY_TEST = [
-	DOC_MARKDOWN_PATH,
-	`${DOC_MARKDOWN_PATH}/`,
-	`${DOC_MARKDOWN_PATH}?request=1`,
-	`${DOC_MARKDOWN_PATH}/?request=1`,
-	"/api/plugins/document%2Done/documents/markdown",
-	"/api/plugins/%64ocument-one/documents/markdown/",
-	"/api",
-	"/api/",
-	"/api?request=1",
-	"/api/?request=1",
-	"/api/nope",
-	"/api/plugins",
-	"/api/plugins/document-one",
-	"/api/plugins/document-one/call",
-	"/api/plugins/document-one/documents",
-	"/api/plugins/document-one/documents/other",
-	`${DOC_MARKDOWN_PATH}/extra`,
-	`${DOC_MARKDOWN_PATH}ish`,
-	`${DOC_MARKDOWN_PATH}.json`,
-	`${DOC_MARKDOWN_PATH}.rsc`,
-	"/api/plugins/document-one/other/documents/markdown",
-	"/api/plugins/documents/markdown",
-	"/api/graph/import",
-	"/api/events",
-	"/api/chat",
-	"/api/settings/models",
-	"/api/chats/scratch/markdown",
+	DOC_MARKDOWN_PATH, `${DOC_MARKDOWN_PATH}/`, `${DOC_MARKDOWN_PATH}?request=1`, `${DOC_MARKDOWN_PATH}/?request=1`,
+	"/api/plugins/document%2Done/documents/markdown", "/api/plugins/%64ocument-one/documents/markdown/",
+	"/api", "/api/", "/api?request=1", "/api/?request=1", "/api/nope",
+	"/api/plugins", "/api/plugins/document-one", "/api/plugins/document-one/call",
+	"/api/plugins/document-one/documents", "/api/plugins/document-one/documents/other",
+	`${DOC_MARKDOWN_PATH}/extra`, `${DOC_MARKDOWN_PATH}ish`, `${DOC_MARKDOWN_PATH}.json`, `${DOC_MARKDOWN_PATH}.rsc`,
+	"/api/plugins/document-one/other/documents/markdown", "/api/plugins/documents/markdown",
+	"/api/graph/import", "/api/events", "/api/chat", "/api/settings/models", "/api/chats/scratch/markdown",
 ];
 
-const NON_API_LOOKALIKE_PATHS = [
-	"/",
-	"/chat/new",
-	"/apix",
-	"/api-other/plugins/document-one/documents/markdown",
-];
+const NON_API_LOOKALIKE_PATHS = ["/", "/chat/new", "/apix", "/api-other/plugins/document-one/documents/markdown"];
 
 const ENCODED_MATCHER_PATHS = [
 	"/api/plugins/document%2Done/documents/markdown",
