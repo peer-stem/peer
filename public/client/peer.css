@@ -1,0 +1,171 @@
+/*
+ * Peer client base stylesheet (client-contract-state §6.2, §8.1, §8.3; C-06, C-13).
+ *
+ * Self-contained offline typography (OFL variable woff2 faces + bundled CMU Serif),
+ * Default dark `:root` fallbacks matching `buildThemeTokens(DEFAULT_THEME)`,
+ * anti-FOUC `html[data-theme-pending]`, `:focus-visible` keyboard focus rings,
+ * and interim `--cc-ink-*` / `.peer-prose` rules until `cloudcanvas-lib` PR `L-4`.
+ */
+
+@font-face {
+	font-family: "JetBrains Mono";
+	src: url("/client/fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2");
+	font-weight: 100 800;
+	font-style: normal;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: "JetBrains Mono";
+	src: url("/client/fonts/jetbrains-mono-latin-wght-italic.woff2") format("woff2");
+	font-weight: 100 800;
+	font-style: italic;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: "Source Sans 3";
+	src: url("/client/fonts/source-sans-3-latin-wght-normal.woff2") format("woff2");
+	font-weight: 200 900;
+	font-style: normal;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: "Source Sans 3";
+	src: url("/client/fonts/source-sans-3-latin-wght-italic.woff2") format("woff2");
+	font-weight: 200 900;
+	font-style: italic;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: "lh-cmu";
+	src: url("/fonts/cmunbx.ttf") format("truetype");
+	font-weight: 700;
+	font-style: normal;
+	font-display: swap;
+}
+
+:root {
+	color-scheme: dark;
+	--peer-font-ui: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+	--peer-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+	--peer-font-prose: "Source Sans 3", ui-sans-serif, system-ui, sans-serif;
+	--peer-font-title: "lh-cmu", ui-serif, Georgia, serif;
+	--peer-prose-size: 16px;
+	--peer-prose-leading: 1.5;
+	--peer-heading-weight: 900;
+	--peer-code-ligatures: none;
+	--peer-line-strong: #e6e6e6;
+	--peer-hover: #2a2a2a;
+	--peer-zoom: 1;
+	--cc-bg: #141414;
+	--cc-text: #e6e6e6;
+	--cc-text-muted: #8d8d8d;
+	--cc-accent: #8d8d8d;
+	--cc-focus-ring: #8d8d8d;
+	--cc-card-bg: #1c1c1c;
+	--cc-card-border: #434343;
+	--cc-card-border-hover: #2a2a2a;
+	--cc-ui-surface: #1c1c1c;
+	--cc-ui-selected: #2a2a2a;
+	--cc-ui-backdrop: rgba(0, 0, 0, 0.6);
+	--cc-ui-on-accent: #141414;
+	--cc-ui-drop: #8d8d8d;
+	--cc-ui-grid-line: #434343;
+	--cc-border: #434343;
+	--cc-input-bg: #1c1c1c;
+	--cc-input-border: #434343;
+	--cc-btn-bg: #1c1c1c;
+	--cc-btn-bg-hover: #2a2a2a;
+	--cc-btn-border: #434343;
+	--cc-btn-text: #e6e6e6;
+	--cc-menu-bg: #1c1c1c;
+	--cc-menu-border: #434343;
+	--cc-menu-item-bg-hover: #2a2a2a;
+	--cc-tone-danger: #ef4444;
+	--cc-tone-success: #22c55e;
+	--cc-tone-warning: #f59e0b;
+	--cc-tone-info: #8d8d8d;
+	--cc-ink-strong: #e6e6e6;
+	--cc-ink-em: #e6e6e6;
+	--cc-ink-code: #e6e6e6;
+	--cc-font: var(--peer-font-ui);
+	--cc-font-mono: var(--peer-font-mono);
+}
+
+.light {
+	color-scheme: light;
+}
+
+html[data-theme-pending] body {
+	visibility: hidden;
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+	scrollbar-width: thin;
+	scrollbar-color: var(--cc-border, #434343) transparent;
+}
+
+html {
+	zoom: var(--peer-zoom, 1);
+}
+
+body {
+	margin: 0;
+	min-height: 100dvh;
+	background: var(--cc-bg, #141414);
+	color: var(--cc-text, #e6e6e6);
+	font-family: var(--peer-font-ui);
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+}
+
+:focus-visible {
+	outline: 2px solid var(--cc-focus-ring, #8d8d8d);
+	outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+	outline: none;
+}
+
+.peer-title {
+	font-family: var(--peer-font-title);
+	font-weight: 900;
+}
+
+.peer-prose,
+.cloudcanvas-ui-markdown {
+	font-family: var(--peer-font-prose);
+	font-size: var(--peer-prose-size, 16px);
+	line-height: var(--peer-prose-leading, 1.5);
+}
+
+:is(.peer-prose, .cloudcanvas-ui-markdown) :where(strong, b) {
+	color: var(--cc-ink-strong, var(--cc-text));
+	font-weight: 700;
+}
+
+:is(.peer-prose, .cloudcanvas-ui-markdown) :where(em, i) {
+	color: var(--cc-ink-em, var(--cc-text));
+}
+
+:is(.peer-prose, .cloudcanvas-ui-markdown) :where(code):not(pre code) {
+	color: var(--cc-ink-code, var(--cc-text));
+	font-family: var(--peer-font-mono);
+	font-variant-ligatures: var(--peer-code-ligatures, none);
+}
+
+:is(.peer-prose, .cloudcanvas-ui-markdown) :where(pre, pre code) {
+	font-family: var(--peer-font-mono);
+	font-variant-ligatures: var(--peer-code-ligatures, none);
+}
+
+:is(.peer-prose, .cloudcanvas-ui-markdown) :where(h1, h2, h3, h4, h5, h6) {
+	font-weight: var(--peer-heading-weight, 900);
+}

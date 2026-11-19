@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en" class="dark" data-theme-pending>
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="color-scheme" content="dark light">
+	<title>Peer</title>
+	<script type="importmap">
+	{
+		"imports": {
+			"cloudcanvas": "/client/vendor/cloudcanvas/index.js",
+			"cloudcanvas/core": "/client/vendor/cloudcanvas/core/index.js",
+			"cloudcanvas/kernel": "/client/vendor/cloudcanvas/kernel.js",
+			"cloudcanvas/log": "/client/vendor/cloudcanvas/log.js",
+			"cloudcanvas/theme": "/client/vendor/cloudcanvas/graphics/theme.js",
+			"cloudcanvas/tokens": "/client/vendor/cloudcanvas/graphics/tokens.js",
+			"cloudcanvas/primitives": "/client/vendor/cloudcanvas/graphics/primitives/primitives.js",
+			"cloudcanvas/element": "/client/vendor/cloudcanvas/graphics/primitives/element.js",
+			"cloudcanvas/vectorizer": "/client/vendor/cloudcanvas/graphics/vectorizer.js",
+			"cloudcanvas/style-gates": "/client/vendor/cloudcanvas/graphics/style-gates.js",
+			"cloudcanvas/testing": "/client/vendor/cloudcanvas/testing.js",
+			"cloudcanvas-lib": "/client/vendor/cloudcanvas-lib/index.js",
+			"cloudcanvas-lib/coerce": "/client/vendor/cloudcanvas-lib/coerce.js",
+			"cloudcanvas-lib/forms": "/client/vendor/cloudcanvas-lib/forms/index.js",
+			"cloudcanvas-lib/display": "/client/vendor/cloudcanvas-lib/display/index.js",
+			"cloudcanvas-lib/components": "/client/vendor/cloudcanvas-lib/components/index.js",
+			"cloudcanvas-lib/archetypes": "/client/vendor/cloudcanvas-lib/archetypes/index.js",
+			"cloudcanvas-lib/sandbox": "/client/vendor/cloudcanvas-lib/sandbox/index.js",
+			"cloudcanvas-lib/sandbox/testing": "/client/vendor/cloudcanvas-lib/sandbox/testing.js",
+			"cloudcanvas-lib/ui": "/client/vendor/cloudcanvas-lib/ui/index.js",
+			"cloudcanvas-lib/ui/testing": "/client/vendor/cloudcanvas-lib/ui/testing/index.js",
+			"cloudcanvas-lib/defaults": "/client/vendor/cloudcanvas-lib/defaults.js",
+			"cloudcanvas-lib/graphics": "/client/vendor/cloudcanvas-lib/plugins/styles.js",
+			"cloudcanvas-lib/drag": "/client/vendor/cloudcanvas-lib/plugins/drag.js",
+			"cloudcanvas-lib/select": "/client/vendor/cloudcanvas-lib/plugins/select.js",
+			"cloudcanvas-lib/resize": "/client/vendor/cloudcanvas-lib/plugins/resize.js",
+			"cloudcanvas-lib/focus": "/client/vendor/cloudcanvas-lib/plugins/focus.js",
+			"cloudcanvas-lib/physics": "/client/vendor/cloudcanvas-lib/plugins/physics.js",
+			"cloudcanvas-lib/connect": "/client/vendor/cloudcanvas-lib/plugins/connect.js",
+			"cloudcanvas-lib/svg-state": "/client/vendor/cloudcanvas-lib/plugins/svg-state.js",
+			"cloudcanvas-lib/cursors": "/client/vendor/cloudcanvas-lib/plugins/cursors.js",
+			"cloudcanvas-lib/pan": "/client/vendor/cloudcanvas-lib/plugins/pan.js",
+			"cloudcanvas-lib/keyboard": "/client/vendor/cloudcanvas-lib/plugins/keyboard.js",
+			"cloudcanvas-lib/menu": "/client/vendor/cloudcanvas-lib/plugins/menu.js",
+			"cloudcanvas-lib/announce": "/client/vendor/cloudcanvas-lib/plugins/announce.js",
+			"cloudcanvas-lib/observe": "/client/vendor/cloudcanvas-lib/plugins/observe.js",
+			"cloudcanvas-lib/motion": "/client/vendor/cloudcanvas-lib/plugins/motion.js",
+			"cloudcanvas-lib/types": "/client/vendor/cloudcanvas-lib/plugins/types.js",
+			"cloudcanvas-lib/widget": "/client/vendor/cloudcanvas-lib/plugins/widget.js",
+			"cloudcanvas-lib/keyed-list": "/client/vendor/cloudcanvas-lib/plugins/keyed-list.js",
+			"cloudcanvas-lib/style": "/client/vendor/cloudcanvas-lib/plugins/style.js",
+			"cloudcanvas-lib/layout": "/client/vendor/cloudcanvas-lib/plugins/layout.js",
+			"cloudcanvas-lib/edit": "/client/vendor/cloudcanvas-lib/plugins/edit.js",
+			"cloudcanvas-lib/place": "/client/vendor/cloudcanvas-lib/plugins/place.js",
+			"cloudcanvas-lib/history": "/client/vendor/cloudcanvas-lib/plugins/history.js",
+			"cloudcanvas-lib/reactions": "/client/vendor/cloudcanvas-lib/plugins/reactions.js",
+			"cloudcanvas-lib/lazy": "/client/vendor/cloudcanvas-lib/plugins/lazy.js",
+			"cloudcanvas-lib/offload": "/client/vendor/cloudcanvas-lib/plugins/offload.js",
+			"cloudcanvas-lib/gpu": "/client/vendor/cloudcanvas-lib/plugins/gpu.js",
+			"cloudcanvas-lib/orbit": "/client/vendor/cloudcanvas-lib/plugins/orbit.js",
+			"cloudcanvas-lib/mesh": "/client/vendor/cloudcanvas-lib/plugins/mesh.js",
+			"cloudcanvas-lib/svg-path": "/client/vendor/cloudcanvas-lib/plugins/svg-path.js",
+			"cloudcanvas-lib/sprites": "/client/vendor/cloudcanvas-lib/plugins/sprites.js",
+			"cloudcanvas-lib/text": "/client/vendor/cloudcanvas-lib/plugins/text.js",
+			"cloudcanvas-lib/video": "/client/vendor/cloudcanvas-lib/plugins/video.js",
+			"cloudcanvas-lib/own-canvas": "/client/vendor/cloudcanvas-lib/plugins/own-canvas.js",
+			"cloudcanvas-lib/xml": "/client/vendor/cloudcanvas-lib/plugins/xml.js",
+			"cloudcanvas-lib/html-canvas": "/client/vendor/cloudcanvas-lib/plugins/html-canvas.js",
+			"cloudcanvas-lib/panel": "/client/vendor/cloudcanvas-lib/plugins/panel.js",
+			"peer-state": "/client/build/state.js",
+			"peer-keyboard": "/client/build/keyboard.js",
+			"peer-blocks-math": "/client/build/blocks-math.js",
+			"peer-blocks-code": "/client/build/blocks-code.js",
+			"peer-blocks-mermaid": "/client/build/blocks-mermaid.js",
+			"node:crypto": "/client/shims/node-crypto.js"
+		}
+	}
+	</script>
+	<link rel="stylesheet" href="/client/peer.css">
+	<link rel="stylesheet" href="/client/build/katex/katex.min.css">
+</head>
+<body>
+	<script type="module" src="/client/src/main.js"></script>
+</body>
+</html>

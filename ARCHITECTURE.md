@@ -1,22 +1,22 @@
 # peer: architecture
 
-Status: updated 2026-11-16 for the approved **CloudCanvas + LumberJack DAG + MFN 2.0** architecture (`.context/logs/plans/2026-11-16-lumberjack-mfn-cloudcanvas-integration-plan.md`).
+Status: updated 2026-11-19 for Sprint `C1` client base & `PEER_FOREST_DIR` substrate startup wiring (`.context/logs/plans/2026-11-16-lumberjack-mfn-cloudcanvas-integration-plan.md`, `2026-11-19-client-contract-{views,state,seams}.md`).
 
 ## 1. System Topology
 
-In CloudCanvas, the browser window is the **host** (`src/client/`). The Node process serves `/api/**` and static client modules (`src/api/`), drives the learning agents (`src/agent/`, `src/core/`, `src/server/`), embeds **LumberJack** for persistent DAG/event/object storage, and supervises **MFN 2.0** for learned context mapping.
+In CloudCanvas, the browser window is the **host** (`src/client/`, booted from `public/client/index.html` -> `src/client/main.js`). The Node process serves `/api/**` and static client/vendor modules (`src/api/`), drives the learning agents (`src/agent/`, `src/core/`, `src/server/`), embeds **LumberJack** (`PEER_FOREST_DIR`) for persistent DAG/event/object storage + `/api/events` SSE streaming, and supervises **MFN 2.0** (`setActiveMfnRuntime` + durable outbox) for learned context mapping.
 
 ```text
 Electron shell (electron/)
    │ opens window                     │ spawns peer API + substrate on loopback
    v                                  v
-Browser Window (Client = Host)     Node Process (src/api -> src/server)
-  src/client/                        ├── src/substrate/hardware-guard.ts (CPU / Nova-Vulkan only; blocks CUDA/ROCm)
-    state/   TS stores & SSE         ├── src/store/lumberjack/ ──(N-API C-ABI v2)──> liblumberjack.a
-    views/   CloudCanvas widgets     │     └── /usr/lib/persist/peer/state/lumberjack (DAG, Events, /objects, slots)
-    blocks/  KaTeX, Mermaid, code    └── src/memory/mfn/ ──(HTTP 127.0.0.1)──> mfn-engine (6 CPU native owners)
-    graph/   graph-canvas.ts                   ├── /usr/lib/persist/peer/state/mfn/{data,runtime,secrets}
-                                               └── loopback Ollama (127.0.0.1:11434, nomic-embed-text, CPU/Vulkan)
+Browser Window (Client = Host)     Node Process (src/api/main.ts -> src/server/stores.ts)
+  public/client/index.html           ├── src/substrate/hardware-guard.ts (CPU / Nova-Vulkan only; blocks CUDA/ROCm)
+  src/client/main.js                 ├── src/store/lumberjack/ ──(N-API C-ABI v2, PEER_FOREST_DIR)──> liblumberjack_peer.a
+    state/   TS stores, ApiClient    │     └── /usr/lib/persist/peer/state/lumberjack (DAG, Events, /objects, SSE)
+    theme/   --cc-* & --peer-*       └── src/memory/mfn/ ──(HTTP 127.0.0.1 + outbox)──> mfn-engine (6 CPU owners)
+    blocks/  KaTeX, Mermaid, shiki             ├── /usr/lib/persist/peer/state/mfn/{data,runtime,secrets}
+    views/   CloudCanvas UI & DAG              └── loopback Ollama (127.0.0.1:11434, nomic-embed-text, CPU/Vulkan)
 ```
 
 ## 2. Component Boundaries
@@ -24,11 +24,16 @@ Browser Window (Client = Host)     Node Process (src/api -> src/server)
 | Component | Responsibility | Owns | Must not |
 |---|---|---|---|
 | `src/substrate/` | Hardware guardrail (`cpu` / `vulkan` only), child env scrubbing, native build & runtime path helpers | Env & binary safety checks | Allow CUDA/ROCm or `/tmp` paths |
-| `src/store/lumberjack/` | Implement engine storage ports + multi-parent DAG, `/objects` attachments, `ic_lj_stream_poll` SSE feed, and explicit LearnHarness importer | `/usr/lib/persist/peer/state/lumberjack` | Write raw JSON/JSONL state files or import `src/client` |
-| `src/memory/mfn/` | Supervise MFN 2.0 (`ifr`, `dsr`, `alm`, `cpe`, `psr`, `mfn-gateway`), manage `0600` `MFN_EMBEDDERS_FILE`, execute `turn.recall` & `turn.ingest` | `/usr/lib/persist/peer/state/mfn` | Use LLM compaction summaries or expose non-loopback ports |
-| `src/core`, `src/agent`, `src/server` | Pedagogical loops (`Prober`, `Teacher`, `Practitioner`, `Extractor`, `Auditor`), FSRS-6, speech, CLI/API providers | Domain types & turn orchestration | Import `src/api` or `src/client` |
-| `src/api/` | Standalone `node:http` + Web `Request -> Response` router, desktop gate, stream passthrough, static asset delivery (`src/api/static.ts`) | HTTP transport only | Render HTML or hold application state |
-| `src/client/` | Native ES module CloudCanvas UI: stores (`state/`), views (`views/`), markdown blocks (`blocks/`), interactive DAG (`graph-canvas.ts`) | Browser DOM & working view models | Import React/Next or call storage directly |
+| `src/store/lumberjack/` | Implement engine storage ports + multi-parent DAG, `/objects` snapshots, `ic_lj_stream_poll` SSE feed, and explicit LearnHarness importer (`importLearnHarnessData`) | `PEER_FOREST_DIR` (`/usr/lib/persist/peer/state/lumberjack`) | Write raw JSON/JSONL state files or import `src/client` |
+| `src/memory/mfn/` | Supervise MFN 2.0 (`ifr`, `dsr`, `alm`, `cpe`, `psr`, `mfn-gateway`), manage `0600` `MFN_EMBEDDERS_FILE`, execute `turn.recall` & `turn.ingest`, persist `MfnIngestOutbox` (`startAutoFlush`) | `/usr/lib/persist/peer/state/mfn` | Use LLM compaction summaries or expose non-loopback ports |
+| `src/core`, `src/agent`, `src/server` | Pedagogical loops (`Prober`, `Teacher`, `Practitioner`, `Extractor`, `Auditor`), FSRS-6, speech, CLI/API providers, and `src/server/stores.ts` LumberJack/SSE/MFN startup composition | Domain types & turn orchestration | Import `src/api` or `src/client` |
+| `src/api/` | Standalone `node:http` + Web `Request -> Response` router, desktop gate, `POST /api/settings/import-learnharness`, stream passthrough, and `src/api/static.ts` 5-item `C1` static delivery (`index.html` SPA routes, allowlisted `/client/vendor/**`, `/client/src/**`, dotfile `404`, `Cache-Control: no-cache`) | HTTP transport & static delivery | Render HTML or hold application state |
+| `public/client/` | Static HTML entry (`index.html` with source-file `<script type="importmap">` and `[data-theme-pending]`), base styles (`peer.css`), committed OFL `fonts/`, `shims/node-crypto.js`, and gitignored `esbuild` `build/` outputs (`scripts/client-build.mjs`) | Static client assets & import map | Inline secrets or drift from `extern/cloudcanvas*/package.json` |
+| `src/client/main.js` | Single client composition root (`R5`): wires `createState()`, `createBlockRegistry()`, `applyThemeTokens(document.documentElement, ...)`, and `createShell(document.body, ...)` | Client boot & root wiring | Put application state in views |
+| `src/client/state/` | TypeScript `ApiClient` (`api.ts`), universal `Store<M, I>` (`1/microtask`), SSE/router/settings/appearance/shell/session stores, and `screens/*.ts` projections | All client `/api/**` I/O, SSE & app state | Import CloudCanvas or touch the DOM |
+| `src/client/theme/` | Maps 12-colour `Theme` palettes onto `--cc-*` and `--peer-*` tokens (`tokens.ts`) and applies them to `<html>` (`apply.js`, `R6`) | `<html>` theme/typography tokens | Mutate body views or fetch `/api/**` |
+| `src/client/blocks/` | Transcript Markdown pipeline (`markdown.js`), `PluginCodeBlockRenderer` `registry.js`, `shiki` code, KaTeX math, strict Mermaid, `[Image blocked: alt]` policy, callouts & copy corners | Markdown & code-fence DOM blocks | Allow raw HTML or unguarded remote images |
+| `src/client/views/` | Plain JS ES module CloudCanvas controls (`create<Name>`) & route screens (`create<Screen>View`, `1/rAF` slot coalescing): `shell/`, `shared/`, `session/`, and (`C2`) `graph/` `peer-graph` widget hosting `components/graph-canvas.ts` | Browser DOM controls & route screens | Call `fetch`/`localStorage`, import `state/`, or touch outside `host` |
 | `extern/cloudcanvas` | CloudCanvas DOM runtime engine (`69076f7`, v0.7.1) | Submodule (read-only) | Be modified in-place |
 | `extern/cloudcanvas-lib` | CloudCanvas widgets, archetypes, and board (`d5a5fa1`, v0.7.1+) | Submodule (read-only) | Be modified in-place |
 | `extern/lumberjack` | LumberJack DAG & event engine (`f4e8055`, C-ABI v2) | Submodule (read-only) | Be modified in-place |
