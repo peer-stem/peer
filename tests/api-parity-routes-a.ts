@@ -165,6 +165,17 @@ async function runSettingsWrites(h: ParityHarness): Promise<void> {
 		expectedStatus: 200,
 		request: { method: "GET", path: "/api/settings" },
 	});
+	await runParityRequest(h, {
+		label: "row 39 POST /api/settings/import-learnharness (empty sourceDirectory)",
+		pattern: "/api/settings/import-learnharness",
+		expectedStatus: 400,
+		request: {
+			method: "POST",
+			path: "/api/settings/import-learnharness",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ sourceDirectory: "" }),
+		},
+	});
 	const slot = { model: { provider: "custom", id: "stub-model" }, thinkingLevel: "off" };
 	await runParityRequest(h, {
 		label: "row 42 PUT /api/settings/models",

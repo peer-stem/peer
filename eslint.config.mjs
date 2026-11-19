@@ -22,7 +22,7 @@ import importPlugin from "eslint-plugin-import";
 export default defineConfig([
 	// electron/** — the desktop shell: plain Node, no framework, outside the
 // import law (same rationale as scripts/).
-	globalIgnores([".next/**", "node_modules/**", "data/**", "next-env.d.ts", "scripts/**", "electron/**", "dist/**", "extern/**", ".test-scratch/**"]),
+	globalIgnores([".next/**", "node_modules/**", "data/**", "next-env.d.ts", "scripts/**", "electron/**", "dist/**", "extern/**", ".test-scratch/**", "public/client/build/**"]),
 	{
 		files: ["**/*.{js,mjs,ts,tsx}"],
 		languageOptions: {
@@ -65,6 +65,18 @@ export default defineConfig([
 							from: ["./src/memory", "./src/server", "./src/store"],
 							message:
 								"The agent layer receives its dependencies (storage ports via factories/closures) — it never imports memory, the server layer, or store adapters (architecture: docs/architecture.md).",
+						},
+						{
+							target: "./src/client",
+							from: ["./src/agent", "./src/memory", "./src/server", "./src/store"],
+							message:
+								"Browser client code never imports server, agent, memory, or store layers (ARCHITECTURE.md §2).",
+						},
+						{
+							target: ["./src/client/views", "./src/client/blocks"],
+							from: "./src/client/state",
+							message:
+								"Views and blocks never import src/client/state directly; only src/client/main.js imports peer-state (client-contract-views §1.2 rule 5, R5).",
 						},
 					],
 				},

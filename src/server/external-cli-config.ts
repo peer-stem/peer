@@ -3,7 +3,7 @@ import { expandHome, findCliBinary } from "../agent/external-cli/binary.ts";
 import { CLAUDE_CODE_PROVIDER } from "../core/contracts/claude-code.ts";
 import { EXTERNAL_CLI_DEFAULT_HOMES, externalCli, type ExternalCliId, type ExternalCliSettings } from "../core/contracts/external-cli.ts";
 import type { UserSettings } from "../core/settings.ts";
-import { settingsStore } from "../store/settings.ts";
+import { settingsStore } from "./stores.ts";
 import { claudeCodeEnabled } from "./claude-code-config.ts";
 
 /** A second Claude Code login lives in its own configuration directory, which

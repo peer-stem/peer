@@ -20,7 +20,7 @@
  */
 
 import { extractionStatuses, type ExtractionPhase } from "../agent/subagents/extraction.ts";
-import { chatStore } from "../store/chats.ts";
+import { chatStore } from "./stores.ts";
 import { graphRevision } from "./graph.ts";
 import { catalogContextLimits } from "./model-catalog.ts";
 import { listJobs } from "./jobs.ts";
@@ -29,7 +29,7 @@ import { pluginWorkerActivities, type PluginWorkerActivity } from "./plugin-work
 import type { JobRecord } from "../core/contracts.ts";
 
 export { abortExtraction, extractionStatuses, type ExtractionPhase, type RunningExtraction } from "../agent/subagents/extraction.ts";
-export { chatStore } from "../store/chats.ts";
+export { chatStore } from "./stores.ts";
 
 /** A running sub-agent job, joined with its chat's title for the dock.
  *  contextLimit (context-meter amendment, owner 2026-09-23): the model's
@@ -73,43 +73,40 @@ export interface ActivityExtraction {
  *  graph changed underneath me" (a merge landed, a deletion purged) and
  *  refetch clusters/layout. Reads never move it; the DELETE response
  *  returns the same stamp. */
+function collectRunningActivityJobs(limits: ReadonlyMap<string, number>): ActivityJob[] {
+	const jobs: ActivityJob[] = [];
+	for (const chat of chatStore.listChats()) {
+		for (const job of listJobs(chat.id)) {
+			if (job.status !== "running") continue;
+			jobs.push({
+				...job,
+				costUsd: jobCost(job),
+				title: chat.title ?? chat.id,
+				contextLimit: job.usage ? (limits.get(job.usage.model) ?? null) : null,
+			});
+		}
+	}
+	return jobs.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
+}
+
 export function activityFeed(): {
 	jobs: ActivityJob[];
 	pluginWorkers: ActivityPluginWorker[];
 	extractions: ActivityExtraction[];
 	graphRevision: number;
 } {
-	const chats = chatStore.listChats();
 	const limits = catalogContextLimits();
-	const jobs: ActivityJob[] = [];
-	for (const chat of chats) {
-		for (const job of listJobs(chat.id)) {
-			if (job.status === "running") {
-				jobs.push({
-					...job,
-					costUsd: jobCost(job),
-					title: chat.title ?? chat.id,
-					contextLimit: job.usage ? (limits.get(job.usage.model) ?? null) : null,
-				});
-			}
-		}
-	}
+	const jobs = collectRunningActivityJobs(limits);
 	const extractions: ActivityExtraction[] = extractionStatuses().map((run) => ({
 		id: run.part ? `${run.chatId}#${run.part.i}` : run.chatId,
 		chatId: run.chatId,
 		part: run.part,
-		// The run's own label never reaches this feed (unlike the graph
-		// status route) — the chat store's title, or the bare id for notes
-		// sources, plus the chunk suffix when the source fanned out.
 		title:
 			(run.label ?? chatStore.getChat(run.chatId)?.title ?? run.chatId) +
 			(run.part ? ` · ${run.part.i}/${run.part.n}` : ""),
 		phase: run.phase,
 		startedAt: run.startedAt,
 	}));
-	// A native createBackgroundTool job already owns its worker row and durable END.
-	// Acceptance and job linkage are synchronous, so the queued→running bridge
-	// cannot briefly expose both representations.
 	const linked = new Set(jobs.flatMap(job => job.kind === "plugin" && job.plugin?.taskId
 		? [`${job.plugin.pluginId}:${job.plugin.taskId}`] : []));
 	const pluginWorkers: ActivityPluginWorker[] = pluginWorkerActivities()
@@ -117,8 +114,6 @@ export function activityFeed(): {
 		.map(task => ({ ...task, costUsd: jobCost(task),
 			contextLimit: task.usage ? (limits.get(task.usage.model) ?? null) : null }))
 		.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-	// oldest-first on last activity: the stable blob order (ISO strings sort chronologically)
-	jobs.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
 	return {
 		jobs,
 		pluginWorkers,

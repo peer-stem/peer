@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
 import * as http from "node:http";
+import * as path from "node:path";
 import type { RouteRecord } from "../src/api/types.ts";
 import { startParityPair, type GateEnvOptions, type ParityPair } from "./api-parity-servers.ts";
 import type { ServerSide } from "./api-parity-stubs.ts";
 import { normalizeRawHeaders, sendWire, type WireResponse } from "./api-parity-wire.ts";
 import { compareResponseHeaders, createParityHarness, runParityRequest, type ParityHarness } from "./api-parity-compare.ts";
-import { CONCRETE_ROUTE_PATHS, DESKTOP_SECRET, DOC_MARKDOWN_PATH } from "./api-test-helpers.ts";
+import { CONCRETE_ROUTE_PATHS, DESKTOP_SECRET, DOC_MARKDOWN_PATH, WORKTREE_ROOT } from "./api-test-helpers.ts";
 
 const ALL_SEVEN_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
 
@@ -20,6 +22,7 @@ const MATCHER_PATHS_FROM_PROXY_TEST = [
 	"/api/graph/import", "/api/events", "/api/chat", "/api/settings/models", "/api/chats/scratch/markdown",
 ];
 
+const SPA_NON_API_PATHS: ReadonlySet<string> = new Set(["/", "/chat/new"]);
 const NON_API_LOOKALIKE_PATHS = ["/", "/chat/new", "/apix", "/api-other/plugins/document-one/documents/markdown"];
 
 const ENCODED_MATCHER_PATHS = [
@@ -102,6 +105,21 @@ async function assertRefusalPair(
 	}
 }
 
+function assertNonApiLookalikeResponse(
+	modeName: string,
+	nonApiPath: string,
+	apiRes: WireResponse,
+	hasClientIndex: boolean,
+): void {
+	assert.notEqual(apiRes.status, 403, `[${modeName}] non-/api path ${nonApiPath} must never be gated with 403`);
+	if (SPA_NON_API_PATHS.has(nonApiPath) && hasClientIndex) {
+		assert.equal(apiRes.status, 200, `[${modeName}] SPA path ${nonApiPath} expected ungated 200 on src/api`);
+		return;
+	}
+	assert.equal(apiRes.status, 404, `[${modeName}] non-/api path ${nonApiPath} must return ungated 404 on src/api`);
+	assert.equal(apiRes.rawBody.length, 0);
+}
+
 async function runRefusalMatrixForMode(
 	mainHarness: ParityHarness,
 	modeName: string,
@@ -115,10 +133,10 @@ async function runRefusalMatrixForMode(
 			const hdrs = refusedHeaders(pair.next.port);
 			await Promise.all(ALL_SEVEN_METHODS.map((method) => assertRefusalPair(mainHarness, modeName, pair, agent, method, reqPath, hdrs)));
 		}
+		const hasClientIndex = fs.existsSync(path.join(WORKTREE_ROOT, "public", "client", "index.html"));
 		for (const nonApiPath of NON_API_LOOKALIKE_PATHS) {
 			const apiRes = await sendPooled(agent, pair.api.port, "GET", nonApiPath, refusedHeaders(pair.api.port));
-			assert.equal(apiRes.status, 404, `[${modeName}] non-/api path ${nonApiPath} must return ungated 404 on src/api`);
-			assert.equal(apiRes.rawBody.length, 0);
+			assertNonApiLookalikeResponse(modeName, nonApiPath, apiRes, hasClientIndex);
 		}
 	} finally {
 		agent.destroy();

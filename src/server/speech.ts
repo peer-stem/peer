@@ -3,7 +3,7 @@ import {
 	SPEECH_AUDIO_LIMIT, SPEECH_TEXT_LIMIT, normalizeSpeechEndpoint, resolveSpeech,
 	type SpeechSettings, type SpeechVoice,
 } from "../core/contracts/speech.ts";
-import { settingsStore } from "../store/settings.ts";
+import { settingsStore } from "./stores.ts";
 import { readBoundedJson } from "./custom-provider-body.ts";
 import { cappedStream, readBoundedBytes, speechFetch, type SpeechFetch } from "./speech-transport.ts";
 

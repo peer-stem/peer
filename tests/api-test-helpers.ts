@@ -52,6 +52,7 @@ export const CONCRETE_ROUTE_PATHS: Readonly<Record<string, string>> = {
 	"/api/plugins/[id]": "/api/plugins/document-one",
 	"/api/plugins": "/api/plugins",
 	"/api/search": "/api/search",
+	"/api/settings/import-learnharness": "/api/settings/import-learnharness",
 	"/api/settings/prompts": "/api/settings/prompts",
 	"/api/settings/prompts/[...segment]": "/api/settings/prompts/teacher/identity.md",
 	"/api/settings": "/api/settings",

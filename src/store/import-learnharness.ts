@@ -1,6 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { ChatRecord, CoverageEntry, GraphChain, GraphNode, SessionCheckpoint } from "../core/contracts.ts";
+import type {
+	ChatRecord,
+	CoverageEntry,
+	GraphChain,
+	GraphNode,
+	LearnHarnessImportReport,
+	SessionCheckpoint,
+} from "../core/contracts.ts";
 import {
 	applyRecordIfPresent,
 	dedupeByKey,
@@ -22,22 +29,7 @@ import {
 import { isCheckpoint, isCoverageEntry, isGraphChain, isGraphNode, isNotesSource } from "./lumberjack/graph-store.ts";
 import type { LumberJackStoreBundle } from "./lumberjack/index.ts";
 
-export interface LearnHarnessImportReport {
-	sourceDirectory: string;
-	settingsImported: boolean;
-	themesImported: number;
-	promptsImported: number;
-	sourcesImported: number;
-	nodesImported: number;
-	chainsImported: number;
-	positionsImported: number;
-	chatsImported: number;
-	objectsStored: number;
-	objectsDeduplicated: number;
-	flashcardDecksImported: number;
-	flashcardCardsImported: number;
-	corruptFilesSkipped: number;
-}
+export type { LearnHarnessImportReport } from "../core/contracts.ts";
 
 function importConfigAndThemes(root: string, stores: LumberJackStoreBundle, report: LearnHarnessImportReport): void {
 	const rawSettings = readJsonIfPresent(root, ["settings.json"], report);

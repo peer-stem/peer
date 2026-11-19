@@ -133,7 +133,7 @@ let cachedAddon: RawLumberJackAddon | null = null;
 export function loadLumberJackAddon(addonPath = DEFAULT_ADDON_PATH): RawLumberJackAddon {
 	if (cachedAddon && addonPath === DEFAULT_ADDON_PATH) return cachedAddon;
 	const req = createRequire(import.meta.url);
-	const loaded = req(addonPath) as RawLumberJackAddon;
+	const loaded = req(/* turbopackIgnore: true */ addonPath) as RawLumberJackAddon;
 	if (loaded.abiVersion() !== 2) throw new Error(`Unexpected LumberJack ABI version: ${loaded.abiVersion()}`);
 	if (addonPath === DEFAULT_ADDON_PATH) cachedAddon = loaded;
 	return loaded;

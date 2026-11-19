@@ -30,3 +30,8 @@ xai-credentials.json*
 # dev-fresh launcher scratch (fresh-user sim): disposable per launch
 .fresh-data/
 .test-scratch/
+.context/
+.pdl/
+.sessions/
+.shamash/
+/public/client/build/

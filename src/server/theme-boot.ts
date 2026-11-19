@@ -8,8 +8,7 @@
  */
 
 import { effectiveColors, isBuiltinThemeId, resolveTheme, themeVars, type AppearanceSettings, type Theme } from "../core";
-import { themeStore } from "../store/themes.ts";
-import { readSettings } from "../store/settings.ts";
+import { readSettingsRecord, themeStore } from "./stores.ts";
 
 /** Everything the layout needs for a flash-free first paint. */
 export interface ThemeBoot {
@@ -21,7 +20,7 @@ export interface ThemeBoot {
 
 /** Read the record and selected custom file; resolve the active theme and its vars. */
 export function readThemeBoot(): ThemeBoot {
-	const appearance = readSettings()?.appearance;
+	const appearance = readSettingsRecord()?.appearance;
 	const id = appearance?.theme;
 	const custom = id && !isBuiltinThemeId(id) ? themeStore.readTheme(id) : null;
 	const theme = resolveTheme(id, custom ? [custom] : []);

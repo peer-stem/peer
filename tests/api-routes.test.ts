@@ -45,13 +45,13 @@ async function assertModuleParity(repoRoot: string, file: string, records: reado
 
 it("routes-import", async () => {
 	const diskFiles = await walkRouteFiles(path.join(WORKTREE_ROOT, "app", "api"), WORKTREE_ROOT);
-	assert.equal(diskFiles.length, 50, "expected exactly 50 app/api/**/route.ts files on disk");
+	assert.equal(diskFiles.length, 51, "expected exactly 51 app/api/**/route.ts files on disk");
 
 	const listedFiles = [...new Set(routes.map((record) => record.file))].sort();
 	assert.deepEqual(listedFiles, diskFiles, "routes.ts file list must match disk files 1:1");
 	const listedPatterns = [...new Set(routes.map((record) => record.pattern))].sort();
-	assert.deepEqual(listedPatterns, GOLDEN_ROUTE_PATTERNS, "routes.ts patterns must match the 50 golden patterns");
-	assert.equal(routes.length, 73, "expected exactly 73 exported method records across all 50 modules");
+	assert.deepEqual(listedPatterns, GOLDEN_ROUTE_PATTERNS, "routes.ts patterns must match the 51 golden patterns");
+	assert.equal(routes.length, 74, "expected exactly 74 exported method records across all 51 modules");
 
 	for (const file of diskFiles) {
 		const fileRecords = routes.filter((record) => record.file === file);
