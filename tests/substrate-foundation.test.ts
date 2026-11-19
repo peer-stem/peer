@@ -30,7 +30,7 @@ const HAS_MANIFEST = fs.existsSync(MANIFEST_PATH);
 
 const EXPECTED_SUBMODULES: ReadonlyArray<readonly [string, string]> = [
 	["extern/cloudcanvas", "69076f7989dde91b6d84d50c826a3eab081c197c"],
-	["extern/cloudcanvas-lib", "155271b0c24ee6be777be82223f418917099779b"],
+	["extern/cloudcanvas-lib", "d5a5fa1496f7b52de108aad0262692698be7baa9"],
 	["extern/lumberjack", "f4e80554f1aa88e1612639f1b3c380ec24e56588"],
 	["extern/mfn", "489ca2f0abad00e687908a66177fc4156738eac7"],
 ];
