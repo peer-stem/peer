@@ -103,6 +103,10 @@ html[data-theme-pending] body {
 	visibility: hidden;
 }
 
+[hidden] {
+	display: none !important;
+}
+
 *,
 *::before,
 *::after {

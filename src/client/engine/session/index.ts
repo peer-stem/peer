@@ -7,6 +7,7 @@ export * from "./md-nobreak.ts";
 export * from "./model.ts";
 export * from "./opening-prompt.ts";
 export * from "./plan-layout.ts";
+export * from "./plan-tree-dagre.ts";
 export * from "./question-layout.ts";
 export * from "./selection-actions.ts";
 export * from "./selection-text.ts";

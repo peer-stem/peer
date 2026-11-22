@@ -8,10 +8,12 @@ export const SHELL_STYLE_ID = 'peer-shell-styles';
 export const SHELL_CSS = `/* ------------------ PEER: SHELL ------------------ */
 
 .peer-shell {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: row;
+  height: 100dvh;
   min-height: 100dvh;
   width: 100%;
+  overflow: hidden;
   background: var(--cc-bg, #0b1120);
   color: var(--cc-text, #e2e8f0);
   font-family: var(--cc-font, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
@@ -21,8 +23,11 @@ export const SHELL_CSS = `/* ------------------ PEER: SHELL ------------------ *
 .peer-shell-side {
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   gap: var(--cc-space-2, 8px);
   width: 14.5rem;
+  height: 100%;
+  overflow-y: auto;
   padding: var(--cc-space-3, 12px);
   background: var(--cc-card-bg, rgba(15, 23, 42, 0.92));
   border-right: 1px solid var(--cc-border, var(--cc-card-border, rgba(255, 255, 255, 0.1)));
@@ -34,9 +39,7 @@ export const SHELL_CSS = `/* ------------------ PEER: SHELL ------------------ *
 }
 
 .peer-shell-side[hidden],
-.peer-shell-update[hidden],
-.peer-shell-import-error[hidden],
-.peer-shell-import-report[hidden] {
+.peer-shell-update[hidden] {
   display: none;
 }
 
@@ -52,10 +55,12 @@ export const SHELL_CSS = `/* ------------------ PEER: SHELL ------------------ *
 }
 
 .peer-shell-content {
+  flex: 1 1 0%;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  height: 100%;
   overflow: auto;
 }
 
@@ -122,66 +127,6 @@ export const SHELL_CSS = `/* ------------------ PEER: SHELL ------------------ *
   font-family: var(--peer-font-title, var(--cc-font, sans-serif));
   font-size: var(--cc-type-lg, 15px);
   font-weight: var(--cc-weight-semibold, 600);
-}
-
-.peer-shell-cheat-group {
-  display: flex;
-  flex-direction: column;
-  gap: var(--cc-space-1, 4px);
-}
-
-.peer-shell-cheat-heading {
-  font-size: var(--cc-type-xs, 11px);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--cc-text-muted, #94a3b8);
-}
-
-.peer-shell-cheat-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--cc-space-3, 12px);
-  font-size: var(--cc-type-sm, 12px);
-}
-
-.peer-shell-kbd {
-  padding: 2px 6px;
-  font-family: var(--cc-font-mono, ui-monospace, monospace);
-  font-size: var(--cc-type-xs, 11px);
-  background: var(--cc-input-bg, rgba(255, 255, 255, 0.06));
-  border: 1px solid var(--cc-border, var(--cc-card-border, rgba(255, 255, 255, 0.14)));
-  border-radius: var(--cc-radius-sm, 6px);
-}
-
-.peer-shell-import-section {
-  display: flex;
-  flex-direction: column;
-  gap: var(--cc-space-2, 8px);
-}
-
-.peer-shell-import-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--cc-space-2, 8px);
-}
-
-.peer-shell-import-row .cloudcanvas-ui-field {
-  flex: 1;
-  min-width: 14rem;
-}
-
-.peer-shell-import-error {
-  margin: 0;
-  font-size: var(--cc-type-sm, 12px);
-  color: var(--cc-tone-danger, #f87171);
-}
-
-.peer-shell-import-report {
-  margin: 0;
-  padding-left: var(--cc-space-4, 16px);
-  font-size: var(--cc-type-sm, 12px);
-  color: var(--cc-text-muted, #94a3b8);
 }
 `;
 

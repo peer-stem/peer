@@ -1,20 +1,42 @@
 /**
- * Per-chat session store (`client-contract-state §2.3, §3`, `C-15`).
- * Wraps `SessionModel` (`components/session-core.ts`) in C1 read-only + live
- * SSE stream attach mode and hydrates `/objects`-backed `ImageSnapshot` entries.
+ * Per-chat session store (`c2a-frozen-contracts §3.6`, `client-contract-state §2.3, §3`).
+ * Wraps `SessionModel` (`peer-engine`), hydrates `/objects` snapshots,
+ * manages `opening-prompt.ts` handoff, and gates `continue-if-owed` on `configured`.
  */
 
 import {
+	activeProblemOf,
+	pendingQuestionOf,
+	type ChatKind,
+	type ChatSettings,
+	type ImageSnapshot,
+	type LhMessage,
+	type PlanTree,
+	type QuestionAnswerData,
+	type QuestionDraft,
+	type SessionPricing,
+} from "../../core/index.ts";
+import {
+	clearOpeningPrompt,
 	SessionModel,
+	visibleQueuedSteers,
 	type PluginProblemAvailability,
 	type PluginQuestionAvailability,
 	type SessionState,
+	type SteerQueueItem,
 } from "../engine/index.ts";
-import type { ChatKind, ImageSnapshot } from "../../core/contracts/chat.ts";
-import type { LhMessage } from "../../core/native-messages.ts";
-import type { LhViewMessage } from "../../core/view.ts";
 import { ApiError, apiPath, isAbortError, type ApiClient } from "./api.ts";
 import type { Events } from "./events.ts";
+import {
+	handleDockOrRecoveryIntent,
+	latestTreeFromMessages,
+	runInitialMountHandoff,
+	scanAndHydrateImages,
+	sendComposerIntent,
+	settlePendingMountWork,
+	type SessionHydrationTarget,
+} from "./session-helpers.ts";
+import type { SettingsIntent, SettingsModel } from "./settings.ts";
 import {
 	assertNeverIntent,
 	createCell,
@@ -30,6 +52,12 @@ export interface ImageSnapshotEntry {
 	readonly image?: ImageSnapshot;
 }
 
+export interface AttachedImageInput {
+	readonly type: "image";
+	readonly mimeType: string;
+	readonly data: string;
+}
+
 export interface SessionStoreModel {
 	readonly load: LoadState;
 	readonly error: string | null;
@@ -40,20 +68,72 @@ export interface SessionStoreModel {
 	readonly state: SessionState | null;
 	readonly turnError: string | null;
 	readonly imageSnapshots: Readonly<Record<string, ImageSnapshotEntry>>;
+	readonly tree?: PlanTree | null;
+	readonly chatSettings?: ChatSettings | null;
+	readonly pricing?: SessionPricing | null;
+	readonly coverage?: Readonly<Record<string, unknown>> | null;
+	readonly queuedSteers?: readonly SteerQueueItem[];
+	readonly pendingQuestion?: ReturnType<typeof pendingQuestionOf> | null;
+	readonly activeProblem?: ReturnType<typeof activeProblemOf> | null;
+	readonly questionDraft?: QuestionDraft | null;
+	readonly openingDraft?: string | null;
 }
 
-export type SessionIntent = { readonly type: "reload" };
+export type SessionIntent =
+	| { readonly type: "reload" }
+	| { readonly type: "send-text"; readonly text: string; readonly images?: readonly AttachedImageInput[] }
+	| { readonly type: "steer"; readonly text: string; readonly images?: readonly AttachedImageInput[] }
+	| { readonly type: "stop" }
+	| {
+			readonly type: "answer-question";
+			readonly tool: string;
+			readonly toolCallId: string;
+			readonly answer: QuestionAnswerData;
+			readonly questionKey?: string;
+	  }
+	| {
+			readonly type: "dismiss-question";
+			readonly toolCallId: string;
+			readonly answer: QuestionAnswerData;
+			readonly questionKey?: string;
+	  }
+	| { readonly type: "dismiss-problem"; readonly problemCallId: string }
+	| {
+			readonly type: "submit-thinking";
+			readonly problemCallId: string;
+			readonly text: string;
+			readonly images?: readonly AttachedImageInput[];
+	  }
+	| { readonly type: "next-problem" }
+	| { readonly type: "retry" }
+	| {
+			readonly type: "retry-question";
+			readonly messageId?: string;
+			readonly contentIndex?: number;
+			readonly toolCallId?: string;
+	  }
+	| { readonly type: "continue-if-owed" }
+	| { readonly type: "save-question-draft"; readonly questionKey: string; readonly draft: Partial<QuestionDraft> }
+	| { readonly type: "rename"; readonly title: string }
+	| { readonly type: "save-chat-settings"; readonly settings: ChatSettings }
+	| { readonly type: "clear-error" };
 
 export interface CreateSessionStoreOptions {
 	chatId: string;
 	api: ApiClient;
 	events: Events;
+	settings?: Store<SettingsModel, SettingsIntent>;
+	initialPrompt?: string;
 }
 
 interface ChatRecordPayload {
 	title?: string;
 	kind?: ChatKind;
 	messages: LhMessage[];
+	tree?: PlanTree;
+	settings?: ChatSettings;
+	pricing?: SessionPricing;
+	coverage?: Record<string, unknown>;
 	turnInFlight?: boolean;
 	turnError?: string;
 	compacting?: boolean;
@@ -61,13 +141,8 @@ interface ChatRecordPayload {
 	pluginProblemAvailability?: PluginProblemAvailability;
 }
 
-interface SessionContext {
-	readonly chatId: string;
-	readonly api: ApiClient;
+interface SessionContext extends SessionHydrationTarget {
 	readonly cell: Cell<SessionStoreModel>;
-	readonly seenSnapshots: Set<string>;
-	readonly imageControllers: Set<AbortController>;
-	disposed: boolean;
 	loadTicket: number;
 	activeLoad: AbortController | null;
 	load: LoadState;
@@ -76,55 +151,10 @@ interface SessionContext {
 	kind: ChatKind;
 	compacting: boolean;
 	serverTurnError: string | null;
-	imageSnapshots: Readonly<Record<string, ImageSnapshotEntry>>;
-	model: SessionModel | null;
-}
-
-const HEX64_RE = /^[a-f0-9]{64}$/;
-
-function extractSnapshotIdsFromPayload(value: unknown, out: Set<string>): void {
-	if (!value || typeof value !== "object") return;
-	const rec = value as Record<string, unknown>;
-	if (typeof rec.snapshotId === "string" && HEX64_RE.test(rec.snapshotId)) {
-		out.add(rec.snapshotId);
-	}
-	const img = rec.image as { snapshotId?: unknown } | null | undefined;
-	if (typeof img?.snapshotId === "string" && HEX64_RE.test(img.snapshotId)) {
-		out.add(img.snapshotId);
-	}
-	const nested = rec.result as { snapshotId?: unknown; image?: { snapshotId?: unknown } } | null | undefined;
-	if (typeof nested?.snapshotId === "string" && HEX64_RE.test(nested.snapshotId)) {
-		out.add(nested.snapshotId);
-	}
-	if (typeof nested?.image?.snapshotId === "string" && HEX64_RE.test(nested.image.snapshotId)) {
-		out.add(nested.image.snapshotId);
-	}
-}
-
-function collectSnapshotIds(messages: readonly LhViewMessage[]): string[] {
-	const found = new Set<string>();
-	for (const message of messages) {
-		for (const part of message.parts) {
-			extractSnapshotIdsFromPayload(part.output, found);
-			extractSnapshotIdsFromPayload(part.data, found);
-		}
-	}
-	return [...found];
-}
-
-function isValidImageSnapshot(raw: unknown): raw is ImageSnapshot {
-	if (!raw || typeof raw !== "object") return false;
-	const img = raw as Partial<ImageSnapshot>;
-	return (
-		(img.mimeType === "image/png" || img.mimeType === "image/jpeg") &&
-		typeof img.data === "string" &&
-		typeof img.width === "number" &&
-		Number.isInteger(img.width) &&
-		img.width > 0 &&
-		typeof img.height === "number" &&
-		Number.isInteger(img.height) &&
-		img.height > 0
-	);
+	serverTree: PlanTree | null;
+	chatSettings: ChatSettings | null;
+	pricing: SessionPricing | null;
+	coverage: Readonly<Record<string, unknown>> | null;
 }
 
 function isModelBusy(model: SessionModel | null): boolean {
@@ -134,8 +164,19 @@ function isModelBusy(model: SessionModel | null): boolean {
 function publishSession(ctx: SessionContext): void {
 	if (ctx.disposed) return;
 	const state = ctx.model ? ctx.model.getState() : null;
-	if (state) scanAndHydrateImages(ctx, state.messages);
-	const turnError = state?.error?.message ?? ctx.serverTurnError;
+	if (state) {
+		scanAndHydrateImages(ctx, state.messages);
+		if (state.hasConfirmedConversation && ctx.openingDraft !== null) {
+			clearOpeningPrompt(ctx.chatId);
+			ctx.openingDraft = null;
+		}
+	}
+	const pendingQuestion = state ? pendingQuestionOf(state.nativeMessages) : null;
+	const activeProblem = state ? activeProblemOf(state.nativeMessages) ?? null : null;
+	const questionDraft =
+		pendingQuestion && ctx.model ? ctx.model.questionDraft(pendingQuestion.key) ?? null : null;
+	const queuedSteers = state ? visibleQueuedSteers(state.steerQueue, state.nativeMessages) : [];
+	const tree = (state ? latestTreeFromMessages(state.messages) : null) ?? ctx.serverTree;
 	ctx.cell.set({
 		load: ctx.load,
 		error: ctx.error,
@@ -144,37 +185,18 @@ function publishSession(ctx: SessionContext): void {
 		kind: ctx.kind,
 		compacting: ctx.compacting,
 		state,
-		turnError,
+		turnError: state?.error?.message ?? ctx.serverTurnError,
 		imageSnapshots: ctx.imageSnapshots,
+		tree,
+		chatSettings: ctx.chatSettings,
+		pricing: ctx.pricing,
+		coverage: ctx.coverage,
+		queuedSteers,
+		pendingQuestion,
+		activeProblem,
+		questionDraft,
+		openingDraft: ctx.openingDraft,
 	});
-}
-
-function scanAndHydrateImages(ctx: SessionContext, messages: readonly LhViewMessage[]): void {
-	for (const snapshotId of collectSnapshotIds(messages)) {
-		if (ctx.seenSnapshots.has(snapshotId)) continue;
-		ctx.seenSnapshots.add(snapshotId);
-		ctx.imageSnapshots = { ...ctx.imageSnapshots, [snapshotId]: { status: "loading" } };
-		void hydrateOneSnapshot(ctx, snapshotId);
-	}
-}
-
-async function hydrateOneSnapshot(ctx: SessionContext, snapshotId: string): Promise<void> {
-	const controller = new AbortController();
-	ctx.imageControllers.add(controller);
-	try {
-		const path = apiPath`/api/chats/${ctx.chatId}/images/${snapshotId}`;
-		const raw = await ctx.api.json<ImageSnapshot>(path, { signal: controller.signal });
-		if (ctx.disposed || controller.signal.aborted) return;
-		if (!isValidImageSnapshot(raw)) throw new Error("Invalid image snapshot");
-		ctx.imageSnapshots = { ...ctx.imageSnapshots, [snapshotId]: { status: "ready", image: raw } };
-		publishSession(ctx);
-	} catch (err) {
-		if (ctx.disposed || controller.signal.aborted || isAbortError(err)) return;
-		ctx.imageSnapshots = { ...ctx.imageSnapshots, [snapshotId]: { status: "error" } };
-		publishSession(ctx);
-	} finally {
-		ctx.imageControllers.delete(controller);
-	}
 }
 
 function applyChatPayload(ctx: SessionContext, data: ChatRecordPayload): void {
@@ -184,6 +206,10 @@ function applyChatPayload(ctx: SessionContext, data: ChatRecordPayload): void {
 	ctx.kind = data.kind === "practice" ? "practice" : "teach";
 	ctx.compacting = data.compacting === true;
 	ctx.serverTurnError = typeof data.turnError === "string" ? data.turnError : null;
+	ctx.serverTree = data.tree ?? null;
+	ctx.chatSettings = data.settings ?? null;
+	ctx.pricing = data.pricing ?? null;
+	ctx.coverage = data.coverage ? Object.freeze({ ...data.coverage }) : null;
 	const messages = Array.isArray(data.messages) ? data.messages : [];
 	if (!ctx.model) {
 		const model = new SessionModel({
@@ -196,8 +222,9 @@ function applyChatPayload(ctx: SessionContext, data: ChatRecordPayload): void {
 			model.setMessages(messages, data.turnError, data.pluginQuestionAvailability, data.pluginProblemAvailability);
 		}
 		model.onChange = () => publishSession(ctx);
-		model.setReattachSettled(() => publishSession(ctx));
+		model.setReattachSettled(() => { void loadChatRecord(ctx); });
 		ctx.model = model;
+		runInitialMountHandoff(ctx, messages, data.turnInFlight === true);
 		publishSession(ctx);
 		if (data.turnInFlight === true) void model.resumeStream(false);
 		return;
@@ -239,6 +266,75 @@ async function loadChatRecord(ctx: SessionContext): Promise<void> {
 	}
 }
 
+async function handleMetadataIntent(
+	ctx: SessionContext,
+	intent: Extract<SessionIntent, { type: "rename" | "save-chat-settings" }>,
+): Promise<void> {
+	if (intent.type === "rename") {
+		const trimmed = intent.title.trim();
+		if (!trimmed) return;
+		const res = await ctx.api.json<{ title?: string }>(apiPath`/api/chats/${ctx.chatId}`, {
+			method: "PUT",
+			json: { title: trimmed },
+		});
+		if (ctx.disposed) return;
+		ctx.title = typeof res.title === "string" ? res.title : trimmed;
+		publishSession(ctx);
+		return;
+	}
+	const res = await ctx.api.json<{ settings?: ChatSettings }>(apiPath`/api/chats/${ctx.chatId}/settings`, {
+		method: "PUT",
+		json: intent.settings,
+	});
+	if (ctx.disposed) return;
+	ctx.chatSettings = res.settings ?? intent.settings;
+	publishSession(ctx);
+}
+
+function abortActiveSessionTurn(ctx: SessionContext): void {
+	ctx.model?.stop();
+	const body = { kind: "turn", id: ctx.chatId };
+	void ctx.api.json("/api/activity/abort", { method: "POST", json: body }).catch(() => {});
+	publishSession(ctx);
+}
+
+async function handleTurnActionIntent(ctx: SessionContext, intent: SessionIntent): Promise<void> {
+	switch (intent.type) {
+		case "reload":
+			return loadChatRecord(ctx);
+		case "send-text":
+		case "steer":
+		case "submit-thinking":
+			return sendComposerIntent(ctx, intent);
+		case "stop":
+			abortActiveSessionTurn(ctx);
+			return;
+		case "answer-question":
+		case "dismiss-question":
+		case "dismiss-problem":
+		case "next-problem":
+		case "retry":
+		case "retry-question":
+		case "continue-if-owed":
+			return handleDockOrRecoveryIntent(ctx, intent);
+		case "save-question-draft":
+			ctx.model?.saveQuestionDraft(intent.questionKey, intent.draft);
+			publishSession(ctx);
+			return;
+		case "rename":
+		case "save-chat-settings":
+			return handleMetadataIntent(ctx, intent);
+		case "clear-error":
+			ctx.serverTurnError = null;
+			ctx.error = null;
+			ctx.model?.clearError();
+			publishSession(ctx);
+			return;
+		default:
+			return assertNeverIntent(intent);
+	}
+}
+
 function wireSessionEvents(ctx: SessionContext, events: Events): Unsubscribe {
 	const offs: Unsubscribe[] = [
 		events.on("record-changed", ({ chatId }) => {
@@ -250,9 +346,7 @@ function wireSessionEvents(ctx: SessionContext, events: Events): Unsubscribe {
 			publishSession(ctx);
 		}),
 		events.on("turn-started", ({ chatId }) => {
-			if (chatId === ctx.chatId && ctx.model && !isModelBusy(ctx.model)) {
-				void ctx.model.resumeStream(true);
-			}
+			if (chatId === ctx.chatId && ctx.model && !isModelBusy(ctx.model)) void ctx.model.resumeStream(true);
 		}),
 		events.on("turn-settled", ({ chatId }) => {
 			if (chatId === ctx.chatId && !isModelBusy(ctx.model)) void loadChatRecord(ctx);
@@ -260,14 +354,15 @@ function wireSessionEvents(ctx: SessionContext, events: Events): Unsubscribe {
 		events.onResync(() => {
 			if (!isModelBusy(ctx.model)) void loadChatRecord(ctx);
 		}),
+		ctx.settings ? ctx.settings.subscribe(() => settlePendingMountWork(ctx)) : () => {},
 	];
 	return () => {
 		for (const off of offs) off();
 	};
 }
 
-function createSessionContext(chatId: string, api: ApiClient): SessionContext {
-	const cell = createCell<SessionStoreModel>({
+function createInitialSessionCell(chatId: string): Cell<SessionStoreModel> {
+	return createCell<SessionStoreModel>({
 		load: "loading",
 		error: null,
 		chatId,
@@ -277,11 +372,26 @@ function createSessionContext(chatId: string, api: ApiClient): SessionContext {
 		state: null,
 		turnError: null,
 		imageSnapshots: {},
+		tree: null,
+		chatSettings: null,
+		pricing: null,
+		coverage: null,
+		queuedSteers: [],
+		pendingQuestion: null,
+		activeProblem: null,
+		questionDraft: null,
+		openingDraft: null,
 	});
-	return {
-		chatId,
-		api,
+}
+
+function createSessionContext(opts: CreateSessionStoreOptions): SessionContext {
+	const cell = createInitialSessionCell(opts.chatId);
+	const ctx: SessionContext = {
+		chatId: opts.chatId,
+		api: opts.api,
 		cell,
+		settings: opts.settings,
+		initialPrompt: opts.initialPrompt,
 		seenSnapshots: new Set(),
 		imageControllers: new Set(),
 		disposed: false,
@@ -293,9 +403,19 @@ function createSessionContext(chatId: string, api: ApiClient): SessionContext {
 		kind: "teach",
 		compacting: false,
 		serverTurnError: null,
+		serverTree: null,
+		chatSettings: null,
+		pricing: null,
+		coverage: null,
 		imageSnapshots: {},
 		model: null,
+		openingDraft: null,
+		initialHandled: false,
+		pendingAutoPrompt: null,
+		deferredMountContinue: false,
+		publish: () => publishSession(ctx),
 	};
+	return ctx;
 }
 
 function disposeSessionContext(ctx: SessionContext, offEvents: Unsubscribe): void {
@@ -310,20 +430,15 @@ function disposeSessionContext(ctx: SessionContext, offEvents: Unsubscribe): voi
 	ctx.model = null;
 }
 
-export function createSessionStore({
-	chatId,
-	api,
-	events,
-}: CreateSessionStoreOptions): Store<SessionStoreModel, SessionIntent> {
-	const ctx = createSessionContext(chatId, api);
-	const offEvents = wireSessionEvents(ctx, events);
+export function createSessionStore(
+	options: CreateSessionStoreOptions,
+): Store<SessionStoreModel, SessionIntent> {
+	const ctx = createSessionContext(options);
+	const offEvents = wireSessionEvents(ctx, options.events);
 	void loadChatRecord(ctx);
 
 	return createStoreFromCell<SessionStoreModel, SessionIntent>(ctx.cell, {
-		async onSend(intent) {
-			if (intent.type === "reload") return loadChatRecord(ctx);
-			assertNeverIntent(intent);
-		},
+		onSend: (intent) => handleTurnActionIntent(ctx, intent),
 		onDispose: () => disposeSessionContext(ctx, offEvents),
 	});
 }

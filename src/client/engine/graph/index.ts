@@ -1,4 +1,5 @@
 export * from "./cluster-geometry.ts";
+export * from "./derive-canvas.ts";
 export * from "./notes-import-queue.ts";
 export {
 	CLUSTER_LIGHTNESS,

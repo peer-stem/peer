@@ -1,6 +1,8 @@
 /**
- * Route screen-key derivation and C1 screen-view factory resolver (`views §2.3–§2.4`, `R1`).
+ * Route screen-key derivation and C2a screen-view factory resolver (`views §2.3–§2.4`, `R1`).
  */
+import { createHomeView } from '../home/home-view.js';
+import { createNewSessionView } from '../new-session/new-session-view.js';
 import { createSessionView } from '../session/session-view.js';
 import { createNotFoundScreen } from '../shared/not-found-screen.js';
 import { createPendingScreen } from '../shared/pending-screen.js';
@@ -21,9 +23,19 @@ export function screenKeyForRoute(route) {
   }
 }
 
-export function resolveScreenFactory(route, { blocks, onToggleSidebar } = {}) {
+export function resolveScreenFactory(route, {
+  blocks, onToggleSidebar, onExpand, onPickDirectory, onPickFiles
+} = {}) {
+  if (route?.name === 'home') {
+    return (host, ctx) => createHomeView(host, { ...ctx, onToggleSidebar, onPickDirectory, onPickFiles });
+  }
+  if (route?.name === 'new-session') {
+    return (host, ctx) => createNewSessionView(host, { ...ctx, onToggleSidebar, onPickDirectory, onPickFiles });
+  }
   if (route?.name === 'session') {
-    return (host, ctx) => createSessionView(host, { ...ctx, blocks, onToggleSidebar });
+    return (host, ctx) => createSessionView(host, {
+      ...ctx, blocks, onToggleSidebar, onExpand, onPickDirectory, onPickFiles
+    });
   }
   if (route?.name === 'not-found') {
     return (host, ctx) => createNotFoundScreen(host, ctx);

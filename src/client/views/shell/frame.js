@@ -1,129 +1,38 @@
 /**
- * Shell DOM skeleton (`views §2.1`) and persistent layer overlays (`cheat-sheet`
- * and Sprint C1 `Settings -> Data` LearnHarness importer, `views §2.5` item 4).
+ * Shell DOM skeleton (`views §2.1`) and persistent layer overlays (`settings`,
+ * `setup`, `cheat-sheet`, `startup-message`, and `pan-zoom-viewer`).
  * Never touches `<html>` (`R6`).
  */
-import { button, createLife, documentOf, el, injectUiStyles, input, textNode, writeText } from 'cloudcanvas-lib/ui';
-import { KEYBOARD_ACTIONS, formatBinding } from './keys.js';
+import { button, createLife, documentOf, el, injectUiStyles, textNode, writeText } from 'cloudcanvas-lib/ui';
+import { createCheatSheet } from '../overlays/cheat-sheet.js';
+import { createPanZoomViewer } from '../overlays/pan-zoom-viewer.js';
+import { createStartupMessageDialog } from '../overlays/startup-message.js';
+import { createSettingsDialog } from '../settings/settings-dialog.js';
+import { createSetupDialog } from '../settings/setup-dialog.js';
 import { injectShellStyles } from './shell.css.js';
 
-const CHEAT_SCOPES = [
-  ['global', 'Global'],
-  ['chat', 'Chat'],
-  ['graph', 'Graph view']
-];
+const AUX_STORE_KEYS = ['settings', 'models', 'appearance', 'desktop', 'prefs'];
 
-function appendCheatScopeGroup(doc, modal, scope, heading) {
-  const actions = KEYBOARD_ACTIONS.filter((item) => item.scope === scope);
-  if (actions.length === 0) return;
-  const group = el(doc, 'div', { className: 'peer-shell-cheat-group' });
-  group.append(el(doc, 'div', { className: 'peer-shell-cheat-heading', text: heading }));
-  for (const item of actions) {
-    const row = el(doc, 'div', { className: 'peer-shell-cheat-row' });
-    const kbd = el(doc, 'kbd', { className: 'peer-shell-kbd', text: formatBinding(item.binding) });
-    row.append(el(doc, 'span', { text: item.label }), kbd);
-    group.append(row);
+function isLegacySettingsModel(aux) {
+  if (!aux || typeof aux !== 'object') return false;
+  if (AUX_STORE_KEYS.some((key) => key in aux)) return false;
+  return 'record' in aux || 'load' in aux || 'lastImport' in aux || 'effective' in aux || 'error' in aux;
+}
+
+function normalizeAuxStores(aux) {
+  if (!aux || typeof aux !== 'object') {
+    return { settings: null, models: null, appearance: null, desktop: null, prefs: null };
   }
-  modal.append(group);
-}
-
-function buildCheatSheetOverlay(doc, onClose) {
-  const life = createLife();
-  const backdrop = el(doc, 'div', {
-    className: 'peer-shell-backdrop',
-    attrs: { 'data-testid': 'cheat-sheet', 'data-peer-layer': 'cheat-sheet' }
-  });
-  const modal = el(doc, 'section', {
-    className: 'peer-shell-modal',
-    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Keyboard shortcuts', tabindex: '-1' }
-  });
-  const header = el(doc, 'div', { className: 'peer-shell-modal-header' });
-  header.append(
-    el(doc, 'h2', { className: 'peer-shell-modal-title', text: 'Keyboard shortcuts' }),
-    button(doc, { label: 'Close', signal: life.signal, onClick: () => onClose?.() })
-  );
-  modal.append(header);
-  for (const [scope, heading] of CHEAT_SCOPES) appendCheatScopeGroup(doc, modal, scope, heading);
-  life.on(backdrop, 'click', (event) => { if (event.target === backdrop) onClose?.(); });
-  backdrop.append(modal);
-  return { node: backdrop, destroy: () => { if (life.destroy()) backdrop.remove(); } };
-}
-
-function formatImportReportItems(report) {
-  if (!report || typeof report !== 'object') return [];
-  return [
-    `Chats imported: ${Number(report.chatsImported ?? 0)}`,
-    `Nodes imported: ${Number(report.nodesImported ?? 0)}`,
-    `Chains imported: ${Number(report.chainsImported ?? 0)}`,
-    `Sources imported: ${Number(report.sourcesImported ?? 0)}`,
-    `Objects stored: ${Number(report.objectsStored ?? 0)}`,
-    `Themes imported: ${Number(report.themesImported ?? 0)}`,
-    `Prompts imported: ${Number(report.promptsImported ?? 0)}`,
-    `Flashcard decks imported: ${Number(report.flashcardDecksImported ?? 0)}`,
-    `Settings imported: ${report.settingsImported ? 'yes' : 'no'}`,
-    `Corrupt files skipped: ${Number(report.corruptFilesSkipped ?? 0)}`
-  ];
-}
-
-function buildImportSection(doc, life, onImportData) {
-  const section = el(doc, 'div', { className: 'peer-shell-import-section', attrs: { 'data-peer-settings-section': 'data' } });
-  section.append(el(doc, 'strong', { text: 'Data · Import LearnHarness Data' }));
-  const row = el(doc, 'div', { className: 'peer-shell-import-row' });
-  const dirInput = input(doc, {
-    label: 'LearnHarness data directory',
-    placeholder: '/path/to/learnharness/data',
-    signal: life.signal,
-    attrs: { 'data-peer-import-input': '' }
-  });
-  const submitImport = () => {
-    const sourceDirectory = dirInput.value.trim();
-    if (sourceDirectory) onImportData?.(sourceDirectory);
+  if (isLegacySettingsModel(aux)) {
+    return { settings: aux, models: null, appearance: null, desktop: null, prefs: null };
+  }
+  return {
+    settings: aux.settings ?? null,
+    models: aux.models ?? null,
+    appearance: aux.appearance ?? null,
+    desktop: aux.desktop ?? null,
+    prefs: aux.prefs ?? null
   };
-  const importBtn = button(doc, {
-    className: 'is-primary',
-    label: 'Import LearnHarness Data',
-    signal: life.signal,
-    attrs: { 'data-peer-action': 'import-learnharness' },
-    onClick: submitImport
-  });
-  row.append(dirInput, importBtn);
-  const errorEl = el(doc, 'p', { className: 'peer-shell-import-error', attrs: { 'data-peer-import-error': '', hidden: true } });
-  const errorText = textNode(doc, errorEl);
-  const reportList = el(doc, 'ul', { className: 'peer-shell-import-report', attrs: { 'data-peer-import-report': '', hidden: true } });
-  section.append(row, errorEl, reportList);
-  return { section, errorEl, errorText, reportList };
-}
-
-function buildSettingsOverlay(doc, callbacks) {
-  const life = createLife();
-  const backdrop = el(doc, 'div', {
-    className: 'peer-shell-backdrop',
-    attrs: { 'data-testid': 'settings-dialog', 'data-peer-layer': 'settings' }
-  });
-  const modal = el(doc, 'section', {
-    className: 'peer-shell-modal',
-    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Settings', tabindex: '-1' }
-  });
-  const header = el(doc, 'div', { className: 'peer-shell-modal-header' });
-  const titleEl = el(doc, 'h2', { className: 'peer-shell-modal-title' });
-  const titleText = textNode(doc, titleEl, 'Settings');
-  header.append(titleEl, button(doc, { label: 'Close', signal: life.signal, onClick: () => callbacks.onCloseSettings?.() }));
-  const importer = buildImportSection(doc, life, callbacks.onImportData);
-  modal.append(header, importer.section);
-  life.on(backdrop, 'click', (event) => { if (event.target === backdrop) callbacks.onCloseSettings?.(); });
-  backdrop.append(modal);
-
-  const update = (shellSection, settingsModel) => {
-    writeText(titleText, shellSection ? `Settings · ${shellSection}` : 'Settings');
-    const err = String(settingsModel?.error ?? '').trim();
-    writeText(importer.errorText, err);
-    importer.errorEl.hidden = err === '';
-    const lines = formatImportReportItems(settingsModel?.lastImport);
-    importer.reportList.hidden = lines.length === 0;
-    importer.reportList.replaceChildren(...lines.map((line) => el(doc, 'li', { text: line })));
-  };
-
-  return { node: backdrop, update, destroy: () => { if (life.destroy()) backdrop.remove(); } };
 }
 
 function buildSidebar(doc, life, callbacks) {
@@ -147,29 +56,116 @@ function buildSidebar(doc, life, callbacks) {
   return side;
 }
 
-function syncLayerOverlays(state, shellModel, settingsModel) {
-  const wantSettings = Boolean(shellModel?.settings?.open);
-  if (wantSettings && !state.settingsOverlay) {
-    state.settingsOverlay = buildSettingsOverlay(state.doc, state.callbacks);
-    state.layerHost.append(state.settingsOverlay.node);
+function syncSettingsLayer(state, shellModel, auxStores) {
+  const want = Boolean(shellModel?.settings?.open);
+  if (want && !state.settingsOverlay) {
+    state.settingsOverlay = createSettingsDialog(state.layerHost, {
+      ...state.callbacks,
+      onSelectSection: state.callbacks.onSelectSettingsSection ?? state.callbacks.onSelectSection,
+      onClose: () => state.callbacks.onCloseSettings?.()
+    });
     state.layers?.push({ id: 'settings', kind: 'modal', onEscape: () => state.callbacks.onCloseSettings?.() });
-  } else if (!wantSettings && state.settingsOverlay) {
+  } else if (!want && state.settingsOverlay) {
     state.layers?.remove('settings');
     state.settingsOverlay.destroy();
     state.settingsOverlay = null;
   }
-  if (state.settingsOverlay) state.settingsOverlay.update(shellModel?.settings?.section ?? null, settingsModel);
+  if (!state.settingsOverlay) return;
+  state.settingsOverlay.update({
+    section: shellModel?.settings?.section ?? null,
+    shell: shellModel,
+    settings: auxStores.settings,
+    models: auxStores.models,
+    appearance: auxStores.appearance,
+    desktop: auxStores.desktop,
+    prefs: auxStores.prefs
+  });
+}
+
+function syncSetupAndCheatLayers(state, shellModel, auxStores) {
+  const wantSetup = Boolean(shellModel?.setupOpen);
+  if (wantSetup && !state.setupOverlay) {
+    state.setupOverlay = createSetupDialog(state.layerHost, {
+      onClose: () => state.callbacks.onCloseSetup?.(),
+      onSettingsIntent: state.callbacks.onSettingsIntent,
+      onModelsIntent: state.callbacks.onModelsIntent
+    });
+    state.layers?.push({ id: 'setup', kind: 'modal', onEscape: () => state.callbacks.onCloseSetup?.() });
+  } else if (!wantSetup && state.setupOverlay) {
+    state.layers?.remove('setup');
+    state.setupOverlay.destroy();
+    state.setupOverlay = null;
+  }
+  if (state.setupOverlay) state.setupOverlay.update({ settings: auxStores.settings, models: auxStores.models });
 
   const wantCheat = Boolean(shellModel?.cheatSheet);
   if (wantCheat && !state.cheatOverlay) {
-    state.cheatOverlay = buildCheatSheetOverlay(state.doc, state.callbacks.onCloseCheatSheet);
-    state.layerHost.append(state.cheatOverlay.node);
+    state.cheatOverlay = createCheatSheet(state.layerHost, { onClose: () => state.callbacks.onCloseCheatSheet?.() });
     state.layers?.push({ id: 'cheat-sheet', kind: 'modal', onEscape: () => state.callbacks.onCloseCheatSheet?.() });
   } else if (!wantCheat && state.cheatOverlay) {
     state.layers?.remove('cheat-sheet');
     state.cheatOverlay.destroy();
     state.cheatOverlay = null;
   }
+  if (state.cheatOverlay) {
+    state.cheatOverlay.update({ open: true, keymapOverrides: auxStores.prefs?.keymapOverrides ?? null });
+  }
+}
+
+function syncStartupMessageLayer(state, shellModel, auxStores) {
+  const message = shellModel?.startupMessage ?? auxStores.desktop?.startupMessage ?? null;
+  const want = Boolean(message);
+  if (want && !state.startupOverlay) {
+    state.startupOverlay = createStartupMessageDialog(state.layerHost, {
+      onDismiss: (id) => state.callbacks.onDismissStartupMessage?.(id ?? state.lastStartupId)
+    });
+    state.layers?.push({
+      id: 'startup-message',
+      kind: 'modal',
+      onEscape: () => state.callbacks.onDismissStartupMessage?.(state.lastStartupId)
+    });
+  } else if (!want && state.startupOverlay) {
+    state.layers?.remove('startup-message');
+    state.startupOverlay.destroy();
+    state.startupOverlay = null;
+    state.lastStartupId = null;
+  }
+  if (state.startupOverlay && message) {
+    state.lastStartupId = message.id ?? message.message?.id ?? null;
+    state.startupOverlay.update(message);
+  }
+}
+
+function openViewerOverlay(state, payload) {
+  if (state.life.dead) return;
+  if (!state.viewerOverlay) {
+    state.viewerOverlay = createPanZoomViewer(state.layerHost, { onClose: () => closeViewerOverlay(state) });
+    state.layers?.push({ id: 'viewer', kind: 'modal', onEscape: () => closeViewerOverlay(state) });
+  }
+  state.viewerOverlay.update(payload);
+}
+
+function closeViewerOverlay(state) {
+  if (!state.viewerOverlay) return;
+  state.layers?.remove('viewer');
+  state.viewerOverlay.destroy();
+  state.viewerOverlay = null;
+}
+
+function applyFrameUpdate(state, nodes, shellModel = {}, aux = null) {
+  if (state.life.dead) return;
+  const auxStores = normalizeAuxStores(aux);
+  nodes.root.setAttribute('data-peer-platform', String(shellModel?.platform ?? 'web'));
+  nodes.root.setAttribute('data-peer-electron', String(Boolean(shellModel?.electron)));
+  nodes.side.hidden = !shellModel?.sidebar?.open;
+  nodes.side.setAttribute('data-peer-narrow', String(Boolean(shellModel?.sidebar?.narrow)));
+  const upd = shellModel?.update ?? auxStores.desktop?.update ?? null;
+  const bannerMsg = upd ? `Update ${upd.version} (${upd.status})` : '';
+  writeText(nodes.updateText, bannerMsg);
+  nodes.updateBanner.hidden = bannerMsg === '';
+  syncSettingsLayer(state, shellModel, auxStores);
+  syncSetupAndCheatLayers(state, shellModel, auxStores);
+  syncStartupMessageLayer(state, shellModel, auxStores);
 }
 
 export function createShellFrame(host, { layers, ...callbacks } = {}) {
@@ -189,29 +185,32 @@ export function createShellFrame(host, { layers, ...callbacks } = {}) {
   layerHost.append(updateBanner);
   root.append(side, content, layerHost);
   host.append(root);
-  const state = { doc, layerHost, layers, callbacks, settingsOverlay: null, cheatOverlay: null };
-
-  const update = (shellModel = {}, settingsModel = null) => {
-    if (life.dead) return;
-    root.setAttribute('data-peer-platform', String(shellModel?.platform ?? 'web'));
-    root.setAttribute('data-peer-electron', String(Boolean(shellModel?.electron)));
-    side.hidden = !shellModel?.sidebar?.open;
-    side.setAttribute('data-peer-narrow', String(Boolean(shellModel?.sidebar?.narrow)));
-    const upd = shellModel?.update;
-    const bannerMsg = upd ? `Update ${upd.version} (${upd.status})` : '';
-    writeText(updateText, bannerMsg);
-    updateBanner.hidden = bannerMsg === '';
-    syncLayerOverlays(state, shellModel, settingsModel);
+  const state = {
+    doc, life, layerHost, layers, callbacks, lastStartupId: null,
+    settingsOverlay: null, setupOverlay: null, cheatOverlay: null, startupOverlay: null, viewerOverlay: null
   };
+  const nodes = { root, side, updateBanner, updateText };
 
   const destroy = () => {
     if (!life.destroy()) return;
+    state.viewerOverlay?.destroy();
+    state.startupOverlay?.destroy();
     state.cheatOverlay?.destroy();
+    state.setupOverlay?.destroy();
     state.settingsOverlay?.destroy();
+    state.viewerOverlay = null;
+    state.startupOverlay = null;
     state.cheatOverlay = null;
+    state.setupOverlay = null;
     state.settingsOverlay = null;
     root.remove();
   };
 
-  return { root, side, content, layerHost, update, destroy };
+  return {
+    root, side, content, layerHost,
+    update: (shellModel, aux) => applyFrameUpdate(state, nodes, shellModel, aux),
+    openViewer: (payload) => openViewerOverlay(state, payload),
+    closeViewer: () => closeViewerOverlay(state),
+    destroy
+  };
 }

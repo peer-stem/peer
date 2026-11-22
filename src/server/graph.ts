@@ -1,17 +1,79 @@
 import * as fs from "node:fs";
 import { LEDGER_FILES, POSITIONS_FILE } from "../../config.ts";
-import type { GraphSnapshot } from "../core/contracts.ts";
+import type { GraphSnapshot, PropProgressView } from "../core/contracts.ts";
 import type { GraphCostSummary } from "../core/cost-summary.ts";
 import { graphCostSummary } from "../core/cost-summary.ts";
 import { graphSnapshot } from "../core/graph.ts";
-import { birthSessionPartition } from "../core/session-clusters.ts";
 import {
 	deleteNodeTraces,
 	type NodeDeletionStats,
 } from "../core/graph-deletion.ts";
 import { extractionStatuses } from "../agent/subagents/extraction.ts";
-import { stores } from "./stores.ts";
+import {
+	LJ_STATUS,
+	pollLumberJackMutations,
+	type LumberJackForest,
+} from "../store/lumberjack/index.ts";
+import { getActiveLumberJackBundle, stores, type LumberJackStoreBundle } from "./stores.ts";
 import { callCost } from "./pricing.ts";
+
+const forestAnchors = new WeakMap<LumberJackForest, number>();
+let minForestAnchor = 1;
+
+function collectLearnerProgress(
+	bundle: LumberJackStoreBundle,
+	nodes: readonly { id: string }[],
+): Record<string, PropProgressView> {
+	const out: Record<string, PropProgressView> = {};
+	for (const node of nodes) {
+		const progress = bundle.learnerStore.readPropositionProgress(node.id);
+		if (progress) out[node.id] = progress;
+	}
+	return out;
+}
+
+function readForestHeadSequence(forest: LumberJackForest): bigint {
+	if (!forest.isOpen) return 0n;
+	try {
+		const first = pollLumberJackMutations(forest, { epoch: 0n, after: 0n });
+		if (first.status !== LJ_STATUS.GAP) return first.maxSequence;
+		const resumeAfter = first.oldest > 0n ? first.oldest - 1n : 0n;
+		const second = pollLumberJackMutations(forest, { epoch: first.epoch, after: resumeAfter });
+		return second.maxSequence > resumeAfter ? second.maxSequence : resumeAfter;
+	} catch {
+		return 0n;
+	}
+}
+
+function anchorForForest(forest: LumberJackForest): number {
+	const existing = forestAnchors.get(forest);
+	if (existing !== undefined) return existing;
+	let dirMtime = 0;
+	try {
+		dirMtime = Math.trunc(fs.statSync(forest.directory).mtimeMs);
+	} catch {
+		dirMtime = 0;
+	}
+	const anchor = Math.max(minForestAnchor, dirMtime, 1);
+	forestAnchors.set(forest, anchor);
+	return anchor;
+}
+
+function forestRevision(forest: LumberJackForest): number {
+	const anchor = anchorForForest(forest);
+	const rev = anchor + Number(readForestHeadSequence(forest));
+	if (rev >= minForestAnchor) minForestAnchor = rev + 1;
+	return rev;
+}
+
+function readSourcePlacementNames(): Record<string, string> {
+	const organization = stores.sourceOrganizationStore.read();
+	const out: Record<string, string> = {};
+	for (const [id, placement] of Object.entries(organization.placements)) {
+		if (placement.name !== undefined) out[id] = placement.name;
+	}
+	return out;
+}
 
 /**
  * Server-side graph entry for the home view (GET /api/graph). A PURE READ:
@@ -20,26 +82,21 @@ import { callCost } from "./pricing.ts";
  * reflects whatever the pipeline has merged so far.
  */
 export function graphView(): GraphSnapshot {
-	const organization = stores.sourceOrganizationStore.read();
-	const names = Object.fromEntries(Object.entries(organization.placements).flatMap(([id, p]) => p.name === undefined ? [] : [[id, p.name]]));
-	return graphSnapshot(stores, names);
+	const snap = graphSnapshot(stores, readSourcePlacementNames());
+	const bundle = getActiveLumberJackBundle();
+	if (!bundle) return snap;
+	const learnerProgress = collectLearnerProgress(bundle, snap.nodes);
+	return Object.keys(learnerProgress).length > 0 ? { ...snap, learnerProgress } : snap;
 }
 
 /** The graph view's cost surface (GET /api/graph/costs — the 2026-09 cost
- *  pill): fold every usage channel into stage totals + recent runs. A pure
- *  read over the chat records (chat-front-door runs), the notes sources
- *  (notes-front-door runs), and the naming ledger (graph-global runs);
- *  dollars are inferred by the pure core fold (core/cost-summary.ts +
- *  prices.ts) — nothing here stores or caches money. */
+ *  pill): fold every usage channel into stage totals + recent runs. */
 export function graphCosts(): GraphCostSummary {
-	const chats = stores.chatStore
-		.listChats()
-		.flatMap((summary) => {
-			const record = stores.chatStore.getChat(summary.id);
-			return record?.extractions?.length
-				? [{ title: record.title ?? summary.id, extractions: record.extractions }]
-				: [];
-		});
+	const chats = stores.chatStore.listChats().flatMap((summary) => {
+		const record = stores.chatStore.getChat(summary.id);
+		if (!record?.extractions?.length) return [];
+		return [{ title: record.title ?? summary.id, extractions: record.extractions }];
+	});
 	const sources = stores.graphStore
 		.readSources()
 		.filter((s) => s.extractions?.length)
@@ -48,12 +105,8 @@ export function graphCosts(): GraphCostSummary {
 }
 
 /** The graph's version stamp (session-deletion wave 6): the max mtime
- * across every graph data file — ledgers, positions. Moves on ANY
- * graph write (merge append, settle, or a deletion's atomic rewrite),
- * never moves on reads, and needs no bookkeeping of its own: the fs
- * IS the counter. Consumers poll it (the activity feed
- *  carries it; the DELETE response returns it) to know clusters/layout
- *  must refetch — the "graph changed underneath me" signal. */
+ * across every graph data file — ledgers, positions — plus LumberJack
+ * forest sequence when active. */
 export function graphRevision(): number {
 	let revision = 0;
 	for (const file of [
@@ -69,6 +122,8 @@ export function graphRevision(): number {
 			/* absent — nothing has ever written it */
 		}
 	}
+	const bundle = getActiveLumberJackBundle();
+	if (bundle) revision = Math.max(revision, forestRevision(bundle.forest));
 	return revision;
 }
 
@@ -82,26 +137,7 @@ export type NodeDeleteOutcome =
 
 /**
  * Delete one node by id — FULL DEATH (core/graph-deletion.ts for the
- * ledger semantics). The guard family is deliberately NOT the chat
- * one, and the reasoning is worth writing down:
- *
- *   - No turn/jobs gates. Turns and background jobs never write the
- *     graph ledgers; a turn's follow-up extraction registers as a run,
- *     and every code path here is synchronous — nothing can register
- *     or merge between the gate and the ledger rewrite (the event loop
- *     never yields inside this function).
- *   - THE EXTRACTION GATE — 409 while ANY pipeline run is registered,
- *     anywhere. A mid-flight run holds findings extracted from
- *     transcripts that predate the deletion; its merges could re-add
- *     aliases, provenance, or events to the dying node (the
- *     re-reference risk the dispatch flags). Unlike chat deletion we
- *     do NOT abort the run: it belongs to some session, and killing
- *     that session's spend is outside this deletion's blast radius —
- *     the UI retries once the dock drains. A run that starts AFTER
- *     the deletion is legitimate re-learning: it reads post-deletion
- *     ledgers, mints a fresh node for a re-taught topic, and
- *     mergeFindings ignores linkTo ids that no longer exist (the
- *     existingIds guard) — no dangling edges, no resurrection.
+ * ledger semantics). 409 while any extraction pipeline run is active.
  */
 export function deleteGraphNode(nodeId: string): NodeDeleteOutcome {
 	if (extractionStatuses().length > 0) {
@@ -112,12 +148,9 @@ export function deleteGraphNode(nodeId: string): NodeDeleteOutcome {
 			error: "An extraction is running — try again when it finishes",
 		};
 	}
-	// THE SYNC BLOCK — no awaits below (the doc above): the gate and the
-	// rewrite are one atomic stretch of the event loop.
 	const stats = deleteNodeTraces(stores.graphStore, nodeId);
 	if (stats === null) {
 		return { ok: false, status: 404, code: "not_found", error: "No such node" };
 	}
 	return { ok: true, stats, graphRevision: graphRevision() };
 }
-

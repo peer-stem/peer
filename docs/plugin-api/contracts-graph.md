@@ -7,12 +7,14 @@
 - [Cluster](#cluster) — supporting declaration
 - [CoverageEntry](#coverageentry)
 - [EmissionStats](#emissionstats) — supporting declaration
+- [FsrsScheduleView](#fsrsscheduleview) — supporting declaration
 - [GraphChain](#graphchain)
 - [GraphEdge](#graphedge) — supporting declaration
 - [GraphNode](#graphnode)
 - [GraphSnapshot](#graphsnapshot)
 - [NotesSource](#notessource)
 - [Position](#position)
+- [PropProgressView](#propprogressview) — supporting declaration
 - [ProvenancePoint](#provenancepoint) — supporting declaration
 - [SessionCheckpoint](#sessioncheckpoint)
 
@@ -163,6 +165,100 @@ this field contribute zero removals.
 
 ```ts
 droppedChains?: number;
+```
+
+## FsrsScheduleView
+
+Supporting declaration used by a public type. This is not an additional runtime API or SDK helper.
+
+FSRS card schedule projection surfaced on `GraphSnapshot.learnerProgress`.
+
+```ts
+export interface FsrsScheduleView {
+    due: number | string;
+    stability: number;
+    difficulty: number;
+    elapsed_days?: number;
+    scheduled_days?: number;
+    reps: number;
+    lapses: number;
+    learning_steps?: number;
+    state: number;
+    last_review?: number | string | null;
+}
+```
+
+**Member index** (including nested object members; inherited members are defined in the linked base types):
+
+- [due](#fsrsscheduleview-due)
+- [stability](#fsrsscheduleview-stability)
+- [difficulty](#fsrsscheduleview-difficulty)
+- [elapsed_days](#fsrsscheduleview-elapsed_days)
+- [scheduled_days](#fsrsscheduleview-scheduled_days)
+- [reps](#fsrsscheduleview-reps)
+- [lapses](#fsrsscheduleview-lapses)
+- [learning_steps](#fsrsscheduleview-learning_steps)
+- [state](#fsrsscheduleview-state)
+- [last_review](#fsrsscheduleview-last_review)
+
+### FsrsScheduleView due
+
+```ts
+due: number | string;
+```
+
+### FsrsScheduleView stability
+
+```ts
+stability: number;
+```
+
+### FsrsScheduleView difficulty
+
+```ts
+difficulty: number;
+```
+
+### FsrsScheduleView elapsed_days
+
+```ts
+elapsed_days?: number;
+```
+
+### FsrsScheduleView scheduled_days
+
+```ts
+scheduled_days?: number;
+```
+
+### FsrsScheduleView reps
+
+```ts
+reps: number;
+```
+
+### FsrsScheduleView lapses
+
+```ts
+lapses: number;
+```
+
+### FsrsScheduleView learning_steps
+
+```ts
+learning_steps?: number;
+```
+
+### FsrsScheduleView state
+
+```ts
+state: number;
+```
+
+### FsrsScheduleView last_review
+
+```ts
+last_review?: number | string | null;
 ```
 
 ## GraphChain
@@ -373,10 +469,11 @@ export interface GraphSnapshot {
     nodeSessions: Record<string, string[]>;
     clusters: Cluster[];
     positions?: Record<string, Position>;
+    learnerProgress?: Record<string, PropProgressView>;
 }
 ```
 
-**Related types:** [Cluster](contracts-graph.md#cluster), [GraphChain](contracts-graph.md#graphchain), [GraphEdge](contracts-graph.md#graphedge), [GraphNode](contracts-graph.md#graphnode), [Position](contracts-graph.md#position).
+**Related types:** [Cluster](contracts-graph.md#cluster), [GraphChain](contracts-graph.md#graphchain), [GraphEdge](contracts-graph.md#graphedge), [GraphNode](contracts-graph.md#graphnode), [Position](contracts-graph.md#position), [PropProgressView](contracts-graph.md#propprogressview).
 
 **Member index** (including nested object members; inherited members are defined in the linked base types):
 
@@ -391,6 +488,7 @@ export interface GraphSnapshot {
 - [nodeSessions](#graphsnapshot-nodesessions)
 - [clusters](#graphsnapshot-clusters)
 - [positions](#graphsnapshot-positions)
+- [learnerProgress](#graphsnapshot-learnerprogress)
 
 ### GraphSnapshot nodes
 
@@ -484,9 +582,7 @@ nodeSessions: Record<string, string[]>;
 Birth-session communities (core/session-clusters.ts: each
 proposition joins the cluster of the session that birthed it —
 session provenance, no Louvain, no embeddings), MIN_CLUSTER_SIZE
-≥ 3 as the hull presentation rule. Propositions only — implication
-nodes are never partitioned. Purely provenance-derived — never
-depends on layout.
+≥ 3 as the hull presentation rule.
 
 ```ts
 clusters: Cluster[];
@@ -500,6 +596,15 @@ the view then falls back to its own one-shot forceAtlas2 pass.
 
 ```ts
 positions?: Record<string, Position>;
+```
+
+### GraphSnapshot learnerProgress
+
+Per-proposition learner mastery and FSRS schedule under LumberJack.
+Included ONLY when non-empty; omitted in flat-file mode or when empty.
+
+```ts
+learnerProgress?: Record<string, PropProgressView>;
 ```
 
 ## NotesSource
@@ -598,6 +703,38 @@ x: number;
 
 ```ts
 y: number;
+```
+
+## PropProgressView
+
+Supporting declaration used by a public type. This is not an additional runtime API or SDK helper.
+
+Learner mastery and spaced-repetition schedule for one proposition node.
+
+```ts
+export interface PropProgressView {
+    mastery?: number;
+    fsrs?: FsrsScheduleView;
+}
+```
+
+**Related types:** [FsrsScheduleView](contracts-graph.md#fsrsscheduleview).
+
+**Member index** (including nested object members; inherited members are defined in the linked base types):
+
+- [mastery](#propprogressview-mastery)
+- [fsrs](#propprogressview-fsrs)
+
+### PropProgressView mastery
+
+```ts
+mastery?: number;
+```
+
+### PropProgressView fsrs
+
+```ts
+fsrs?: FsrsScheduleView;
 ```
 
 ## ProvenancePoint
