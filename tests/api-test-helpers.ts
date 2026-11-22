@@ -41,6 +41,7 @@ export const CONCRETE_ROUTE_PATHS: Readonly<Record<string, string>> = {
 	"/api/graph/render-settings": "/api/graph/render-settings",
 	"/api/graph": "/api/graph",
 	"/api/graph/sources": "/api/graph/sources",
+	"/api/graph/sources/folders/[id]": "/api/graph/sources/folders/missing-folder",
 	"/api/graph/status": "/api/graph/status",
 	"/api/jobs": "/api/jobs",
 	"/api/keys/[id]": "/api/keys/BRAVE_API_KEY",
@@ -69,10 +70,21 @@ export const CONCRETE_ROUTE_PATHS: Readonly<Record<string, string>> = {
 
 export const GOLDEN_ROUTE_PATTERNS: readonly string[] = Object.keys(CONCRETE_ROUTE_PATHS).sort();
 
+function canWriteScratchParent(dir: string): boolean {
+	try {
+		fs.accessSync(dir, fs.constants.W_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 export function resolveScratchRoot(): string {
-	const root = fs.existsSync("/usr/lib/persist/peer")
-		? "/usr/lib/persist/peer/scratch"
-		: path.join(WORKTREE_ROOT, ".fresh-data");
+	const persistScratch = "/usr/lib/persist/peer/scratch";
+	const usePersist =
+		canWriteScratchParent(persistScratch) ||
+		(fs.existsSync("/usr/lib/persist/peer") && canWriteScratchParent("/usr/lib/persist/peer"));
+	const root = usePersist ? persistScratch : path.join(WORKTREE_ROOT, ".fresh-data");
 	fs.mkdirSync(root, { recursive: true, mode: 0o700 });
 	return root;
 }

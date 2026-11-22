@@ -38,7 +38,6 @@ import { createPluginTaskRecordStore } from "../store/plugin-task-records.ts";
 import { promptOverrides as flatPromptOverrides } from "../store/prompt-overrides.ts";
 import {
 	readFileAccessSettings as flatReadFileAccessSettings,
-	readSettings as flatReadSettings,
 	settingsStore as flatSettingsStore,
 	writeSettings as flatWriteSettings,
 } from "../store/settings.ts";
@@ -51,9 +50,12 @@ import {
 	getActiveLumberJackBundle,
 	readActivePluginMetadata,
 	readActivePluginTask as readActivePluginTaskRecord,
+	readModelCatalogFromActiveStore,
 	readRenderSettingsFromActiveStore,
+	readSettingsRecordFromActiveStore,
 	recoverActivePluginTasks as recoverActivePluginTaskRecords,
 	runLearnHarnessImportWithStores,
+	writeModelCatalogToActiveStore,
 	writeRenderSettingsToActiveStore,
 	type ActivateLumberJackOptions,
 	type ActiveLumberJackSubstrate,
@@ -64,7 +66,9 @@ export {
 	getActiveLumberJackBundle,
 	readActivePluginMetadata,
 	readActivePluginTaskRecord,
+	readModelCatalogFromActiveStore,
 	recoverActivePluginTaskRecords,
+	writeModelCatalogToActiveStore,
 	type ActivateLumberJackOptions,
 	type ActiveLumberJackSubstrate,
 	type LearnHarnessImportReport,
@@ -80,8 +84,7 @@ const activeThemes = (): ThemeStore => getActiveLumberJackBundle()?.themeStore ?
 const activePrompts = (): PromptOverrideStore => getActiveLumberJackBundle()?.promptOverrides ?? flatPromptOverrides;
 
 export function readSettingsRecord(): UserSettings | null {
-	const bundle = getActiveLumberJackBundle();
-	return bundle ? bundle.settingsStore.readSettings() : flatReadSettings();
+	return readSettingsRecordFromActiveStore();
 }
 
 export function writeSettingsRecord(raw: unknown): UserSettings {
