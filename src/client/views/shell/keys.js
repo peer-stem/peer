@@ -33,6 +33,17 @@ const SCREEN_ACTIONS = new Set([
   'toggle-dictation'
 ]);
 
+function resolveAction(binding, overrides) {
+  if (overrides && typeof overrides === 'object') {
+    for (const def of KEYBOARD_ACTIONS) {
+      if (def.displayOnly) continue;
+      const effective = overrides[def.id] ?? def.binding;
+      if (effective === binding) return def.id;
+    }
+  }
+  return actionForBinding(binding);
+}
+
 function handleTabShortcut(event, onScreenAction) {
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
   event.preventDefault();
@@ -51,7 +62,7 @@ function dispatchAction(event, action, onShellAction, onScreenAction) {
   }
 }
 
-export function createShortcutRouter(win, { onShellAction, onScreenAction, layers } = {}) {
+export function createShortcutRouter(win, { onShellAction, onScreenAction, layers, getOverrides } = {}) {
   const life = createLife();
 
   const onKeyDown = (event) => {
@@ -65,7 +76,7 @@ export function createShortcutRouter(win, { onShellAction, onScreenAction, layer
       return;
     }
     if (event.defaultPrevented) return;
-    const action = actionForBinding(eventBinding(event));
+    const action = resolveAction(eventBinding(event), getOverrides?.());
     if (!action) return;
     const hasModifier = Boolean(event.metaKey || event.ctrlKey || event.altKey);
     if (isTypingSurface(event) && !hasModifier) return;

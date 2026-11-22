@@ -219,6 +219,8 @@ export function handlePointerUp(state: RendererState, e: PointerEvent): void {
 	if (e.button !== 0) return;
 	if (state.dragId) {
 		const id = state.dragId;
+		const pos = eventPos(state.canvas, e);
+		const dragged = state.dragOrigin !== null && Math.hypot(pos.x - state.dragOrigin.x, pos.y - state.dragOrigin.y) > CLICK_SLOP;
 		state.dragId = null;
 		state.dragOrigin = null;
 		try { state.canvas.releasePointerCapture(e.pointerId); } catch { /* already released */ }
@@ -231,9 +233,8 @@ export function handlePointerUp(state: RendererState, e: PointerEvent): void {
 		if (state.simActive) {
 			state.sim?.alphaTarget(0);
 			state.markDirty();
-		} else {
-			state.callbacks.onSelect(id, eventPos(state.canvas, e));
 		}
+		if (!dragged) state.callbacks.onSelect(id, pos);
 		return;
 	}
 	if (!state.downPos) return;

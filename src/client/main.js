@@ -28,6 +28,10 @@ export function mountClientApp(doc = globalThis.document, options = {}) {
     router: state.router,
     shell: state.shell,
     settings: state.settings,
+    models: state.models,
+    appearance: state.appearance,
+    desktop: state.desktop,
+    prefs: state.prefs,
     screen: (routeModel) => state.screen(routeModel),
     blocks
   });

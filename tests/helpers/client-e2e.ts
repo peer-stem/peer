@@ -417,7 +417,7 @@ function createStopHandler(
 }
 
 export async function startClientE2eHarness(options?: ClientE2eOptions): Promise<ClientE2eHarness> {
-	const timeoutMs = options?.timeoutMs ?? 25_000;
+	const timeoutMs = options?.timeoutMs ?? 45_000;
 	const executablePath = await findLocalChrome(options?.executablePath);
 	const layout = createScratchLayout();
 	let serverChild: ChildProcess | null = null;

@@ -18,7 +18,7 @@
  */
 // ─── Knowledge graph (vision §1 — global, cross-session) ────────────────────
 
-import type { CallUsage, ExtractionRunUsage } from "./chat.ts";
+import type { ExtractionRunUsage } from "./chat.ts";
 
 /** Directed relation derived from stored reasoning chains, not an independent
  * ledger record. Canvas edges connect a single premise directly to its
@@ -109,7 +109,6 @@ export interface NamingRunStats {
  *  (the format.json sidecar — src/store/graph-format.ts). */
 export const CURRENT_GRAPH_FORMAT_VERSION = 1;
 
-
 export interface GraphNode {
 	/** Opaque stable id, store-assigned: "n_" + nanoid-like. */
 	id: string;
@@ -175,21 +174,6 @@ export interface CoverageEntry {
  * derive state. sessions.jsonl is the extraction checkpoint: which chats
  * the extraction pipeline has processed, and through which updatedAt
  * (never extract the same turns twice).
- *
- * The EXTRACTION PIPELINE is the sole graph writer (extractor → auditor →
- * merger), tree-blind and post-hoc (2026-09-27 cleanup — clear separation
- * of work): the extractor is the ONLY stage that sees the raw source
- * (whole session as readable markdown, or raw notes) and extracts the
- * reasoning chains — propositions (lonely relevant ones included) plus
- * follows/supports edges; the auditor NEVER sees
- * the source — its job is preparing the merge: identity verdicts
- * (link-or-create, merging equivalent forms of the same proposition) via
- * graph-exploration tools (find / list_sessions / list_propositions), and
- * it may draw BRIDGING edges from existing graph nodes to the new
- * propositions; the merger (core/graph.ts, deterministic) applies the
- * verdicts and appends. Quiz events and understanding observations are
- * GONE — the pipeline is the only session→graph bridge, and it carries
- * propositions + edges, nothing else.
  */
 
 // ─── Extraction findings (extractor output → audit → merger input) ───────────
@@ -211,20 +195,11 @@ export interface ExtractedProposition {
 	statement: string;
 	/** Verbatim phrasings the session used. */
 	aliases: string[];
-	/* Submit-schema slim (owner, 2026-09-28): `messages` and `evidence`
-	 * are GONE. The verbatim-quote fields were never persisted and weak
-	 * models burned their retries on them ("propositions.0: must be
-	 * object" — the stringified-payload collapse). The extractor reports
-	 * propositions + structure, nothing else. */
 	/** OPTIONAL, SESSION PATH ONLY (owner, 2026-10-13): the message id of
 	 *  the ONE teacher passage this proposition came from — the extractor
 	 *  copies it from the view's "TEACHER [id]" label (core/coverage.ts
 	 *  messageViewLines) and the submit seam validates it against the
-	 *  CURRENT batch. The merger stamps it into the node's provenance
-	 *  point {chatId, messageId} (new nodes AND link-appends); chains
-	 *  stay chat-level. Notes imports and legacy/core callers have none:
-	 *  undefined → messageId "" (chat-level), so NO persisted shape or
-	 *  format version changes (GraphNode / ProvenancePoint untouched). */
+	 *  CURRENT batch. */
 	messageId?: string;
 }
 
@@ -247,10 +222,7 @@ export interface SessionFindings {
 /** One identity verdict: the extractor's local proposition id → the
  *  EXISTING graph node that proposition IS. On link, the session's
  *  phrasings (statement, aliases) join the node's aliases and the
- *  provenance unions. EQUIVALENCE BIAS (2026-09-27): paraphrases,
- *  rewordings, and compressions of the same claim MERGE — do not create
- *  a duplicate because the wording differs. Only genuinely distinct
- *  propositions stay apart. */
+ *  provenance unions. */
 export interface IdentityLink {
 	id: string;
 	linkTo: string;
@@ -258,12 +230,7 @@ export interface IdentityLink {
 
 /** The auditor's output — VERDICTS ONLY (owner, 2026-09-28): the auditor
  *  never alters the extractor's findings, so it does not restate them;
- *  the deterministic merger joins findings + verdicts. `links` = the
- *  identity verdicts (local id ⇄ existing node) — the auditor's ENTIRE
- *  deliverable (owner, 2026-09-28 evening: the edges argument is GONE —
- *  the auditor never mints edges; the graph connects across sources
- *  solely through identified equivalences). No drop channel — the
- *  auditor never rejects; the extractor is fully trusted (2026-09-27). */
+ *  the deterministic merger joins findings + verdicts. */
 export interface AuditVerdicts {
 	links: IdentityLink[];
 }
@@ -278,6 +245,26 @@ export interface Cluster {
 	label: string | null;
 	/** Node ids, sorted. Hull + centroid are renderer concerns. */
 	members: string[];
+}
+
+/** FSRS card schedule projection surfaced on `GraphSnapshot.learnerProgress`. */
+export interface FsrsScheduleView {
+	due: number | string;
+	stability: number;
+	difficulty: number;
+	elapsed_days?: number;
+	scheduled_days?: number;
+	reps: number;
+	lapses: number;
+	learning_steps?: number;
+	state: number;
+	last_review?: number | string | null;
+}
+
+/** Learner mastery and spaced-repetition schedule for one proposition node. */
+export interface PropProgressView {
+	mastery?: number;
+	fsrs?: FsrsScheduleView;
 }
 
 /** Graph projection containing stored propositions/chains and derived rendering,
@@ -315,14 +302,15 @@ export interface GraphSnapshot {
 	/** Birth-session communities (core/session-clusters.ts: each
 	 * proposition joins the cluster of the session that birthed it —
 	 * session provenance, no Louvain, no embeddings), MIN_CLUSTER_SIZE
-	 * ≥ 3 as the hull presentation rule. Propositions only — implication
-	 * nodes are never partitioned. Purely provenance-derived — never
-	 * depends on layout. */
+	 * ≥ 3 as the hull presentation rule. */
 	clusters: Cluster[];
 	/** Resting layout positions per node id, when a positions ledger
 	 *  exists (core/layout.ts settle writes it). Absent on a fresh graph —
 	 *  the view then falls back to its own one-shot forceAtlas2 pass. */
 	positions?: Record<string, Position>;
+	/** Per-proposition learner mastery and FSRS schedule under LumberJack.
+	 *  Included ONLY when non-empty; omitted in flat-file mode or when empty. */
+	learnerProgress?: Record<string, PropProgressView>;
 }
 
 /** A node's resting position in layout space (the positions ledger). */
@@ -333,22 +321,15 @@ export interface Position {
 
 /** The auto-title's character cap (owner, 2026-10-06): long enough to
  *  stay informative in the sidebar and the top bar, short enough that a
- *  first message never reads as a paragraph. Tunable — one number, one
- *  place. */
+ *  first message never reads as a paragraph. */
 export const TITLE_MAX_CHARS = 72;
 
 /** Derive a short chat title from the learner's first message (pure).
  *  Smart truncation (owner, 2026-10-06): the cut snaps to a word boundary
- *  AT OR UNDER the cap — a title never ends mid-word. The one exception
- *  is a single word longer than the cap (rare, but real: identifiers,
- *  URLs): it cuts at the cap, splitting the word. Whitespace collapses to
- *  single spaces first, so boundaries are always single-space boundaries.
- *  Used on chat creation; deterministic so tests can pin it. */
+ *  AT OR UNDER the cap — a title never ends mid-word. */
 export function titleFromPrompt(prompt: string): string {
 	const oneLine = prompt.replace(/\s+/g, " ").trim();
 	if (oneLine.length <= TITLE_MAX_CHARS) return oneLine;
-	// Last space among the first TITLE_MAX_CHARS characters; the cut sits
-	// before it so no trailing space rides into the title.
 	let cut = -1;
 	for (let i = TITLE_MAX_CHARS; i > 0; i--) {
 		if (oneLine[i - 1] === " ") {
@@ -356,9 +337,6 @@ export function titleFromPrompt(prompt: string): string {
 			break;
 		}
 	}
-	// One long word: no boundary exists under the cap — split it (owner's
-	// special case). This also lands correctly when the first word exactly
-	// fills the cap: cutting at the cap IS the boundary.
 	if (cut < 0) cut = TITLE_MAX_CHARS;
 	return `${oneLine.slice(0, cut)}…`;
 }
