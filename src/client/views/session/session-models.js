@@ -159,49 +159,64 @@ function derivePracticeToolPart(part, id, toolName, options) {
 }
 
 function derivePluginCard(part, id, toolName) {
-	const pq = asRecord(part.pluginQuestion);
+	if (part.pluginQuestion) {
+		return {
+			kind: "plugin-question-part",
+			id,
+			partType: String(part.type),
+			toolName,
+			isAnswered: part.state === "output-available",
+			pluginQuestion: part.pluginQuestion,
+			output: part.output,
+		};
+	}
 	const pp = asRecord(part.pluginProblem);
 	const input = asRecord(part.input);
-	const prompt = String(
-		input?.question ?? input?.prompt ?? input?.statement ?? input?.title ?? pq?.prompt ?? pp?.title ?? "",
-	).trim();
-	const answer = summarizeAnswerValue(part.output);
-	const lines = [];
-	if (prompt) lines.push(prompt);
-	if (answer) lines.push(`Answer: ${answer}`);
+	const prompt = String(input?.statement ?? input?.prompt ?? pp?.prompt ?? pp?.label ?? "").trim();
 	return {
 		kind: "card",
 		id,
 		partType: String(part.type),
-		cardKind: pp ? "problem" : "question",
-		title: pp ? `Problem (${toolName})` : `Question (${toolName})`,
-		meta: String(part.state ?? pq?.status ?? ""),
-		lines,
+		cardKind: "problem",
+		title: String(pp?.label || `Problem (${toolName})`),
+		meta: String(part.state ?? ""),
+		lines: prompt ? [prompt] : [],
 		errorText: part.errorText ? String(part.errorText) : null,
+	};
+}
+
+function deriveSubagentDataCard(part, id, data, options) {
+	const subKind = String(data?.kind ?? "job");
+	const ui = asRecord(data?.ui);
+	const isAborted = part.type === "data-subagent-aborted";
+	return {
+		kind: "steer-card",
+		id,
+		partType: part.type,
+		messageId: String(options.messageId ?? id),
+		subagentType: isAborted ? "aborted" : "artifact",
+		hasArtifactData: !isAborted && data !== null,
+		subKind,
+		result: data?.result ?? null,
+		failure: typeof data?.failure === "string" ? data.failure : undefined,
+		inverted: Boolean(ui?.inverted),
 	};
 }
 
 function deriveDataCard(part, id, options) {
 	const data = asRecord(part.data);
+	if (part.type === "data-plugin-problem-submission") {
+		const problemId = typeof data?.problemId === "string" ? data.problemId : "";
+		return { kind: "plugin-problem-submitted", id, partType: part.type, data, problemSnapshot: options.problemSnapshotsById?.get?.(problemId) ?? null };
+	}
 	if (part.type === "data-practice-thinking") {
-		return {
-			kind: "thinking-card",
-			id,
-			partType: part.type,
-			text: String(data?.text ?? ""),
-			commit: data?.commit,
-			images: Array.isArray(data?.images) ? data.images : [],
-			mode: options.mode,
-		};
+		return { kind: "thinking-card", id, partType: part.type, text: String(data?.text ?? ""), commit: data?.commit, images: Array.isArray(data?.images) ? data.images : [], mode: options.mode };
 	}
 	if (part.type === "data-practice-next") {
 		return { kind: "card", id, partType: part.type, cardKind: "divider", title: "Next problem", meta: "", lines: [], errorText: null };
 	}
 	if (part.type === "data-probe-handoff") {
-		return {
-			kind: "card", id, partType: part.type, cardKind: "divider",
-			title: "Assessment complete — planning lesson", meta: "", lines: [], errorText: null,
-		};
+		return { kind: "card", id, partType: part.type, cardKind: "divider", title: "Assessment complete — planning lesson", meta: "", lines: [], errorText: null };
 	}
 	if (part.type === "data-plan-block") {
 		const nodes = Array.isArray(data?.nodes) ? data.nodes : [];
@@ -209,27 +224,10 @@ function deriveDataCard(part, id, options) {
 		return { kind: "card", id, partType: part.type, cardKind: "plan", title: "Lesson plan", meta: `${nodes.length} steps`, lines, errorText: null };
 	}
 	if (part.type === "data-subagent-artifact" || part.type === "data-subagent-aborted") {
-		const subKind = String(data?.kind ?? "job");
-		const ui = asRecord(data?.ui);
-		const isAborted = part.type === "data-subagent-aborted";
-		return {
-			kind: "steer-card",
-			id,
-			partType: part.type,
-			messageId: String(options.messageId ?? id),
-			subagentType: isAborted ? "aborted" : "artifact",
-			hasArtifactData: !isAborted && data !== null,
-			subKind,
-			result: data?.result ?? null,
-			failure: typeof data?.failure === "string" ? data.failure : undefined,
-			inverted: Boolean(ui?.inverted),
-		};
+		return deriveSubagentDataCard(part, id, data, options);
 	}
 	const fallback = summarizeAnswerValue(data);
-	return {
-		kind: "card", id, partType: String(part.type), cardKind: "data",
-		title: String(part.type.replace(/^data-/, "")), meta: "", lines: fallback ? [fallback] : [], errorText: null,
-	};
+	return { kind: "card", id, partType: String(part.type), cardKind: "data", title: String(part.type.replace(/^data-/, "")), meta: "", lines: fallback ? [fallback] : [], errorText: null };
 }
 
 function deriveStructuredPart(part, msgId, index, options) {
@@ -256,6 +254,13 @@ function deriveStructuredPart(part, msgId, index, options) {
 	if (SYNC_TOOL_CALL_NAMES.has(toolName)) {
 		return {
 			kind: "tool-call-card", id, partType: String(part.type), toolName, toolCallId,
+			state: String(part.state ?? ""), input: part.input, output: part.output,
+			errorText: typeof part.errorText === "string" ? part.errorText : undefined,
+		};
+	}
+	if (options.toolRendererNames?.has?.(toolName)) {
+		return {
+			kind: "plugin-tool-card", id, partType: String(part.type), toolName, toolCallId,
 			state: String(part.state ?? ""), input: part.input, output: part.output,
 			errorText: typeof part.errorText === "string" ? part.errorText : undefined,
 		};

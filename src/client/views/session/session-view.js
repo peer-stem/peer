@@ -15,7 +15,7 @@ import { createPlanDock } from "./plan-dock.js";
 import { createPracticeDock } from "./practice-dock.js";
 import { createQuestionDock } from "./question-dock.js";
 import { derivePlanTreeWithStatuses, deriveTopBarModel, deriveTranscriptItem } from "./session-models.js";
-import { buildTranscriptItemContext, mountSessionCompanions, syncSessionCompanions } from "./session-view-chrome.js";
+import { buildProblemSnapshotMap, buildTranscriptItemContext, mountSessionCompanions, syncSessionCompanions } from "./session-view-chrome.js";
 import { injectSessionStyles } from "./session.css.js";
 import { createHeaderRename, createStatsBar } from "./stats-bar.js";
 import { createTranscriptItemView } from "./transcript-item.js";
@@ -53,6 +53,9 @@ function deriveCachedItems(cache, screenModel) {
 	const status = String(screenModel?.status ?? "ready");
 	const imageSnapshots = screenModel?.imageSnapshots ?? {};
 	const jobs = screenModel?.jobs ?? null;
+	const plugins = screenModel?.plugins ?? null;
+	const toolRendererNames = new Set((plugins?.toolRenderers ?? []).map((r) => r.renderer.toolName));
+	const problemSnapshotsById = buildProblemSnapshotMap(screenModel?.state?.nativeMessages);
 	const appearance = screenModel?.appearanceSettings ?? screenModel?.appearance ?? null;
 	const adaptiveQuestions = appearance?.adaptiveQuestions !== false;
 	const rawMessages = Array.isArray(screenModel?.messages) ? screenModel.messages : [];
@@ -69,14 +72,15 @@ function deriveCachedItems(cache, screenModel) {
 			&& prev.status === status
 			&& prev.isLastMessage === isLastMessage
 			&& prev.adaptiveQuestions === adaptiveQuestions
+			&& prev.plugins === plugins
 			&& (!prev.hasDispatch || prev.jobs === jobs)
 			&& sameSnapshots(prev.snapshotIds, imageSnapshots, prev.imageSnapshots);
 		const derived = canReuse
 			? prev.derived
-			: deriveTranscriptItem(msg, { mode, status, imageSnapshots, adaptiveQuestions, appearance, isLastMessage });
+			: deriveTranscriptItem(msg, { mode, status, imageSnapshots, adaptiveQuestions, appearance, isLastMessage, toolRendererNames, problemSnapshotsById });
 		const snapshotIds = derived?.snapshotIds ?? [];
 		const hasDispatch = Boolean(derived?.parts?.some((p) => p.kind === "dispatch-card"));
-		if (id) nextCache.set(id, { rawMsg: msg, mode, status, isLastMessage, adaptiveQuestions, imageSnapshots, snapshotIds, hasDispatch, jobs, derived });
+		if (id) nextCache.set(id, { rawMsg: msg, mode, status, isLastMessage, adaptiveQuestions, plugins, imageSnapshots, snapshotIds, hasDispatch, jobs, derived });
 		if (derived) items.push(derived);
 	}
 	cache.clear();
@@ -180,6 +184,7 @@ function buildFooterControls(doc, life, footerEl, callbacks) {
 		onSteer: ({ text, images }) => send?.({ type: "steer", text, ...(images ? { images } : {}) }),
 		onStop: () => send?.({ type: "stop" }),
 		onOpenSetup: () => send?.({ type: "open-setup" }),
+		onOpenDeepgramKey: () => send?.({ type: "open-settings", section: "keys" }),
 		onPickDirectory,
 		onPickFiles,
 	});
@@ -243,49 +248,70 @@ function buildSessionDom(doc, life, callbacks) {
 function readDockFlags(screenModel) {
 	const status = String(screenModel?.status ?? "ready");
 	const isBusy = status === "submitted" || status === "streaming";
-	const hasQuestion = Boolean(screenModel?.pendingQuestion && screenModel.pendingQuestion.toolCallId);
+	const hasBuiltinQuestion = Boolean(screenModel?.pendingQuestion && screenModel.pendingQuestion.toolCallId);
+	const hasPluginQuestion = !hasBuiltinQuestion && Boolean(screenModel?.pendingPluginQuestion);
+	const hasQuestion = hasBuiltinQuestion || hasPluginQuestion;
 	const rawProb = screenModel?.activeProblem;
-	const hasProblem = !hasQuestion && Boolean(rawProb && (rawProb.toolCallId || rawProb.problemCallId));
-	return { status, isBusy, hasQuestion, hasProblem, rawProb };
+	const hasPluginProblem = !hasQuestion && Boolean(rawProb?.pluginProblem);
+	const hasBuiltinProblem = !hasQuestion && !hasPluginProblem && Boolean(rawProb && (rawProb.toolCallId || rawProb.problemCallId));
+	const hasProblem = hasBuiltinProblem || hasPluginProblem;
+	return { status, isBusy, hasBuiltinQuestion, hasPluginQuestion, hasQuestion, hasBuiltinProblem, hasPluginProblem, hasProblem, rawProb };
+}
+
+function syncPluginDocks(companions, screenModel, flags) {
+	companions.pluginQuestionDock.update({
+		pendingPluginQuestion: flags.hasPluginQuestion ? screenModel.pendingPluginQuestion : null,
+		pluginQuestionDraft: screenModel?.pluginQuestionDraft,
+		plugins: screenModel?.plugins,
+		dictation: screenModel?.dictation,
+		compacting: screenModel?.compacting,
+		mode: screenModel?.mode,
+	});
+	companions.pluginProblemDock.update({
+		activeProblem: flags.hasPluginProblem ? flags.rawProb : null,
+		activeProblemOccurrence: screenModel?.activeProblemOccurrence,
+		pluginProblemDraft: screenModel?.pluginProblemDraft,
+		plugins: screenModel?.plugins,
+		dictation: screenModel?.dictation,
+		compacting: screenModel?.compacting,
+		status: screenModel?.status,
+		mode: screenModel?.mode,
+	});
 }
 
 function syncFooterAndDocks(state, screenModel, chatId) {
-	const { nodes } = state;
+	const { nodes, companions } = state;
 	const turnError = String(screenModel?.turnError ?? "").trim();
 	writeText(nodes.turnErrorText, turnError);
 	nodes.turnErrorEl.hidden = turnError === "";
 	nodes.errorBar.hidden = turnError === "";
 
-	const { isBusy, hasQuestion, hasProblem, rawProb } = readDockFlags(screenModel);
+	const flags = readDockFlags(screenModel);
 	nodes.questionDock.update({
-		pendingQuestion: hasQuestion ? screenModel.pendingQuestion : null,
+		pendingQuestion: flags.hasBuiltinQuestion ? screenModel.pendingQuestion : null,
 		questionDraft: screenModel?.questionDraft,
 		compacting: screenModel?.compacting,
 		mode: screenModel?.mode,
 	});
 	nodes.practiceDock.update({
-		activeProblem: hasProblem ? rawProb : null,
+		activeProblem: flags.hasBuiltinProblem ? flags.rawProb : null,
 		compacting: screenModel?.compacting,
 		status: screenModel?.status,
 		mode: screenModel?.mode,
 	});
+	syncPluginDocks(companions, screenModel, flags);
 	nodes.composer.update({
-		chatId,
-		configured: screenModel?.configured,
-		status: screenModel?.status,
-		compacting: screenModel?.compacting,
-		queuedSteers: screenModel?.queuedSteers,
-		openingDraft: screenModel?.openingDraft,
-		hidden: hasQuestion || hasProblem,
+		chatId, configured: screenModel?.configured, status: screenModel?.status,
+		compacting: screenModel?.compacting, queuedSteers: screenModel?.queuedSteers,
+		openingDraft: screenModel?.openingDraft, dictation: screenModel?.dictation,
+		hidden: flags.hasQuestion || flags.hasProblem,
 	});
 	nodes.statsBar.update({
-		contextTokens: screenModel?.contextTokens ?? null,
-		pricing: screenModel?.pricing ?? null,
-		chatSettings: screenModel?.chatSettings ?? null,
-		effectiveModel: screenModel?.effectiveModel ?? null,
+		contextTokens: screenModel?.contextTokens ?? null, pricing: screenModel?.pricing ?? null,
+		chatSettings: screenModel?.chatSettings ?? null, effectiveModel: screenModel?.effectiveModel ?? null,
 		availableModels: screenModel?.availableModels ?? [],
 	});
-	syncAbortDialogState(state, screenModel, { isBusy, hasQuestion, hasProblem });
+	syncAbortDialogState(state, screenModel, flags);
 }
 
 function readControlledAbortMode(screenModel) {
@@ -387,10 +413,13 @@ function executeSessionCommand(state, action) {
 	}
 	if (action === "focus-composer") {
 		if (state.nodes.questionDock.focus()) return true;
+		if (state.companions.pluginQuestionDock.focus()) return true;
 		if (state.nodes.practiceDock.focus()) return true;
+		if (state.companions.pluginProblemDock.focus()) return true;
 		state.nodes.composer.focus();
 		return true;
 	}
+	if (action === "toggle-dictation") return state.nodes.composer.toggleDictation();
 	if (action === "escape-session") return handleEscapeSession(state);
 	if (action === "rename-session") return state.nodes.headerRename.open();
 	if (action === "cycle-thinking") return state.nodes.statsBar.cycleThinking();
@@ -410,8 +439,8 @@ function mountAbortDialogForSession(root, state, nodes, send) {
 			state.abortMode = null;
 			state.abortDialog.update(null);
 			if (mode === "turn") send?.({ type: "stop" });
-			else if (mode === "question") nodes.questionDock.dismiss();
-			else if (mode === "problem") nodes.practiceDock.dismiss();
+			else if (mode === "question") { if (!nodes.questionDock.dismiss()) state.companions.pluginQuestionDock.dismiss(); }
+			else if (mode === "problem") { if (!nodes.practiceDock.dismiss()) state.companions.pluginProblemDock.dismiss(); }
 		},
 	});
 }

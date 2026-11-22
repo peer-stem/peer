@@ -1,3 +1,5 @@
+import { eventBinding, type PluginActionShortcut } from "../../../core/index.ts";
+
 export {
 	pluginAssetUrl,
 	pluginViewPath,
@@ -20,3 +22,10 @@ export * from "./plugin-submission-adapters.ts";
 export * from "./plugin-submission-opening.ts";
 export * from "./plugin-submission-runner.ts";
 export * from "./plugin-surface-targets.ts";
+export * from "./plugin-tree-validate.ts";
+
+export function matchesPluginShortcut(event: KeyboardEvent, shortcut: PluginActionShortcut | undefined): boolean {
+	if (!shortcut?.defaultBinding) return false;
+	const pressed = eventBinding(event);
+	return Boolean(pressed && pressed.toLowerCase() === shortcut.defaultBinding.toLowerCase());
+}

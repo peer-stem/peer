@@ -14,15 +14,18 @@ import {
 	type JobRecord,
 	type LhViewMessage,
 } from "../../../core/index.ts";
-import type { SessionStatus } from "../../engine/index.ts";
+import type { PluginFrontendManager, PluginSnapshot, SessionStatus } from "../../engine/index.ts";
 import type { AppearanceIntent, AppearanceModel } from "../appearance.ts";
+import type { DictationStore } from "../dictation.ts";
 import type { CatalogModelEntry, ModelsIntent, ModelsStoreModel } from "../models.ts";
+import type { PluginsStore } from "../plugins.ts";
 import type { PrefsIntent, PrefsModel } from "../prefs.ts";
 import type { Route, RouteModel, RouterStore } from "../router.ts";
 import type { ImageSnapshotEntry, SessionIntent, SessionStoreModel } from "../session.ts";
 import type { SettingsIntent, SettingsModel } from "../settings.ts";
 import type { ShellIntent, ShellModel } from "../shell.ts";
 import type { SideThreadIntent, SideThreadStoreModel } from "../side-thread.ts";
+import type { SpeechIntent, SpeechModel } from "../speech.ts";
 import {
 	createCell,
 	createStoreFromCell,
@@ -70,17 +73,26 @@ export interface SessionScreenModel {
 	readonly coverage?: SessionStoreModel["coverage"];
 	readonly queuedSteers?: SessionStoreModel["queuedSteers"];
 	readonly pendingQuestion?: SessionStoreModel["pendingQuestion"];
+	readonly pendingPluginQuestion?: SessionStoreModel["pendingPluginQuestion"];
 	readonly activeProblem?: SessionStoreModel["activeProblem"];
+	readonly activeProblemOccurrence?: SessionStoreModel["activeProblemOccurrence"];
 	readonly questionDraft?: SessionStoreModel["questionDraft"];
+	readonly pluginQuestionDraft?: SessionStoreModel["pluginQuestionDraft"];
+	readonly pluginProblemDraft?: SessionStoreModel["pluginProblemDraft"];
 	readonly openingDraft?: SessionStoreModel["openingDraft"];
 	readonly effectiveModel?: SessionEffectiveModel | null;
 	readonly availableModels?: readonly CatalogModelEntry[];
 	readonly userThinkingOpen?: boolean;
+	readonly plugins?: PluginSnapshot | null;
+	readonly pluginManager?: PluginFrontendManager | null;
+	readonly speech?: SpeechModel | null;
+	readonly dictation?: DictationStore | null;
 }
 
 export type SessionScreenIntent =
 	| SessionIntent
 	| { readonly type: "side-thread"; readonly action: SideThreadIntent }
+	| { readonly type: "speech"; readonly action: SpeechIntent }
 	| { readonly type: "sync-route"; readonly routeModel: RouteModel }
 	| { readonly type: "open-setup" }
 	| { readonly type: "open-settings"; readonly section?: string }
@@ -102,6 +114,9 @@ export interface CreateSessionScreenStoreOptions {
 	models?: Store<ModelsStoreModel, ModelsIntent>;
 	prefs?: Store<PrefsModel, PrefsIntent>;
 	shell?: Store<ShellModel, ShellIntent>;
+	plugins?: PluginsStore;
+	speech?: Store<SpeechModel, SpeechIntent>;
+	dictation?: DictationStore;
 }
 
 interface SessionScreenLocalState {
@@ -156,11 +171,10 @@ function projectSessionScreen(
 	local: SessionScreenLocalState,
 	session: SessionStoreModel,
 	sideThread: Store<SideThreadStoreModel, SideThreadIntent> | null,
-	appearance: AppearanceModel,
-	settings: SettingsModel,
-	models?: Store<ModelsStoreModel, ModelsIntent>,
-	prefs?: Store<PrefsModel, PrefsIntent>,
+	options: CreateSessionScreenStoreOptions,
 ): SessionScreenModel {
+	const appearance = options.appearance.get();
+	const settings = options.settings.get();
 	return {
 		route: local.routeInfo.route,
 		hash: local.routeInfo.hash,
@@ -191,12 +205,20 @@ function projectSessionScreen(
 		coverage: session.coverage ?? null,
 		queuedSteers: session.queuedSteers ?? [],
 		pendingQuestion: session.pendingQuestion ?? null,
+		pendingPluginQuestion: session.pendingPluginQuestion ?? null,
 		activeProblem: session.activeProblem ?? null,
+		activeProblemOccurrence: session.activeProblemOccurrence ?? null,
 		questionDraft: session.questionDraft ?? null,
+		pluginQuestionDraft: session.pluginQuestionDraft ?? null,
+		pluginProblemDraft: session.pluginProblemDraft ?? null,
 		openingDraft: session.openingDraft ?? null,
 		effectiveModel: computeEffectiveModel(session, settings),
-		availableModels: models ? models.get().models : EMPTY_MODELS,
-		userThinkingOpen: prefs ? prefs.get().userThinkingOpen : true,
+		availableModels: options.models ? options.models.get().models : EMPTY_MODELS,
+		userThinkingOpen: options.prefs ? options.prefs.get().userThinkingOpen : true,
+		plugins: options.plugins ? options.plugins.get() : null,
+		pluginManager: options.plugins ? options.plugins.manager : null,
+		speech: options.speech ? options.speech.get() : null,
+		dictation: options.dictation ?? null,
 	};
 }
 
@@ -231,6 +253,12 @@ async function confirmSessionAbort(
 			const reading = snap.questionDraft?.readingThinking?.trim();
 			const answer = reading ? { ...base, readingThinking: reading } : base;
 			await session.send({ type: "dismiss-question", toolCallId: pq.toolCallId, answer, questionKey: pq.key });
+		} else if (snap.pendingPluginQuestion) {
+			await session.send({
+				type: "dismiss-plugin-question",
+				occurrence: snap.pendingPluginQuestion.occurrence,
+				questionId: snap.pendingPluginQuestion.questionId,
+			});
 		}
 		if (busy) await session.send({ type: "stop" });
 		return;
@@ -269,6 +297,9 @@ async function handleSessionScreenIntent(
 	switch (intent.type) {
 		case "side-thread":
 			await sideThread?.send(intent.action);
+			return;
+		case "speech":
+			await options.speech?.send(intent.action);
 			return;
 		case "sync-route":
 			applyRouteSync(intent.routeModel, chatId, local, publish);
@@ -315,6 +346,8 @@ function wireSessionScreenSubscriptions(
 		options.settings.subscribe(publish),
 		options.models ? options.models.subscribe(publish) : () => {},
 		options.prefs ? options.prefs.subscribe(publish) : () => {},
+		options.plugins ? options.plugins.subscribe(publish) : () => {},
+		options.speech ? options.speech.subscribe(publish) : () => {},
 		options.router
 			? options.router.subscribe((next) => applyRouteSync(next, chatId, local, publish))
 			: () => {},
@@ -337,11 +370,7 @@ export function createSessionScreenStore(
 	};
 	const session = options.openSession(chatId);
 	const sideThread = options.openSideThread ? options.openSideThread(chatId) : null;
-	const compute = () =>
-		projectSessionScreen(
-			local, session.get(), sideThread, options.appearance.get(),
-			options.settings.get(), options.models, options.prefs,
-		);
+	const compute = () => projectSessionScreen(local, session.get(), sideThread, options);
 	const cell = createCell<SessionScreenModel>(compute());
 	const publish = () => {
 		if (!local.disposed) cell.set(compute());

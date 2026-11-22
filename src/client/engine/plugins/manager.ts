@@ -196,17 +196,18 @@ export class PluginFrontendManager {
 		if (this.disposed || this.mutations) return;
 		const generation = ++this.requestGeneration;
 		try {
-			const body = (await this.json("/api/plugins")) as { plugins: PluginInfo[]; directory: string; conflicts?: { id: string; error: string }[] };
+			const body = (await this.json("/api/plugins")) as { plugins?: PluginInfo[]; directory?: string; conflicts?: { id: string; error: string }[] };
 			if (this.disposed || generation !== this.requestGeneration) return;
-			this.reconcile(body.plugins);
-			this.publish({ directory: body.directory, conflicts: body.conflicts ?? [], loading: false, ...(clearError ? { error: undefined } : {}) });
+			this.reconcile(Array.isArray(body?.plugins) ? body.plugins : []);
+			this.publish({ directory: body?.directory, conflicts: body?.conflicts ?? [], loading: false, ...(clearError ? { error: undefined } : {}) });
 		} catch (error) {
 			if (generation === this.requestGeneration) this.publish({ loading: false, error: errorMessage(error) });
 		}
 	}
 
-	reconcile(infos: PluginInfo[]): void {
+	reconcile(rawInfos: PluginInfo[]): void {
 		if (this.disposed) return;
+		const infos = Array.isArray(rawInfos) ? rawInfos : [];
 		this.infos = infos;
 		for (const life of [...this.lives.values()]) {
 			const info = infos.find((item) => item.id === life.id);

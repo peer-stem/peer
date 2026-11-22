@@ -12,6 +12,12 @@ import { createDispatchCardHandle } from "../artifacts/dispatch-card.js";
 import { createProbeDoneHandle } from "../artifacts/probe-done-card.js";
 import { createSteerCardHandle } from "../artifacts/steer-card.js";
 import { createLiveToolHandle, createToolCallHandle } from "../artifacts/tool-cards.js";
+import {
+	createPluginProblemSubmittedHandle,
+	createPluginQuestionPartHandle,
+	createPluginToolRendererHandle,
+} from "../plugin/plugin-transcript-parts.js";
+import { createSpeakButton } from "../voice/speak-button.js";
 import { createAnsweredCardHandle } from "./answered-card.js";
 import { renderUserCitationsStrip, stripCitationLinksFromDisplay } from "./citation-popover.js";
 import {
@@ -47,14 +53,25 @@ function createTextHandle(doc, part, ctx) {
 	const slot = el(doc, "div", { className: "peer-session-markdown", attrs: { "data-peer-part-type": "text" } });
 	const citationsHost = el(doc, "div", { className: "peer-session-citations-host", attrs: { hidden: true } });
 	const mdHost = el(doc, "div", { className: "peer-session-markdown-body" });
-	slot.append(citationsHost, mdHost);
+	const speakHost = el(doc, "div", { className: "peer-session-speak-host", attrs: { hidden: part.role !== "assistant" } });
+	slot.append(citationsHost, mdHost, speakHost);
 	const fenceFor = ctx?.blocks ? (lang) => ctx.blocks.fenceFor(lang) : undefined;
 	const md = createMarkdown(mdHost, { fenceFor, onExpand: ctx?.onExpand });
+	let currentText = String(part.source ?? "");
+	const speakBtn = part.role === "assistant"
+		? createSpeakButton(speakHost, {
+			id: `part:${part.id}`,
+			getText: () => currentText,
+			onSpeak: ctx?.onSpeak,
+			onStop: ctx?.onStopSpeak,
+		})
+		: null;
 	let prevCitationSig = "";
 
 	const update = (nextPart, nextCtx) => {
 		const activeCtx = nextCtx ?? ctx;
 		const rawSource = String(nextPart.source ?? "");
+		currentText = rawSource;
 		const hasCitations = nextPart.role === "user" && collectCitations(rawSource).length > 0;
 		const citationSig = hasCitations ? rawSource : "";
 		if (citationSig !== prevCitationSig) {
@@ -63,9 +80,15 @@ function createTextHandle(doc, part, ctx) {
 		}
 		const displaySource = hasCitations ? stripCitationLinksFromDisplay(rawSource) : rawSource;
 		md.update({ source: displaySource, streaming: Boolean(nextPart.streaming), mode: nextPart.mode, displayOnly: false });
+		speakBtn?.update({ id: `part:${nextPart.id}`, speech: activeCtx?.getSpeech?.() ?? null });
 	};
 	update(part, ctx);
-	return { key: `text:${part.id}`, node: slot, update, destroy: () => { md.destroy(); slot.remove(); } };
+	return {
+		key: `text:${part.id}`,
+		node: slot,
+		update,
+		destroy: () => { speakBtn?.destroy(); md.destroy(); slot.remove(); },
+	};
 }
 
 function createPartHandle(doc, part, ctx) {
@@ -91,6 +114,9 @@ function createPartHandle(doc, part, ctx) {
 	if (part.kind === "probe-done-card") return createProbeDoneHandle(doc, part, ctx);
 	if (part.kind === "live-tool-card") return createLiveToolHandle(doc, part);
 	if (part.kind === "tool-call-card") return createToolCallHandle(doc, part);
+	if (part.kind === "plugin-question-part") return createPluginQuestionPartHandle(doc, part, ctx);
+	if (part.kind === "plugin-problem-submitted") return createPluginProblemSubmittedHandle(doc, part, ctx);
+	if (part.kind === "plugin-tool-card") return createPluginToolRendererHandle(doc, part, ctx);
 	return createGenericCardHandle(doc, part);
 }
 

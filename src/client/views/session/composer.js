@@ -6,7 +6,8 @@
  * strip, Setup CTA, and one-shot `openingDraft` seeding per chat.
  */
 import { button, createLife, documentOf, el, input } from "cloudcanvas-lib/ui";
-import { INSERT_CITATION_EVENT, serializeCitation } from "peer-engine";
+import { INSERT_CITATION_EVENT, joinDictation, serializeCitation } from "peer-engine";
+import { createDictationControl } from "../voice/dictation-control.js";
 import {
 	appendPathTokenToText,
 	extractClipboardImageFiles,
@@ -167,7 +168,12 @@ function buildComposerRow(doc, life, handlers) {
 		onClick: () => handlers.onStop?.(),
 		attrs: { "data-peer-action": "stop-turn", hidden: true },
 	});
-	actions.append(sendBtn, steerBtn, stopBtn);
+	const dictSlot = el(doc, "div");
+	const dictCtl = createDictationControl(dictSlot, {
+		onTranscript: (chunk) => handlers.onTranscript(chunk),
+		onOpenDeepgramKey: () => handlers.onOpenDeepgramKey?.(),
+	});
+	actions.append(dictSlot, sendBtn, steerBtn, stopBtn);
 	row.append(attach.group, textarea, actions);
 	return {
 		row,
@@ -176,6 +182,7 @@ function buildComposerRow(doc, life, handlers) {
 		pickFilesBtn: attach.pickFilesBtn,
 		pickDirBtn: attach.pickDirBtn,
 		textarea,
+		dictCtl,
 		sendBtn,
 		steerBtn,
 		stopBtn,
@@ -291,6 +298,10 @@ function bindComposerEvents(state, callbacks, syncDraftUi) {
 	life.on(nodes.textarea, "keydown", (event) => {
 		if (event.key !== "Enter" || event.shiftKey || event.isComposing || state.composing) return;
 		event.preventDefault();
+		if (nodes.dictCtl.isActive()) {
+			void nodes.dictCtl.finish().then(() => submitComposerPayload(state, null, callbacks, syncDraftUi));
+			return;
+		}
 		submitComposerPayload(state, null, callbacks, syncDraftUi);
 	});
 	life.on(nodes.textarea, "paste", (event) => {
@@ -331,8 +342,35 @@ function applyComposerUpdate(doc, state, syncDraftUi, model = {}) {
 	state.isBusy = status === "submitted" || status === "streaming";
 	state.compacting = Boolean(model.compacting);
 	state.nodes.root.hidden = Boolean(model.hidden);
+	state.nodes.dictCtl.update({
+		dictation: model.dictation ?? null,
+		disabled: !state.configured || state.compacting || Boolean(model.hidden),
+	});
 	renderQueuedSteers(doc, state.nodes.steersEl, model.queuedSteers);
 	syncDraftUi();
+}
+
+function buildComposerHandlers(state, callbacks, syncDraftUi) {
+	return {
+		submit: (mode) => {
+			if (state.nodes.dictCtl.isActive()) {
+				void state.nodes.dictCtl.finish().then(() => submitComposerPayload(state, mode, callbacks, syncDraftUi));
+				return;
+			}
+			submitComposerPayload(state, mode, callbacks, syncDraftUi);
+		},
+		onTranscript: (chunk) => {
+			state.nodes.textarea.value = joinDictation(state.nodes.textarea.value, chunk);
+			syncDraftUi();
+		},
+		onOpenDeepgramKey: callbacks.onOpenDeepgramKey,
+		onStop: callbacks.onStop,
+		onOpenSetup: callbacks.onOpenSetup,
+		onPickFiles: callbacks.onPickFiles,
+		onPickDirectory: callbacks.onPickDirectory,
+		pickFiles: () => void Promise.resolve(callbacks.onPickFiles?.()).then((res) => ingestPickedPaths(state, res, syncDraftUi)),
+		pickDirectory: () => void Promise.resolve(callbacks.onPickDirectory?.()).then((res) => ingestPickedPaths(state, res, syncDraftUi)),
+	};
 }
 
 export function createSessionComposer(host, callbacks = {}) {
@@ -347,15 +385,7 @@ export function createSessionComposer(host, callbacks = {}) {
 		renderTokenAndImageChips(doc, state, syncDraftUi);
 		paintComposerControls(state);
 	};
-	state.nodes = buildComposerNodes(doc, life, {
-		submit: (mode) => submitComposerPayload(state, mode, callbacks, syncDraftUi),
-		onStop: callbacks.onStop,
-		onOpenSetup: callbacks.onOpenSetup,
-		onPickFiles: callbacks.onPickFiles,
-		onPickDirectory: callbacks.onPickDirectory,
-		pickFiles: () => void Promise.resolve(callbacks.onPickFiles?.()).then((res) => ingestPickedPaths(state, res, syncDraftUi)),
-		pickDirectory: () => void Promise.resolve(callbacks.onPickDirectory?.()).then((res) => ingestPickedPaths(state, res, syncDraftUi)),
-	});
+	state.nodes = buildComposerNodes(doc, life, buildComposerHandlers(state, callbacks, syncDraftUi));
 	bindComposerEvents(state, callbacks, syncDraftUi);
 	host.append(state.nodes.root);
 
@@ -376,7 +406,8 @@ export function createSessionComposer(host, callbacks = {}) {
 		element: () => state.nodes.root,
 		update: (model) => applyComposerUpdate(doc, state, syncDraftUi, model),
 		replaceCitation,
+		toggleDictation: () => state.nodes.dictCtl.toggle(),
 		focus: () => { if (!life.dead) state.nodes.textarea.focus(); },
-		destroy: () => { if (life.destroy()) state.nodes.root.remove(); },
+		destroy: () => { if (life.destroy()) { state.nodes.dictCtl.destroy(); state.nodes.root.remove(); } },
 	};
 }

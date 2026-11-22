@@ -13,7 +13,8 @@ import { createSidebarView } from '../sidebar/sidebar-view.js';
 import { injectShellStyles } from './shell.css.js';
 
 const AUX_STORE_KEYS = [
-  'settings', 'models', 'appearance', 'desktop', 'prefs', 'sessions', 'activity', 'activeRoute'
+  'settings', 'models', 'appearance', 'desktop', 'prefs', 'sessions', 'activity',
+  'plugins', 'pluginManager', 'speech', 'activeRoute', 'pathname'
 ];
 
 function isLegacySettingsModel(aux) {
@@ -25,7 +26,8 @@ function isLegacySettingsModel(aux) {
 function normalizeAuxStores(aux) {
   const empty = {
     settings: null, models: null, appearance: null, desktop: null,
-    prefs: null, sessions: null, activity: null, activeRoute: null
+    prefs: null, sessions: null, activity: null, plugins: null,
+    pluginManager: null, speech: null, activeRoute: null, pathname: '/'
   };
   if (!aux || typeof aux !== 'object') return empty;
   if (isLegacySettingsModel(aux)) return { ...empty, settings: aux };
@@ -37,7 +39,11 @@ function normalizeAuxStores(aux) {
     prefs: aux.prefs ?? null,
     sessions: aux.sessions ?? null,
     activity: aux.activity ?? null,
-    activeRoute: aux.activeRoute ?? null
+    plugins: aux.plugins ?? null,
+    pluginManager: aux.pluginManager ?? null,
+    speech: aux.speech ?? null,
+    activeRoute: aux.activeRoute ?? null,
+    pathname: aux.pathname ?? '/'
   };
 }
 
@@ -53,6 +59,9 @@ function deriveSidebarModel(auxStores) {
   return {
     sessionsStore: auxStores.sessions ?? {},
     activity: auxStores.activity ?? {},
+    plugins: auxStores.plugins,
+    pluginManager: auxStores.pluginManager,
+    pathname: auxStores.pathname,
     activeChatId,
     appearance
   };
@@ -80,7 +89,10 @@ function syncSettingsLayer(state, shellModel, auxStores) {
     models: auxStores.models,
     appearance: auxStores.appearance,
     desktop: auxStores.desktop,
-    prefs: auxStores.prefs
+    prefs: auxStores.prefs,
+    plugins: auxStores.plugins,
+    pluginManager: auxStores.pluginManager,
+    speech: auxStores.speech
   });
 }
 

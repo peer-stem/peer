@@ -7,6 +7,7 @@ import {
   button, createLife, createStatus, documentOf, el, injectUiStyles, input, setValue, show
 } from 'cloudcanvas-lib/ui';
 import { createDeleteNodeDialog } from './delete-node-dialog.js';
+import { createPluginActionsBar } from '../plugin/plugin-chrome.js';
 import { createGraphFolderFilter } from './graph-folder-filter.js';
 import { deriveGraphStageModel, deriveHomeViewModel } from './graph-models.js';
 import { createGraphStage } from './graph-stage.js';
@@ -56,9 +57,11 @@ function buildGraphChrome(doc, life, callbacks) {
     onImportNotes: (files) => callbacks.onImportNotes(files),
     onSaveRenderSettings: (settings) => callbacks.onSaveRenderSettings(settings)
   });
-  row.append(folderSlot, searchInput, fitBtn, notesSlot);
+  const pluginSlot = el(doc, 'div');
+  const pluginActions = createPluginActionsBar(pluginSlot, { location: 'graph', testId: 'plugin-graph-actions' });
+  row.append(folderSlot, searchInput, fitBtn, notesSlot, pluginSlot);
   chrome.append(row);
-  return { chrome, folderSlot, folderFilter, searchInput, notesImport };
+  return { chrome, folderSlot, folderFilter, searchInput, notesImport, pluginActions };
 }
 
 function handleDirectNodeDelete(state, nodeId, nodeName) {
@@ -192,6 +195,11 @@ function syncGraphView(state, model = {}, force = false) {
   show(state.chrome.folderSlot, hasFolders);
   state.chrome.folderFilter.update(vm.folderFilter ?? {});
   state.chrome.notesImport.update(vm.notes);
+  state.chrome.pluginActions.update({
+    plugins: model?.plugins ?? vm?.plugins ?? null,
+    manager: model?.pluginManager ?? vm?.pluginManager ?? null,
+    context: { surface: 'home', pathname: '/' }
+  });
 
   const isError = vm.graphLoad === 'error';
   show(state.statusSlot, isError);
@@ -223,6 +231,7 @@ export function createGraphView(host, { send, navigate, onPickFiles } = {}) {
     state.nodeCard.destroy();
     state.chrome.folderFilter.destroy();
     state.chrome.notesImport.destroy();
+    state.chrome.pluginActions.destroy();
     state.statusControl.destroy();
     state.stage.destroy();
     state.root.remove();

@@ -81,22 +81,46 @@ function buildPluginWorkerDom(doc, result, ctx) {
 	}
 	const details = el(doc, "details", { className: "peer-worker-details", attrs: { "data-testid": "plugin-worker-result" } });
 	const fallback = el(doc, "div", { className: "peer-plugin-worker-fallback", attrs: { "data-testid": "plugin-worker-fallback" } });
+	const customSlot = el(doc, "div", { attrs: { "data-testid": "plugin-worker-custom", hidden: true } });
 	const mdSlot = el(doc, "div");
 	const fenceFor = ctx?.blocks ? (lang) => ctx.blocks.fenceFor(lang) : undefined;
 	const md = createMarkdown(mdSlot, { fenceFor, onExpand: ctx?.onExpand });
 	md.update({ source: String(result.text ?? ""), streaming: false, mode: ctx?.getMode?.() ?? "dark", displayOnly: true });
 	fallback.append(mdSlot, buildPluginTaskDetails(doc, result));
 	const bodyWrap = el(doc, "div", { className: "peer-worker-body" });
-	bodyWrap.append(fallback);
+	bodyWrap.append(customSlot, fallback);
 	details.append(buildPluginWorkerSummary(doc, result), bodyWrap);
 	section.append(details);
+	let releaseCustom = null;
+	const syncCustom = (res, activeCtx) => {
+		const mgr = activeCtx?.getPluginManager?.();
+		const reg = res?.toolName ? mgr?.getToolRenderer?.(res.toolName) : null;
+		if (!reg || !mgr) {
+			releaseCustom?.(); releaseCustom = null; customSlot.hidden = true; fallback.hidden = false;
+			return;
+		}
+		if (releaseCustom) return;
+		customSlot.hidden = false;
+		fallback.hidden = true;
+		releaseCustom = mgr.mountRenderer(
+			reg,
+			(child, signal) => reg.renderer.mount(child, {
+				toolName: res.toolName, toolCallId: res.taskId ?? "", state: "output-available",
+				input: res.input, output: res.data ?? res.outcome, signal,
+			}),
+			customSlot,
+			() => { customSlot.hidden = true; fallback.hidden = false; },
+		);
+	};
+	syncCustom(result, ctx);
 	return {
 		node: section,
 		update(nextResult, nextCtx) {
 			if (!nextResult || typeof nextResult !== "object") return;
 			md.update({ source: String(nextResult.text ?? ""), streaming: false, mode: (nextCtx ?? ctx)?.getMode?.() ?? "dark", displayOnly: true });
+			syncCustom(nextResult, nextCtx ?? ctx);
 		},
-		destroy: () => { md.destroy(); section.remove(); },
+		destroy: () => { releaseCustom?.(); md.destroy(); section.remove(); },
 	};
 }
 

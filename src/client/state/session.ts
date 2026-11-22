@@ -1,20 +1,19 @@
 /**
- * Per-chat session store (`c2a-frozen-contracts §3.6`, `f3-c2b §4`).
+ * Per-chat session store (`c2a-frozen-contracts §3.6`, `f3-c2b §4`, `f4-c2c`).
  * Wraps `SessionModel` (`peer-engine`), hydrates `/images` snapshots and `/api/jobs`,
- * manages `opening-prompt.ts` handoff, and gates `continue-if-owed` on `configured`.
+ * manages `opening-prompt.ts` handoff, and supports plugin questions & problems.
  */
 
 import {
+	activeProblemOccurrenceOf,
 	activeProblemOf,
+	pendingPluginQuestionOf,
 	pendingQuestionOf,
 	type ChatKind,
 	type ChatSettings,
-	type ImageSnapshot,
 	type JobRecord,
 	type LhMessage,
 	type PlanTree,
-	type QuestionAnswerData,
-	type QuestionDraft,
 	type SessionPricing,
 } from "../../core/index.ts";
 import {
@@ -23,8 +22,6 @@ import {
 	visibleQueuedSteers,
 	type PluginProblemAvailability,
 	type PluginQuestionAvailability,
-	type SessionState,
-	type SteerQueueItem,
 } from "../engine/index.ts";
 import { ApiError, apiPath, isAbortError, type ApiClient } from "./api.ts";
 import type { Events } from "./events.ts";
@@ -41,10 +38,17 @@ import {
 	settlePendingMountWork,
 	type SessionHydrationTarget,
 } from "./session-helpers.ts";
+import {
+	createInitialSessionCell,
+	EMPTY_SESSION_JOBS,
+	type AttachedImageInput,
+	type ImageSnapshotEntry,
+	type SessionIntent,
+	type SessionStoreModel,
+} from "./session-types.ts";
 import type { SettingsIntent, SettingsModel } from "./settings.ts";
 import {
 	assertNeverIntent,
-	createCell,
 	createStoreFromCell,
 	type Cell,
 	type LoadState,
@@ -52,79 +56,7 @@ import {
 	type Unsubscribe,
 } from "./store.ts";
 
-export interface ImageSnapshotEntry {
-	readonly status: "loading" | "ready" | "error";
-	readonly image?: ImageSnapshot;
-}
-
-export interface AttachedImageInput {
-	readonly type: "image";
-	readonly mimeType: string;
-	readonly data: string;
-}
-
-export interface SessionStoreModel {
-	readonly load: LoadState;
-	readonly error: string | null;
-	readonly chatId: string;
-	readonly title: string;
-	readonly kind: ChatKind;
-	readonly compacting: boolean;
-	readonly state: SessionState | null;
-	readonly turnError: string | null;
-	readonly imageSnapshots: Readonly<Record<string, ImageSnapshotEntry>>;
-	readonly jobs: readonly JobRecord[];
-	readonly tree?: PlanTree | null;
-	readonly chatSettings?: ChatSettings | null;
-	readonly pricing?: SessionPricing | null;
-	readonly coverage?: Readonly<Record<string, unknown>> | null;
-	readonly queuedSteers?: readonly SteerQueueItem[];
-	readonly pendingQuestion?: ReturnType<typeof pendingQuestionOf> | null;
-	readonly activeProblem?: ReturnType<typeof activeProblemOf> | null;
-	readonly questionDraft?: QuestionDraft | null;
-	readonly openingDraft?: string | null;
-}
-
-export type SessionIntent =
-	| { readonly type: "reload" }
-	| { readonly type: "send-text"; readonly text: string; readonly images?: readonly AttachedImageInput[] }
-	| { readonly type: "steer"; readonly text: string; readonly images?: readonly AttachedImageInput[] }
-	| { readonly type: "stop" }
-	| {
-			readonly type: "answer-question";
-			readonly tool: string;
-			readonly toolCallId: string;
-			readonly answer: QuestionAnswerData;
-			readonly questionKey?: string;
-	  }
-	| {
-			readonly type: "dismiss-question";
-			readonly toolCallId: string;
-			readonly answer: QuestionAnswerData;
-			readonly questionKey?: string;
-	  }
-	| { readonly type: "dismiss-problem"; readonly problemCallId: string }
-	| {
-			readonly type: "submit-thinking";
-			readonly problemCallId: string;
-			readonly text: string;
-			readonly images?: readonly AttachedImageInput[];
-	  }
-	| { readonly type: "next-problem" }
-	| { readonly type: "retry" }
-	| {
-			readonly type: "retry-question";
-			readonly messageId?: string;
-			readonly contentIndex?: number;
-			readonly toolCallId?: string;
-	  }
-	| { readonly type: "continue-if-owed" }
-	| { readonly type: "save-question-draft"; readonly questionKey: string; readonly draft: Partial<QuestionDraft> }
-	| { readonly type: "rename"; readonly title: string }
-	| { readonly type: "save-chat-settings"; readonly settings: ChatSettings }
-	| { readonly type: "set-artifact-inverted"; readonly messageId: string; readonly inverted: boolean }
-	| { readonly type: "request-extract" }
-	| { readonly type: "clear-error" };
+export type { AttachedImageInput, ImageSnapshotEntry, SessionIntent, SessionStoreModel };
 
 export interface CreateSessionStoreOptions {
 	chatId: string;
@@ -153,6 +85,8 @@ interface SessionContext extends SessionHydrationTarget {
 	readonly cell: Cell<SessionStoreModel>;
 	loadTicket: number;
 	activeLoad: AbortController | null;
+	inFlightLoad: Promise<void> | null;
+	pendingRecordReload: boolean;
 	load: LoadState;
 	error: string | null;
 	kind: ChatKind;
@@ -161,8 +95,6 @@ interface SessionContext extends SessionHydrationTarget {
 	pricing: SessionPricing | null;
 	coverage: Readonly<Record<string, unknown>> | null;
 }
-
-const EMPTY_JOBS: readonly JobRecord[] = Object.freeze([]);
 
 function isModelBusy(model: SessionModel | null): boolean {
 	return model !== null && (model.status === "submitted" || model.status === "streaming");
@@ -179,9 +111,12 @@ function publishSession(ctx: SessionContext): void {
 		}
 	}
 	const pendingQuestion = state ? pendingQuestionOf(state.nativeMessages) : null;
+	const pendingPluginQuestion = state ? pendingPluginQuestionOf(state.nativeMessages) ?? null : null;
 	const activeProblem = state ? activeProblemOf(state.nativeMessages) ?? null : null;
-	const questionDraft =
-		pendingQuestion && ctx.model ? ctx.model.questionDraft(pendingQuestion.key) ?? null : null;
+	const activeProblemOccurrence = state ? activeProblemOccurrenceOf(state.nativeMessages) : null;
+	const questionDraft = pendingQuestion && ctx.model ? ctx.model.questionDraft(pendingQuestion.key) ?? null : null;
+	const pluginQuestionDraft = pendingPluginQuestion && ctx.model ? { ...ctx.model.pluginQuestionDraft(pendingPluginQuestion) } : null;
+	const pluginProblemDraft = activeProblem?.pluginProblem && ctx.model ? { ...ctx.model.pluginProblemDraft(activeProblem.pluginProblem) } : null;
 	const queuedSteers = state ? visibleQueuedSteers(state.steerQueue, state.nativeMessages) : [];
 	const tree = (state ? latestTreeFromMessages(state.messages) : null) ?? ctx.serverTree;
 	ctx.cell.set({
@@ -201,8 +136,12 @@ function publishSession(ctx: SessionContext): void {
 		coverage: ctx.coverage,
 		queuedSteers,
 		pendingQuestion,
+		pendingPluginQuestion,
 		activeProblem,
+		activeProblemOccurrence,
 		questionDraft,
+		pluginQuestionDraft,
+		pluginProblemDraft,
 		openingDraft: ctx.openingDraft,
 	});
 }
@@ -220,12 +159,7 @@ function applyChatPayload(ctx: SessionContext, data: ChatRecordPayload): void {
 	ctx.coverage = data.coverage ? Object.freeze({ ...data.coverage }) : null;
 	const messages = Array.isArray(data.messages) ? data.messages : [];
 	if (!ctx.model) {
-		const model = new SessionModel({
-			chatId: ctx.chatId,
-			initialMessages: messages,
-			initialError: data.turnError,
-			fetch: ctx.api.fetch,
-		});
+		const model = new SessionModel({ chatId: ctx.chatId, initialMessages: messages, initialError: data.turnError, fetch: ctx.api.fetch });
 		if (data.pluginQuestionAvailability || data.pluginProblemAvailability) {
 			model.setMessages(messages, data.turnError, data.pluginQuestionAvailability, data.pluginProblemAvailability);
 		}
@@ -245,16 +179,12 @@ function applyChatPayload(ctx: SessionContext, data: ChatRecordPayload): void {
 	publishSession(ctx);
 }
 
-async function loadChatRecord(ctx: SessionContext): Promise<void> {
-	if (ctx.disposed) return;
+async function runSingleRecordLoad(ctx: SessionContext): Promise<void> {
 	const ticket = ++ctx.loadTicket;
-	ctx.activeLoad?.abort();
 	const controller = new AbortController();
 	ctx.activeLoad = controller;
 	try {
-		const data = await ctx.api.json<ChatRecordPayload>(apiPath`/api/chats/${ctx.chatId}`, {
-			signal: controller.signal,
-		});
+		const data = await ctx.api.json<ChatRecordPayload>(apiPath`/api/chats/${ctx.chatId}`, { signal: controller.signal });
 		if (ctx.disposed || ticket !== ctx.loadTicket) return;
 		applyChatPayload(ctx, data);
 	} catch (err) {
@@ -272,6 +202,25 @@ async function loadChatRecord(ctx: SessionContext): Promise<void> {
 		ctx.error = err instanceof Error ? err.message : String(err);
 		publishSession(ctx);
 	}
+}
+
+function loadChatRecord(ctx: SessionContext): Promise<void> {
+	if (ctx.disposed) return Promise.resolve();
+	if (ctx.inFlightLoad) {
+		ctx.pendingRecordReload = true;
+		return ctx.inFlightLoad;
+	}
+	const run = (async () => {
+		do {
+			ctx.pendingRecordReload = false;
+			await runSingleRecordLoad(ctx);
+		} while (ctx.pendingRecordReload && !ctx.disposed);
+	})().finally(() => {
+		ctx.inFlightLoad = null;
+		ctx.activeLoad = null;
+	});
+	ctx.inFlightLoad = run;
+	return run;
 }
 
 function abortActiveSessionTurn(ctx: SessionContext): void {
@@ -294,7 +243,10 @@ async function handleTurnActionIntent(ctx: SessionContext, intent: SessionIntent
 			abortActiveSessionTurn(ctx);
 			return;
 		case "answer-question":
+		case "answer-plugin-question":
 		case "dismiss-question":
+		case "dismiss-plugin-question":
+		case "submit-plugin-problem":
 		case "dismiss-problem":
 		case "next-problem":
 		case "retry":
@@ -303,6 +255,14 @@ async function handleTurnActionIntent(ctx: SessionContext, intent: SessionIntent
 			return handleDockOrRecoveryIntent(ctx, intent);
 		case "save-question-draft":
 			ctx.model?.saveQuestionDraft(intent.questionKey, intent.draft);
+			publishSession(ctx);
+			return;
+		case "save-plugin-question-draft":
+			if (ctx.model) Object.assign(ctx.model.pluginQuestionDraft(intent.snapshot), intent.patch);
+			publishSession(ctx);
+			return;
+		case "save-plugin-problem-draft":
+			if (ctx.model) Object.assign(ctx.model.pluginProblemDraft(intent.snapshot), intent.patch);
 			publishSession(ctx);
 			return;
 		case "rename":
@@ -350,69 +310,19 @@ function wireSessionEvents(ctx: SessionContext, events: Events): Unsubscribe {
 		}),
 		ctx.settings ? ctx.settings.subscribe(() => settlePendingMountWork(ctx)) : () => {},
 	];
-	return () => {
-		for (const off of offs) off();
-	};
-}
-
-function createInitialSessionCell(chatId: string): Cell<SessionStoreModel> {
-	return createCell<SessionStoreModel>({
-		load: "loading",
-		error: null,
-		chatId,
-		title: "",
-		kind: "teach",
-		compacting: false,
-		state: null,
-		turnError: null,
-		imageSnapshots: {},
-		jobs: EMPTY_JOBS,
-		tree: null,
-		chatSettings: null,
-		pricing: null,
-		coverage: null,
-		queuedSteers: [],
-		pendingQuestion: null,
-		activeProblem: null,
-		questionDraft: null,
-		openingDraft: null,
-	});
+	return () => { for (const off of offs) off(); };
 }
 
 function createSessionContext(opts: CreateSessionStoreOptions): SessionContext {
 	const cell = createInitialSessionCell(opts.chatId);
 	const ctx: SessionContext = {
-		chatId: opts.chatId,
-		api: opts.api,
-		cell,
-		settings: opts.settings,
-		initialPrompt: opts.initialPrompt,
-		seenSnapshots: new Set(),
-		imageControllers: new Set(),
-		jobStatuses: new Map(),
-		disposed: false,
-		loadTicket: 0,
-		activeLoad: null,
-		load: "loading",
-		error: null,
-		title: "",
-		kind: "teach",
-		compacting: false,
-		serverTurnError: null,
-		serverTree: null,
-		chatSettings: null,
-		pricing: null,
-		coverage: null,
-		imageSnapshots: {},
-		jobs: EMPTY_JOBS,
-		activeJobsLoad: null,
-		inFlightJobs: null,
-		pendingJobsReload: false,
-		model: null,
-		openingDraft: null,
-		initialHandled: false,
-		pendingAutoPrompt: null,
-		deferredMountContinue: false,
+		chatId: opts.chatId, api: opts.api, cell, settings: opts.settings, initialPrompt: opts.initialPrompt,
+		seenSnapshots: new Set(), imageControllers: new Set(), jobStatuses: new Map(), disposed: false,
+		loadTicket: 0, activeLoad: null, inFlightLoad: null, pendingRecordReload: false, load: "loading", error: null, title: "", kind: "teach",
+		compacting: false, serverTurnError: null, serverTree: null, chatSettings: null, pricing: null,
+		coverage: null, imageSnapshots: {}, jobs: EMPTY_SESSION_JOBS, activeJobsLoad: null, inFlightJobs: null,
+		pendingJobsReload: false, model: null, openingDraft: null, initialHandled: false,
+		pendingAutoPrompt: null, deferredMountContinue: false,
 		publish: () => publishSession(ctx),
 		reloadRecord: () => loadChatRecord(ctx),
 	};
@@ -432,14 +342,11 @@ function disposeSessionContext(ctx: SessionContext, offEvents: Unsubscribe): voi
 	ctx.model = null;
 }
 
-export function createSessionStore(
-	options: CreateSessionStoreOptions,
-): Store<SessionStoreModel, SessionIntent> {
+export function createSessionStore(options: CreateSessionStoreOptions): Store<SessionStoreModel, SessionIntent> {
 	const ctx = createSessionContext(options);
 	const offEvents = wireSessionEvents(ctx, options.events);
 	void loadChatRecord(ctx);
 	void loadSessionJobs(ctx);
-
 	return createStoreFromCell<SessionStoreModel, SessionIntent>(ctx.cell, {
 		onSend: (intent) => handleTurnActionIntent(ctx, intent),
 		onDispose: () => disposeSessionContext(ctx, offEvents),

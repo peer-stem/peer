@@ -51,12 +51,13 @@ export function createEmptyLifecycle(info: PluginInfo): PluginLifecycle {
 }
 
 export function buildFrontendPluginList(
-	infos: readonly PluginInfo[],
+	infos: readonly PluginInfo[] | undefined,
 	lives: ReadonlyMap<string, PluginLifecycle>,
 	cleanupErrors: ReadonlyMap<string, string>,
 	pending: ReadonlySet<string>,
 ): FrontendPlugin[] {
-	return infos.map((info) => {
+	const list = Array.isArray(infos) ? infos : [];
+	return list.map((info) => {
 		const life = lives.get(info.id);
 		return {
 			info,

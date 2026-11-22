@@ -6,6 +6,7 @@
  */
 import { button, createLife, documentOf, el, injectUiStyles, placeChildren, show, textNode, writeText } from 'cloudcanvas-lib/ui';
 import { buildSessionTree, emptySourceOrganization, flattenSessionTree, folderDeletionScope } from 'peer-engine';
+import { createPluginActionsBar } from '../plugin/plugin-chrome.js';
 import { createActivityDock } from './activity-dock.js';
 import { SESSION_DELETE_COPY, createDeleteSessionDialog, folderDeleteCopy } from './delete-session-dialog.js';
 import { createCoverageMenuBlock, timeAgo } from './extraction-coverage.js';
@@ -90,13 +91,15 @@ function buildTopNavSection(doc, life, callbacks) {
       attrs: { 'data-peer-nav': 'new-session-practice', 'data-testid': 'new-session-practice', title: 'Practice' }
     })
   );
-  top.append(nav);
-  return top;
+  const pluginSlot = el(doc, 'div');
+  const pluginActions = createPluginActionsBar(pluginSlot, { location: 'sidebar', testId: 'sidebar-actions' });
+  top.append(nav, pluginSlot);
+  return { top, pluginActions };
 }
 
 function buildSidebarChrome(doc, life, callbacks, state) {
   const root = el(doc, 'div', { className: 'peer-sidebar-root' });
-  const top = buildTopNavSection(doc, life, callbacks);
+  const { top, pluginActions } = buildTopNavSection(doc, life, callbacks);
   const searchBar = el(doc, 'div', { className: 'peer-sidebar-search-bar' });
   const searchInput = el(doc, 'input', {
     className: 'peer-sidebar-search-input',
@@ -139,7 +142,7 @@ function buildSidebarChrome(doc, life, callbacks, state) {
     attrs: { 'data-peer-nav': 'settings', 'data-testid': 'settings-entry' }
   }));
   root.append(top, searchBar, filterBand, errEl, listEl, activityHost, footer);
-  return { root, searchInput, filterBtns, errEl, errText, listEl, activityHost };
+  return { root, searchInput, filterBtns, errEl, errText, listEl, activityHost, pluginActions };
 }
 
 function handleSearchKeyDown(ev, inputEl, state, callbacks) {
@@ -429,6 +432,11 @@ function applySidebarModelUpdate(doc, dom, state, model = {}) {
     });
   }
   state.activityDock.update(model?.activity ?? slice?.activity ?? {});
+  dom.pluginActions.update({
+    plugins: model?.plugins ?? null,
+    manager: model?.pluginManager ?? null,
+    context: { surface: 'app', pathname: model?.pathname ?? '/' }
+  });
   state.renderNow();
 }
 
@@ -474,6 +482,7 @@ export function createSidebarView(host, callbacks = {}) {
     state.overlay.coverageBlock.destroy();
     state.overlay.deleteDialog.destroy();
     state.overlay.menuEl.remove();
+    dom.pluginActions.destroy();
     state.activityDock.destroy();
     dom.root.remove();
   };

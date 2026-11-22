@@ -6,6 +6,8 @@
  * and `createToaster`, and never mutates `<html>` (`R6`).
  */
 import { createLife, createToaster, documentOf } from 'cloudcanvas-lib/ui';
+import { dispatchFocusedPluginShortcut } from 'peer-engine';
+import { dispatchPluginActionShortcuts } from '../plugin/plugin-chrome.js';
 import { createShellFrame } from './frame.js';
 import { createShortcutRouter } from './keys.js';
 import { createLayerStack } from './layers.js';
@@ -59,7 +61,7 @@ function buildDesktopPickers(desktop) {
 }
 
 function buildShellFrameCallbacks(layers, navigate, stores, pickers) {
-  const { shell, sessions, activity, settings, models, appearance, desktop, prefs } = stores;
+  const { shell, sessions, activity, settings, models, appearance, desktop, prefs, plugins, speech } = stores;
   return {
     layers,
     onNavigate: (to) => navigate(to),
@@ -92,6 +94,8 @@ function buildShellFrameCallbacks(layers, navigate, stores, pickers) {
     onPickFiles: pickers.onPickFiles,
     hasPickDirectory: pickers.hasPickDirectory,
     onPrefsIntent: (intent) => prefs?.send?.(intent),
+    onPluginsIntent: (intent) => plugins?.send?.(intent),
+    onSpeechIntent: (intent) => speech?.send?.(intent),
     onImportData: (sourceDirectory) => settings?.send?.({ type: 'import-learnharness', sourceDirectory })
   };
 }
@@ -103,7 +107,7 @@ function subscribeOptionalStores(life, stores, listener) {
 }
 
 function createChromeSyncer(life, frame, stores) {
-  const { router, shell, sessions, activity, settings, models, appearance, desktop, prefs } = stores;
+  const { router, shell, sessions, activity, settings, models, appearance, desktop, prefs, plugins, speech } = stores;
   let wasSettingsOpen = Boolean(shell.get()?.settings?.open);
   let wasSetupOpen = Boolean(shell.get()?.setupOpen);
   return () => {
@@ -124,7 +128,11 @@ function createChromeSyncer(life, frame, stores) {
       prefs: prefs?.get?.() ?? null,
       sessions: sessions?.get?.() ?? null,
       activity: activity?.get?.() ?? null,
-      activeRoute: router?.get?.()?.route ?? null
+      plugins: plugins?.get?.() ?? null,
+      pluginManager: plugins?.manager ?? null,
+      speech: speech?.get?.() ?? null,
+      activeRoute: router?.get?.()?.route ?? null,
+      pathname: router?.get?.()?.pathname ?? '/'
     });
   };
 }
@@ -144,15 +152,22 @@ function mountShellSlot(frame, screen, navigate, blocks, shell, pickers) {
 }
 
 export function createShell(host, {
-  router, shell, sessions, activity, settings, models, appearance, desktop, prefs, screen, blocks
+  router, shell, sessions, activity, settings, models, appearance, desktop, prefs, plugins, speech, dictation, screen, blocks
 } = {}) {
   const doc = documentOf(host);
   const win = doc.defaultView;
   const life = createLife();
   const navigate = (to, options) => router.send({ type: 'navigate', to, replace: options?.replace });
   let slot = null;
-  const layers = createLayerStack(win, { onUnhandledEscape: () => Boolean(slot?.command('escape-session')) });
-  const stores = { router, shell, sessions, activity, settings, models, appearance, desktop, prefs };
+  const onEscapeFallback = () => {
+    if (dictation?.get?.()?.phase && dictation.get().phase !== 'idle') {
+      dictation.cancel();
+      return true;
+    }
+    return Boolean(slot?.command('escape-session'));
+  };
+  const layers = createLayerStack(win, { onUnhandledEscape: onEscapeFallback });
+  const stores = { router, shell, sessions, activity, settings, models, appearance, desktop, prefs, plugins, speech };
   const pickers = buildDesktopPickers(desktop);
   const frame = createShellFrame(host, buildShellFrameCallbacks(layers, navigate, stores, pickers));
   const toaster = createToaster(frame.layerHost);
@@ -161,17 +176,19 @@ export function createShell(host, {
     layers,
     getOverrides: () => prefs?.get?.()?.keymapOverrides ?? null,
     onShellAction: (action) => handleShellShortcut(action, shell, router, frame),
-    onScreenAction: (action) => slot.command(action)
+    onScreenAction: (action) => dispatchFocusedPluginShortcut(action) || slot.command(action),
+    onRawKeyDown: (ev) => dispatchPluginActionShortcuts(ev, plugins?.get?.(), plugins?.manager)
   });
 
   const syncChrome = createChromeSyncer(life, frame, stores);
   syncChrome();
   slot.syncRoute(router.get());
-  subscribeOptionalStores(life, [shell, sessions, activity, settings, models, appearance, desktop, prefs], syncChrome);
+  subscribeOptionalStores(life, [shell, sessions, activity, settings, models, appearance, desktop, prefs, plugins, speech], syncChrome);
   life.add(router.subscribe((routeModel) => { slot.syncRoute(routeModel); syncChrome(); }));
 
   return {
     toaster,
+    layerHost: frame.layerHost,
     focusSidebarSearch: () => frame.focusSidebarSearch(),
     openViewer: (payload) => frame.openViewer(payload),
     closeViewer: () => frame.closeViewer(),
