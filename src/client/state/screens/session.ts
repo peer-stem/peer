@@ -1,15 +1,17 @@
 /**
- * Session screen projection store (`R3`, `c2a-frozen-contracts §3.6`, `views §2.4`).
- * Composes `SessionStore`, `AppearanceStore`, `SettingsStore`, `ModelsStore`, `PrefsStore`,
- * `ShellStore`, and `RouterStore` into a flat read-only `SessionScreenModel`.
+ * Session screen projection store (`R3`, `c2a-frozen-contracts §3.6`, `f3-c2b §4`).
+ * Composes `SessionStore`, `SideThreadStore`, `AppearanceStore`, `SettingsStore`,
+ * `ModelsStore`, `PrefsStore`, `ShellStore`, and `RouterStore` into a flat `SessionScreenModel`.
  */
 
 import {
 	dismissedAnswer,
 	resolveConversationSpec,
+	sideSegmentId,
 	toolQuestionKind,
 	type ChatKind,
 	type EffectiveSettings,
+	type JobRecord,
 	type LhViewMessage,
 } from "../../../core/index.ts";
 import type { SessionStatus } from "../../engine/index.ts";
@@ -20,6 +22,7 @@ import type { Route, RouteModel, RouterStore } from "../router.ts";
 import type { ImageSnapshotEntry, SessionIntent, SessionStoreModel } from "../session.ts";
 import type { SettingsIntent, SettingsModel } from "../settings.ts";
 import type { ShellIntent, ShellModel } from "../shell.ts";
+import type { SideThreadIntent, SideThreadStoreModel } from "../side-thread.ts";
 import {
 	createCell,
 	createStoreFromCell,
@@ -49,6 +52,8 @@ export interface SessionScreenModel {
 	readonly mode: "dark" | "light";
 	readonly configured: boolean;
 	readonly appearanceSettings: EffectiveSettings["appearance"];
+	readonly graphEnabled: boolean;
+	readonly extractionChunkTokens: number;
 	readonly planOpen: boolean;
 	readonly abortDialogMode: SessionAbortMode | null;
 	readonly messages: readonly LhViewMessage[];
@@ -56,6 +61,8 @@ export interface SessionScreenModel {
 	readonly contextTokens: number | null;
 	readonly turnError: string | null;
 	readonly imageSnapshots: Readonly<Record<string, ImageSnapshotEntry>>;
+	readonly jobs: readonly JobRecord[];
+	readonly sideThread: SideThreadStoreModel | null;
 	readonly state?: SessionStoreModel["state"];
 	readonly tree?: SessionStoreModel["tree"];
 	readonly chatSettings?: SessionStoreModel["chatSettings"];
@@ -73,6 +80,7 @@ export interface SessionScreenModel {
 
 export type SessionScreenIntent =
 	| SessionIntent
+	| { readonly type: "side-thread"; readonly action: SideThreadIntent }
 	| { readonly type: "sync-route"; readonly routeModel: RouteModel }
 	| { readonly type: "open-setup" }
 	| { readonly type: "open-settings"; readonly section?: string }
@@ -88,6 +96,7 @@ export interface CreateSessionScreenStoreOptions {
 	router?: RouterStore;
 	chatId?: string;
 	openSession: (id: string) => Store<SessionStoreModel, SessionIntent>;
+	openSideThread?: (id: string) => Store<SideThreadStoreModel, SideThreadIntent>;
 	appearance: Store<AppearanceModel, AppearanceIntent>;
 	settings: Store<SettingsModel, SettingsIntent>;
 	models?: Store<ModelsStoreModel, ModelsIntent>;
@@ -104,6 +113,7 @@ interface SessionScreenLocalState {
 
 const EMPTY_MESSAGES: readonly LhViewMessage[] = Object.freeze([]);
 const EMPTY_MODELS: readonly CatalogModelEntry[] = Object.freeze([]);
+const EMPTY_JOBS: readonly JobRecord[] = Object.freeze([]);
 
 function resolveSessionRouteInfo(
 	routeModel: RouteModel | undefined,
@@ -131,9 +141,21 @@ function computeEffectiveModel(
 	};
 }
 
+function projectSideThread(
+	sideThread: Store<SideThreadStoreModel, SideThreadIntent> | null,
+	session: SessionStoreModel,
+): SideThreadStoreModel | null {
+	if (!sideThread) return null;
+	const raw = sideThread.get();
+	if (!session.state) return raw;
+	const liveSeg = sideSegmentId(session.state.nativeMessages) ?? undefined;
+	return raw.currentSegmentId === liveSeg ? raw : { ...raw, currentSegmentId: liveSeg };
+}
+
 function projectSessionScreen(
 	local: SessionScreenLocalState,
 	session: SessionStoreModel,
+	sideThread: Store<SideThreadStoreModel, SideThreadIntent> | null,
 	appearance: AppearanceModel,
 	settings: SettingsModel,
 	models?: Store<ModelsStoreModel, ModelsIntent>,
@@ -151,6 +173,8 @@ function projectSessionScreen(
 		mode: appearance.theme.mode,
 		configured: settings.configured,
 		appearanceSettings: settings.effective.appearance,
+		graphEnabled: settings.effective.graph.enabled,
+		extractionChunkTokens: settings.effective.graph.extractionChunkTokens,
 		planOpen: local.planOpen,
 		abortDialogMode: local.abortDialogMode,
 		messages: session.state?.messages ?? EMPTY_MESSAGES,
@@ -158,6 +182,8 @@ function projectSessionScreen(
 		contextTokens: session.state?.contextTokens ?? null,
 		turnError: session.turnError,
 		imageSnapshots: session.imageSnapshots,
+		jobs: session.jobs ?? EMPTY_JOBS,
+		sideThread: projectSideThread(sideThread, session),
 		state: session.state,
 		tree: session.tree ?? null,
 		chatSettings: session.chatSettings ?? null,
@@ -236,10 +262,14 @@ async function handleSessionScreenIntent(
 	chatId: string,
 	local: SessionScreenLocalState,
 	session: Store<SessionStoreModel, SessionIntent>,
+	sideThread: Store<SideThreadStoreModel, SideThreadIntent> | null,
 	options: CreateSessionScreenStoreOptions,
 	publish: () => void,
 ): Promise<void> {
 	switch (intent.type) {
+		case "side-thread":
+			await sideThread?.send(intent.action);
+			return;
 		case "sync-route":
 			applyRouteSync(intent.routeModel, chatId, local, publish);
 			return;
@@ -270,6 +300,27 @@ async function handleSessionScreenIntent(
 	}
 }
 
+function wireSessionScreenSubscriptions(
+	chatId: string,
+	local: SessionScreenLocalState,
+	session: Store<SessionStoreModel, SessionIntent>,
+	sideThread: Store<SideThreadStoreModel, SideThreadIntent> | null,
+	options: CreateSessionScreenStoreOptions,
+	publish: () => void,
+): Unsubscribe[] {
+	return [
+		session.subscribe(publish),
+		sideThread ? sideThread.subscribe(publish) : () => {},
+		options.appearance.subscribe(publish),
+		options.settings.subscribe(publish),
+		options.models ? options.models.subscribe(publish) : () => {},
+		options.prefs ? options.prefs.subscribe(publish) : () => {},
+		options.router
+			? options.router.subscribe((next) => applyRouteSync(next, chatId, local, publish))
+			: () => {},
+	];
+}
+
 export function createSessionScreenStore(
 	options: CreateSessionScreenStoreOptions,
 ): Store<SessionScreenModel, SessionScreenIntent> {
@@ -285,37 +336,25 @@ export function createSessionScreenStore(
 		disposed: false,
 	};
 	const session = options.openSession(chatId);
-
+	const sideThread = options.openSideThread ? options.openSideThread(chatId) : null;
 	const compute = () =>
 		projectSessionScreen(
-			local,
-			session.get(),
-			options.appearance.get(),
-			options.settings.get(),
-			options.models,
-			options.prefs,
+			local, session.get(), sideThread, options.appearance.get(),
+			options.settings.get(), options.models, options.prefs,
 		);
 	const cell = createCell<SessionScreenModel>(compute());
 	const publish = () => {
 		if (!local.disposed) cell.set(compute());
 	};
-
-	const offs: Unsubscribe[] = [
-		session.subscribe(publish),
-		options.appearance.subscribe(publish),
-		options.settings.subscribe(publish),
-		options.models ? options.models.subscribe(publish) : () => {},
-		options.prefs ? options.prefs.subscribe(publish) : () => {},
-		options.router
-			? options.router.subscribe((next) => applyRouteSync(next, chatId, local, publish))
-			: () => {},
-	];
+	const offs = wireSessionScreenSubscriptions(chatId, local, session, sideThread, options, publish);
 
 	return createStoreFromCell<SessionScreenModel, SessionScreenIntent>(cell, {
-		onSend: (intent) => handleSessionScreenIntent(intent, chatId, local, session, options, publish),
+		onSend: (intent) =>
+			handleSessionScreenIntent(intent, chatId, local, session, sideThread, options, publish),
 		onDispose() {
 			local.disposed = true;
 			for (const off of offs) off();
+			sideThread?.dispose();
 			session.dispose();
 		},
 	});

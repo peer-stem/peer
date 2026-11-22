@@ -6,6 +6,7 @@
  * strip, Setup CTA, and one-shot `openingDraft` seeding per chat.
  */
 import { button, createLife, documentOf, el, input } from "cloudcanvas-lib/ui";
+import { INSERT_CITATION_EVENT, serializeCitation } from "peer-engine";
 import {
 	appendPathTokenToText,
 	extractClipboardImageFiles,
@@ -261,8 +262,29 @@ function submitComposerPayload(state, mode, callbacks, syncDraftUi) {
 	return true;
 }
 
+function insertCitationIntoTextarea(textarea, link) {
+	const cur = textarea.value;
+	const selStart = typeof textarea.selectionStart === "number" ? textarea.selectionStart : cur.length;
+	const selEnd = typeof textarea.selectionEnd === "number" ? textarea.selectionEnd : cur.length;
+	const before = cur.slice(0, selStart);
+	const after = cur.slice(selEnd);
+	const spaceBefore = before.length > 0 && !/\s$/.test(before);
+	const spaceAfter = after.length > 0 && !/^\s/.test(after);
+	const inserted = `${spaceBefore ? " " : ""}${link}${spaceAfter ? " " : ""}`;
+	textarea.value = `${before}${inserted}${after}`;
+	const linkStart = before.length + (spaceBefore ? 1 : 0);
+	return { start: linkStart, end: linkStart + link.length, spaceBefore, spaceAfter };
+}
+
 function bindComposerEvents(state, callbacks, syncDraftUi) {
 	const { life, nodes } = state;
+	life.on(nodes.root, INSERT_CITATION_EVENT, (event) => {
+		const detail = event?.detail;
+		if (!detail || typeof detail.link !== "string") return;
+		const fresh = insertCitationIntoTextarea(nodes.textarea, detail.link);
+		syncDraftUi();
+		detail.onInserted?.(fresh);
+	});
 	life.on(nodes.textarea, "input", () => syncDraftUi());
 	life.on(nodes.textarea, "compositionstart", () => { state.composing = true; });
 	life.on(nodes.textarea, "compositionend", () => { state.composing = false; });
@@ -337,8 +359,23 @@ export function createSessionComposer(host, callbacks = {}) {
 	bindComposerEvents(state, callbacks, syncDraftUi);
 	host.append(state.nodes.root);
 
+	const replaceCitation = (target, nextCitation, andSend) => {
+		if (life.dead || !target || !nextCitation) return;
+		const nextLink = serializeCitation(nextCitation);
+		const cur = state.nodes.textarea.value;
+		const idx = cur.indexOf(target.link, Math.max(0, (target.start ?? 0) - 4));
+		const pos = idx >= 0 ? idx : cur.indexOf(target.link);
+		if (pos >= 0) {
+			state.nodes.textarea.value = `${cur.slice(0, pos)}${nextLink}${cur.slice(pos + target.link.length)}`;
+			syncDraftUi();
+		}
+		if (andSend) submitComposerPayload(state, null, callbacks, syncDraftUi);
+	};
+
 	return {
+		element: () => state.nodes.root,
 		update: (model) => applyComposerUpdate(doc, state, syncDraftUi, model),
+		replaceCitation,
 		focus: () => { if (!life.dead) state.nodes.textarea.focus(); },
 		destroy: () => { if (life.destroy()) state.nodes.root.remove(); },
 	};

@@ -21,7 +21,7 @@
 		"test:parity": "NODE_ENV=test PEER_API_PARITY=1 ./node_modules/.bin/tsx --test tests/api-parity.test.ts",
 		"test:substrate": "NODE_ENV=test PEER_REQUIRE_SUBSTRATE=1 ./node_modules/.bin/tsx --test tests/substrate-foundation.test.ts tests/substrate-native-smoke.test.ts tests/lumberjack-dag-store.test.ts tests/lumberjack-events-objects.test.ts tests/import-learnharness.test.ts tests/import-learnharness-faults.test.ts tests/mfn-unit.test.ts tests/mfn-outbox.test.ts tests/mfn-client.test.ts tests/mfn-context-mapper.test.ts tests/mfn-context-faults.test.ts tests/mfn-chat-handler.test.ts tests/mfn-live-integration.test.ts tests/mfn-live-backup-pause.test.ts",
 		"client:build": "node scripts/client-build.mjs",
-		"test:client:e2e": "node scripts/client-build.mjs && NODE_ENV=test PEER_E2E=1 ./node_modules/.bin/tsx --test --test-concurrency=1 tests/client-e2e-session-readonly.test.ts tests/client-e2e-c2a-flows.test.ts",
+		"test:client:e2e": "node scripts/client-build.mjs && NODE_ENV=test PEER_E2E=1 ./node_modules/.bin/tsx --test --test-concurrency=1 tests/client-e2e-session-readonly.test.ts tests/client-e2e-c2a-flows.test.ts tests/client-e2e-c2b-workspace.test.ts",
 		"lint": "eslint .",
 		"typecheck": "tsc --noEmit",
 		"substrate:build": "node scripts/build-substrate.mjs",

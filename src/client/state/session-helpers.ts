@@ -1,13 +1,16 @@
 /**
- * Snapshot hydration, live plan-tree extraction, and opening-prompt handoff
- * helpers for `SessionStore` (`c2a-frozen-contracts §3.6`).
+ * Snapshot hydration, job status sync, artifact UI persistence, extraction,
+ * live plan-tree extraction, and opening-prompt handoff helpers for `SessionStore`.
  */
 
-import type {
-	ImageSnapshot,
-	LhMessage,
-	LhViewMessage,
-	PlanTree,
+import {
+	setSteerUiInverted,
+	type ChatSettings,
+	type ImageSnapshot,
+	type JobRecord,
+	type LhMessage,
+	type LhViewMessage,
+	type PlanTree,
 } from "../../core/index.ts";
 import {
 	clearOpeningPrompt,
@@ -15,11 +18,8 @@ import {
 	stashOpeningPrompt,
 	type SessionModel,
 } from "../engine/index.ts";
-import { apiPath, isAbortError, type ApiClient } from "./api.ts";
-import type {
-	ImageSnapshotEntry,
-	SessionIntent,
-} from "./session.ts";
+import { ApiError, apiPath, isAbortError, type ApiClient } from "./api.ts";
+import type { ImageSnapshotEntry, SessionIntent } from "./session.ts";
 import type { SettingsIntent, SettingsModel } from "./settings.ts";
 import type { Store } from "./store.ts";
 
@@ -28,9 +28,17 @@ export interface SessionHydrationTarget {
 	readonly api: ApiClient;
 	readonly seenSnapshots: Set<string>;
 	readonly imageControllers: Set<AbortController>;
+	readonly jobStatuses: Map<string, string>;
 	readonly settings?: Store<SettingsModel, SettingsIntent>;
 	disposed: boolean;
+	title: string;
+	chatSettings: ChatSettings | null;
+	serverTurnError: string | null;
 	imageSnapshots: Readonly<Record<string, ImageSnapshotEntry>>;
+	jobs: readonly JobRecord[];
+	activeJobsLoad: AbortController | null;
+	inFlightJobs: Promise<void> | null;
+	pendingJobsReload: boolean;
 	model: SessionModel | null;
 	openingDraft: string | null;
 	initialHandled: boolean;
@@ -38,9 +46,14 @@ export interface SessionHydrationTarget {
 	deferredMountContinue: boolean;
 	initialPrompt?: string;
 	publish: () => void;
+	reloadRecord: () => Promise<void>;
 }
 
 const HEX64_RE = /^[a-f0-9]{64}$/;
+
+function isHydrationModelBusy(model: SessionModel | null): boolean {
+	return model !== null && (model.status === "submitted" || model.status === "streaming");
+}
 
 function extractSnapshotIdsFromPayload(value: unknown, out: Set<string>): void {
 	if (!value || typeof value !== "object") return;
@@ -115,6 +128,115 @@ export function scanAndHydrateImages(
 		ctx.seenSnapshots.add(snapshotId);
 		ctx.imageSnapshots = { ...ctx.imageSnapshots, [snapshotId]: { status: "loading" } };
 		void hydrateOneSnapshot(ctx, snapshotId);
+	}
+}
+
+async function runSingleJobsFetch(ctx: SessionHydrationTarget): Promise<void> {
+	const controller = new AbortController();
+	ctx.activeJobsLoad = controller;
+	try {
+		const data = await ctx.api.json<{ jobs?: unknown; turnInFlight?: boolean }>("/api/jobs", {
+			query: { chatId: ctx.chatId },
+			signal: controller.signal,
+		});
+		if (ctx.disposed || controller.signal.aborted) return;
+		if (!data || !Array.isArray(data.jobs)) return;
+		const list = Object.freeze([...(data.jobs as JobRecord[])]);
+		let anySettled = false;
+		for (const job of list) {
+			const prev = ctx.jobStatuses.get(job.id);
+			if (prev === "running" && job.status !== "running") anySettled = true;
+			ctx.jobStatuses.set(job.id, job.status);
+		}
+		ctx.jobs = list;
+		ctx.publish();
+		if (anySettled && !isHydrationModelBusy(ctx.model) && data.turnInFlight !== true) {
+			void ctx.reloadRecord();
+		}
+	} catch {
+		/* optional aux endpoint or transient blip */
+	} finally {
+		if (ctx.activeJobsLoad === controller) ctx.activeJobsLoad = null;
+	}
+}
+
+export function loadSessionJobs(ctx: SessionHydrationTarget): Promise<void> {
+	if (ctx.disposed) return Promise.resolve();
+	if (ctx.inFlightJobs) {
+		ctx.pendingJobsReload = true;
+		return ctx.inFlightJobs;
+	}
+	const drain = async (): Promise<void> => {
+		do {
+			ctx.pendingJobsReload = false;
+			await runSingleJobsFetch(ctx);
+		} while (!ctx.disposed && ctx.pendingJobsReload);
+	};
+	ctx.inFlightJobs = drain().finally(() => {
+		ctx.inFlightJobs = null;
+	});
+	return ctx.inFlightJobs;
+}
+
+export async function handleSessionMetadataIntent(
+	ctx: SessionHydrationTarget,
+	intent: Extract<SessionIntent, { type: "rename" | "save-chat-settings" }>,
+): Promise<void> {
+	if (intent.type === "rename") {
+		const trimmed = intent.title.trim();
+		if (!trimmed) return;
+		const res = await ctx.api.json<{ title?: string }>(apiPath`/api/chats/${ctx.chatId}`, {
+			method: "PUT",
+			json: { title: trimmed },
+		});
+		if (ctx.disposed) return;
+		ctx.title = typeof res.title === "string" ? res.title : trimmed;
+		ctx.publish();
+		return;
+	}
+	const res = await ctx.api.json<{ settings?: ChatSettings }>(apiPath`/api/chats/${ctx.chatId}/settings`, {
+		method: "PUT",
+		json: intent.settings,
+	});
+	if (ctx.disposed) return;
+	ctx.chatSettings = res.settings ?? intent.settings;
+	ctx.publish();
+}
+
+export async function setSessionArtifactInverted(
+	ctx: SessionHydrationTarget,
+	messageId: string,
+	inverted: boolean,
+): Promise<void> {
+	if (ctx.model && !isHydrationModelBusy(ctx.model)) {
+		const cur = ctx.model.getState().canonicalMessages;
+		const next = setSteerUiInverted(cur, messageId, inverted);
+		if (next !== cur) {
+			ctx.model.setMessages(next, ctx.serverTurnError ?? undefined);
+		}
+	}
+	try {
+		await ctx.api.json(apiPath`/api/chats/${ctx.chatId}/artifact-ui`, {
+			method: "POST",
+			json: { input: { messageId, inverted } },
+		});
+	} catch (err) {
+		if (!ctx.disposed && !isHydrationModelBusy(ctx.model)) void ctx.reloadRecord();
+		throw err;
+	}
+}
+
+export async function requestSessionExtract(ctx: SessionHydrationTarget): Promise<void> {
+	try {
+		await ctx.api.json("/api/graph/coverage/extract", {
+			method: "POST",
+			json: { chatId: ctx.chatId },
+		});
+	} catch (err) {
+		if (!(err instanceof ApiError) || err.status !== 409) throw err;
+	}
+	if (!ctx.disposed && !isHydrationModelBusy(ctx.model)) {
+		await ctx.reloadRecord();
 	}
 }
 

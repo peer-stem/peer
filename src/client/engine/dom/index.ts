@@ -14,4 +14,5 @@ export * from "./popover-dismiss.ts";
 export * from "./session-find-dom.ts";
 export * from "./settings-signal.ts";
 export * from "./source-directory.ts";
+export * from "./svg-image-source.ts";
 export * from "./tree-navigation.ts";

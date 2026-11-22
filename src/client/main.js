@@ -27,6 +27,8 @@ export function mountClientApp(doc = globalThis.document, options = {}) {
   const shell = createShell(doc.body, {
     router: state.router,
     shell: state.shell,
+    sessions: state.sessions,
+    activity: state.activity,
     settings: state.settings,
     models: state.models,
     appearance: state.appearance,

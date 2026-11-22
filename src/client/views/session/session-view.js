@@ -1,9 +1,9 @@
 /**
- * Interactive session screen view (`views §2.5`, `C2a §3.6`, `§4.1`).
- * Composes `createTopBar`, `createHeaderRename`, `createPlanDock`, kit `createStatus`,
- * `createStickyScroll` (`'peer-kit'`), `createViewList`, `createQuestionDock`,
- * `createPracticeDock`, `createSessionComposer`, `createStatsBar`, and
- * `createAbortTurnDialog` with zero view-owned application state.
+ * Interactive session screen view (`views §2.5`, `C2a §3.6`, `C2b`).
+ * Composes `createTopBar`, `createHeaderRename`, `createCoverageRing`,
+ * `createPlanDock`, `createSessionFind`, `createStickyScroll` (`'peer-kit'`),
+ * `createSideThreadCompanion`, `createSelectionToolbar`, `createCitationCommentPopover`,
+ * `createViewList`, docks, composer, stats bar, and `createAbortTurnDialog`.
  */
 import { button, createLife, createStatus, documentOf, el, injectUiStyles, textNode, writeText } from "cloudcanvas-lib/ui";
 import { createStickyScroll } from "peer-kit";
@@ -15,6 +15,7 @@ import { createPlanDock } from "./plan-dock.js";
 import { createPracticeDock } from "./practice-dock.js";
 import { createQuestionDock } from "./question-dock.js";
 import { derivePlanTreeWithStatuses, deriveTopBarModel, deriveTranscriptItem } from "./session-models.js";
+import { buildTranscriptItemContext, mountSessionCompanions, syncSessionCompanions } from "./session-view-chrome.js";
 import { injectSessionStyles } from "./session.css.js";
 import { createHeaderRename, createStatsBar } from "./stats-bar.js";
 import { createTranscriptItemView } from "./transcript-item.js";
@@ -51,6 +52,7 @@ function deriveCachedItems(cache, screenModel) {
 	const mode = screenModel?.mode === "light" ? "light" : "dark";
 	const status = String(screenModel?.status ?? "ready");
 	const imageSnapshots = screenModel?.imageSnapshots ?? {};
+	const jobs = screenModel?.jobs ?? null;
 	const appearance = screenModel?.appearanceSettings ?? screenModel?.appearance ?? null;
 	const adaptiveQuestions = appearance?.adaptiveQuestions !== false;
 	const rawMessages = Array.isArray(screenModel?.messages) ? screenModel.messages : [];
@@ -67,12 +69,14 @@ function deriveCachedItems(cache, screenModel) {
 			&& prev.status === status
 			&& prev.isLastMessage === isLastMessage
 			&& prev.adaptiveQuestions === adaptiveQuestions
+			&& (!prev.hasDispatch || prev.jobs === jobs)
 			&& sameSnapshots(prev.snapshotIds, imageSnapshots, prev.imageSnapshots);
 		const derived = canReuse
 			? prev.derived
 			: deriveTranscriptItem(msg, { mode, status, imageSnapshots, adaptiveQuestions, appearance, isLastMessage });
 		const snapshotIds = derived?.snapshotIds ?? [];
-		if (id) nextCache.set(id, { rawMsg: msg, mode, status, isLastMessage, adaptiveQuestions, imageSnapshots, snapshotIds, derived });
+		const hasDispatch = Boolean(derived?.parts?.some((p) => p.kind === "dispatch-card"));
+		if (id) nextCache.set(id, { rawMsg: msg, mode, status, isLastMessage, adaptiveQuestions, imageSnapshots, snapshotIds, hasDispatch, jobs, derived });
 		if (derived) items.push(derived);
 	}
 	cache.clear();
@@ -107,12 +111,14 @@ function syncThinkingElements(transcriptEl, open) {
 function syncSessionStatus(nodes, state, chatId, error, send) {
 	if (state === "ready") {
 		nodes.statusHost.hidden = true;
+		nodes.mainRow.hidden = false;
 		nodes.transcriptWrap.hidden = false;
 		nodes.footerEl.hidden = false;
 		nodes.notFoundHomeBtn.hidden = true;
 		return;
 	}
 	nodes.statusHost.hidden = false;
+	nodes.mainRow.hidden = true;
 	nodes.transcriptWrap.hidden = true;
 	nodes.footerEl.hidden = true;
 	if (state === "loading") {
@@ -199,6 +205,7 @@ function buildSessionDom(doc, life, callbacks) {
 		onExpand: callbacks.onExpand,
 		onToggle: callbacks.send ? () => callbacks.send({ type: "toggle-plan" }) : undefined,
 	});
+	const findHost = el(doc, "div", { className: "peer-session-find-host" });
 
 	const statusHost = el(doc, "div", { className: "peer-session-status" });
 	const statusControl = createStatus(statusHost);
@@ -217,14 +224,18 @@ function buildSessionDom(doc, life, callbacks) {
 	stickyScroll.root.hidden = true;
 	stickyScroll.content.classList.add("peer-session-transcript");
 
+	const sideSlot = el(doc, "div", { className: "peer-session-side-slot", attrs: { hidden: true } });
+	const mainRow = el(doc, "div", { className: "peer-session-main-row", attrs: { hidden: true } });
+	mainRow.append(stickyScroll.root, sideSlot);
+
 	const footerEl = el(doc, "footer", { className: "peer-session-footer", attrs: { hidden: true } });
 	const footerControls = buildFooterControls(doc, life, footerEl, callbacks);
-	root.append(headerEl, planHost, statusHost, stickyScroll.root, footerEl);
+	root.append(headerEl, planHost, findHost, statusHost, mainRow, footerEl);
 	stickyHolder.remove();
 	return {
-		root, topBar, headerRename, planDock, statusHost, statusControl, notFoundHomeBtn,
+		root, headerEl, topBar, headerRename, planDock, findHost, statusHost, statusControl, notFoundHomeBtn,
 		hasNavigate: typeof callbacks.navigate === "function",
-		stickyScroll, transcriptWrap: stickyScroll.root, transcriptEl: stickyScroll.content,
+		mainRow, sideSlot, stickyScroll, transcriptWrap: stickyScroll.root, transcriptEl: stickyScroll.content,
 		footerEl, ...footerControls,
 	};
 }
@@ -316,6 +327,7 @@ function applySessionUpdate(state, screenModel = {}) {
 	state.nodes.topBar.update(topBarModel);
 	state.nodes.headerRename.update({ title: topBarModel.title, ready: loadState === "ready" });
 	syncSessionStatus(state.nodes, loadState, chatId, errText, state.send);
+	syncSessionCompanions(state, screenModel, chatId, loadState);
 	if (loadState !== "ready") {
 		state.nodes.planDock.update({ tree: null, open: screenModel?.planOpen });
 		state.viewList.update([]);
@@ -341,6 +353,12 @@ function applySessionUpdate(state, screenModel = {}) {
 }
 
 function handleEscapeSession(state) {
+	if (state.companions.citationPopover.isOpen()) {
+		state.companions.citationPopover.close();
+		return true;
+	}
+	if (state.companions.sessionFind.isOpen()) return state.companions.sessionFind.close();
+	if (state.companions.sideThread.isOpen()) return state.companions.sideThread.close();
 	if (state.abortDialog.isOpen()) {
 		if (state.abortControlled) { state.send?.({ type: "cancel-abort" }); return true; }
 		state.abortMode = null;
@@ -358,6 +376,8 @@ function handleEscapeSession(state) {
 
 function executeSessionCommand(state, action) {
 	if (state.life.dead) return false;
+	if (action === "find") return state.companions.sessionFind.open();
+	if (action === "toggle-question-thread") return state.companions.sideThread.toggleCurrent();
 	if (action === "toggle-user-thinking") {
 		state.thinkingOpen = !state.thinkingOpen;
 		state.thinkingExplicit = true;
@@ -400,6 +420,7 @@ function destroySessionControls(state, nodes) {
 	if (!state.life.destroy()) return;
 	state.itemCache.clear();
 	state.viewList.destroy();
+	state.companions.destroy();
 	state.abortDialog.destroy();
 	for (const ctl of [nodes.stickyScroll, nodes.questionDock, nodes.practiceDock, nodes.composer, nodes.statsBar, nodes.planDock, nodes.headerRename, nodes.statusControl, nodes.topBar]) {
 		ctl.destroy();
@@ -416,21 +437,12 @@ export function createSessionView(host, opts = {}) {
 	const nodes = buildSessionDom(doc, life, { send, navigate, onToggleSidebar, onExpand, onPickDirectory, onPickFiles });
 	const state = {
 		life, nodes, send, thinkingOpen: false, thinkingExplicit: false, controlledThinking: undefined,
-		abortControlled: false, abortMode: null, abortDialog: null, lastModel: null, lastHash: "", itemCache: new Map(), viewList: null,
+		abortControlled: false, abortMode: null, abortDialog: null, companions: null,
+		lastModel: null, lastChatId: "", lastHash: "", itemCache: new Map(), viewList: null,
 	};
+	state.companions = mountSessionCompanions(nodes, state, { send, navigate, blocks, onExpand });
 	state.abortDialog = mountAbortDialogForSession(nodes.root, state, nodes, send);
-	const itemCtx = {
-		blocks,
-		onExpand,
-		getThinkingOpen: () => state.thinkingOpen,
-		isThinkingControlled: () => state.thinkingExplicit,
-		onRetryQuestion: ({ toolCallId, messageId, contentIndex }) => send?.({
-			type: "retry-question",
-			...(toolCallId ? { toolCallId } : {}),
-			...(messageId ? { messageId } : {}),
-			...(typeof contentIndex === "number" ? { contentIndex } : {}),
-		}),
-	};
+	const itemCtx = buildTranscriptItemContext(state, nodes, { send, blocks, onExpand });
 	state.viewList = createViewList(nodes.transcriptEl, {
 		key: (item) => item.key,
 		model: (item) => item,

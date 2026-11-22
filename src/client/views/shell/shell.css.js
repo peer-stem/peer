@@ -24,22 +24,23 @@ export const SHELL_CSS = `/* ------------------ PEER: SHELL ------------------ *
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
-  gap: var(--cc-space-2, 8px);
-  width: 14.5rem;
+  width: 18rem;
   height: 100%;
-  overflow-y: auto;
-  padding: var(--cc-space-3, 12px);
+  min-height: 0;
+  overflow: hidden;
   background: var(--cc-card-bg, rgba(15, 23, 42, 0.92));
   border-right: 1px solid var(--cc-border, var(--cc-card-border, rgba(255, 255, 255, 0.1)));
   box-sizing: border-box;
 }
 
 .peer-shell-side[data-peer-narrow="true"] {
-  width: 12rem;
+  width: 14rem;
 }
 
 .peer-shell-side[hidden],
-.peer-shell-update[hidden] {
+.peer-shell-update[hidden],
+.peer-shell-backdrop[hidden],
+.peer-shell-modal[hidden] {
   display: none;
 }
 
@@ -126,7 +127,7 @@ export const SHELL_CSS = `/* ------------------ PEER: SHELL ------------------ *
   margin: 0;
   font-family: var(--peer-font-title, var(--cc-font, sans-serif));
   font-size: var(--cc-type-lg, 15px);
-  font-weight: var(--cc-weight-semibold, 600);
+  font-weight: var(--peer-heading-weight, 600);
 }
 `;
 

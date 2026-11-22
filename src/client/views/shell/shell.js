@@ -1,9 +1,9 @@
 /**
- * Root shell view (`views §2.1–§2.2`, `R4`, `R6`).
- * Subscribes to `router`, `shell`, and optional `settings`, `models`,
- * `appearance`, `desktop`, and `prefs` stores, coordinates `createScreenSlot`,
- * `createLayerStack`, `createShortcutRouter`, and `createToaster`, and never
- * mutates `<html>` (`R6`).
+ * Root shell view (`views §2.1–§2.2`, `R4`, `R6`, `C2b`).
+ * Subscribes to `router`, `shell`, and optional `sessions`, `activity`,
+ * `settings`, `models`, `appearance`, `desktop`, and `prefs` stores,
+ * coordinates `createScreenSlot`, `createLayerStack`, `createShortcutRouter`,
+ * and `createToaster`, and never mutates `<html>` (`R6`).
  */
 import { createLife, createToaster, documentOf } from 'cloudcanvas-lib/ui';
 import { createShellFrame } from './frame.js';
@@ -22,13 +22,14 @@ function sendQuiet(store, intent) {
   }
 }
 
-function handleShellShortcut(action, shell, router) {
+function handleShellShortcut(action, shell, router, frame) {
   switch (action) {
     case 'toggle-sidebar':
       shell.send({ type: 'toggle-sidebar' });
       return true;
     case 'sessions-search':
       shell.send({ type: 'set-sidebar', open: true });
+      frame?.focusSidebarSearch?.();
       return true;
     case 'open-settings':
       shell.send({ type: 'open-settings' });
@@ -58,10 +59,11 @@ function buildDesktopPickers(desktop) {
 }
 
 function buildShellFrameCallbacks(layers, navigate, stores, pickers) {
-  const { shell, settings, models, appearance, desktop, prefs } = stores;
+  const { shell, sessions, activity, settings, models, appearance, desktop, prefs } = stores;
   return {
     layers,
     onNavigate: (to) => navigate(to),
+    onToggleSidebar: () => shell.send({ type: 'toggle-sidebar' }),
     onOpenSettings: (section) => shell.send({ type: 'open-settings', ...(section ? { section } : {}) }),
     onSelectSettingsSection: (section) => shell.send({ type: 'open-settings', section }),
     onCloseSettings: () => shell.send({ type: 'close-settings' }),
@@ -71,6 +73,17 @@ function buildShellFrameCallbacks(layers, navigate, stores, pickers) {
       if (typeof desktop?.dismissStartupMessage === 'function') return desktop.dismissStartupMessage(id);
       return sendQuiet(shell, { type: 'clear-startup-message' });
     },
+    onSessionsIntent: (intent) => {
+      const normalized = intent?.type === 'source-action' && intent.body && !intent.action
+        ? { ...intent, action: intent.body }
+        : intent;
+      if (normalized?.type === 'delete-session' || normalized?.type === 'delete-folder') return sessions?.send?.(normalized);
+      return sendQuiet(sessions, normalized);
+    },
+    onSetKindFilter: (filter) => sendQuiet(sessions, { type: 'set-kind-filter', filter, kind: filter }),
+    onRequestCoverage: (chatId) => sendQuiet(sessions, { type: 'load-coverage', id: chatId, chatId }),
+    onExtractSession: (chatId) => sendQuiet(activity, { type: 'reload' }),
+    onActivityAbort: ({ kind, id }) => activity?.send?.({ type: 'abort', kind, id }),
     onSettingsIntent: (intent) => settings?.send?.(intent),
     onModelsIntent: (intent) => models?.send?.(intent),
     onAppearanceIntent: (intent) => appearance?.send?.(intent),
@@ -90,7 +103,7 @@ function subscribeOptionalStores(life, stores, listener) {
 }
 
 function createChromeSyncer(life, frame, stores) {
-  const { shell, settings, models, appearance, desktop, prefs } = stores;
+  const { router, shell, sessions, activity, settings, models, appearance, desktop, prefs } = stores;
   let wasSettingsOpen = Boolean(shell.get()?.settings?.open);
   let wasSetupOpen = Boolean(shell.get()?.setupOpen);
   return () => {
@@ -108,13 +121,30 @@ function createChromeSyncer(life, frame, stores) {
       models: models?.get?.() ?? null,
       appearance: appearance?.get?.() ?? null,
       desktop: desktop?.get?.() ?? null,
-      prefs: prefs?.get?.() ?? null
+      prefs: prefs?.get?.() ?? null,
+      sessions: sessions?.get?.() ?? null,
+      activity: activity?.get?.() ?? null,
+      activeRoute: router?.get?.()?.route ?? null
     });
   };
 }
 
+function mountShellSlot(frame, screen, navigate, blocks, shell, pickers) {
+  return createScreenSlot(frame.content, {
+    screen,
+    navigate,
+    resolveFactory: (route) => resolveScreenFactory(route, {
+      blocks,
+      onToggleSidebar: () => shell.send({ type: 'toggle-sidebar' }),
+      onExpand: (payload) => frame.openViewer(payload),
+      onPickDirectory: pickers.onPickDirectory,
+      onPickFiles: pickers.onPickFiles
+    })
+  });
+}
+
 export function createShell(host, {
-  router, shell, settings, models, appearance, desktop, prefs, screen, blocks
+  router, shell, sessions, activity, settings, models, appearance, desktop, prefs, screen, blocks
 } = {}) {
   const doc = documentOf(host);
   const win = doc.defaultView;
@@ -122,44 +152,32 @@ export function createShell(host, {
   const navigate = (to, options) => router.send({ type: 'navigate', to, replace: options?.replace });
   let slot = null;
   const layers = createLayerStack(win, { onUnhandledEscape: () => Boolean(slot?.command('escape-session')) });
-  const stores = { shell, settings, models, appearance, desktop, prefs };
+  const stores = { router, shell, sessions, activity, settings, models, appearance, desktop, prefs };
   const pickers = buildDesktopPickers(desktop);
   const frame = createShellFrame(host, buildShellFrameCallbacks(layers, navigate, stores, pickers));
   const toaster = createToaster(frame.layerHost);
-  const onToggleSidebar = () => shell.send({ type: 'toggle-sidebar' });
-  const onExpand = (payload) => frame.openViewer(payload);
-  slot = createScreenSlot(frame.content, {
-    screen,
-    navigate,
-    resolveFactory: (route) => resolveScreenFactory(route, {
-      blocks,
-      onToggleSidebar,
-      onExpand,
-      onPickDirectory: pickers.onPickDirectory,
-      onPickFiles: pickers.onPickFiles
-    })
-  });
+  slot = mountShellSlot(frame, screen, navigate, blocks, shell, pickers);
   const keys = createShortcutRouter(win, {
     layers,
     getOverrides: () => prefs?.get?.()?.keymapOverrides ?? null,
-    onShellAction: (action) => handleShellShortcut(action, shell, router),
+    onShellAction: (action) => handleShellShortcut(action, shell, router, frame),
     onScreenAction: (action) => slot.command(action)
   });
 
   const syncChrome = createChromeSyncer(life, frame, stores);
   syncChrome();
   slot.syncRoute(router.get());
-  subscribeOptionalStores(life, [shell, settings, models, appearance, desktop, prefs], syncChrome);
-  life.add(router.subscribe((routeModel) => slot.syncRoute(routeModel)));
+  subscribeOptionalStores(life, [shell, sessions, activity, settings, models, appearance, desktop, prefs], syncChrome);
+  life.add(router.subscribe((routeModel) => { slot.syncRoute(routeModel); syncChrome(); }));
 
-  const destroy = () => {
-    if (!life.destroy()) return;
-    keys.destroy();
-    slot.destroy();
-    toaster.destroy();
-    layers.destroy();
-    frame.destroy();
+  return {
+    toaster,
+    focusSidebarSearch: () => frame.focusSidebarSearch(),
+    openViewer: (payload) => frame.openViewer(payload),
+    closeViewer: () => frame.closeViewer(),
+    destroy: () => {
+      if (!life.destroy()) return;
+      keys.destroy(); slot.destroy(); toaster.destroy(); layers.destroy(); frame.destroy();
+    }
   };
-
-  return { toaster, openViewer: onExpand, closeViewer: () => frame.closeViewer(), destroy };
 }
