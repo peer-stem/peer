@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import type { ChatInput, LhMessage, QuestionAnswerData } from "@/src/core";
-import { SessionModel, type SessionState } from "@/components/session-core";
+import { SessionModel, type SessionState } from "../src/client/engine/session/model.ts";
 
 export interface UseChatSessionOptions {
 	chatId: string;

@@ -1,92 +1,26 @@
 "use client";
 
-/**
- * Adaptive question layout as a hook (Appearance → Adapt question layout):
- * the pending question card and the answered card in the transcript both
- * solve with it, so the two always agree.
- *
- * Two stages. MEASURE (once per question and reading font, on off-screen
- * clones, after rich content settled): everything that depends only on the
- * content — column minimums, diagram widths, 70ch, the trigger. DECIDE (on
- * every width change — window, sidebar, transcript setting): arithmetic over
- * those numbers and the columns' height curves, never a DOM read, so a
- * resize never forces layout. Never on typing; a content version bumped only
- * when rich content changes height at an unchanged width (late diagrams,
- * images, fonts) measures again.
- */
-
 import { useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
 import {
 	createProbeHost,
+	getCachedQuestionMeasure,
 	measureQuestionLayout,
 	onFontsLoaded,
 	questionContentFingerprint,
 	questionContentReady,
+	rememberQuestionMeasure,
+	sameLayout,
 	solveMeasured,
+	type LiveQuestion,
 	type QuestionLayout,
-	type QuestionMeasure,
+	type QuestionLayoutRequest,
 	type QuestionParts,
-} from "@/components/question-layout";
+	type UseQuestionLayout,
+} from "../src/client/engine/session/question-layout.ts";
+
+export { sameLayout, type LiveQuestion, type QuestionLayoutRequest, type UseQuestionLayout };
 
 const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
-
-/** Adaptive layout inputs (px; null = adaptation off). */
-export interface QuestionLayoutRequest {
-	/** Maximum card inner width: the transcript width less chrome. */
-	available: number;
-	/** The default card inner width (46rem container less chrome). */
-	base: number;
-	/** Column floor (23rem). */
-	floor: number;
-	/** Font identity (family + size): a change re-measures. */
-	key: string;
-}
-
-export function sameLayout(a: QuestionLayout | null, b: QuestionLayout | null): boolean {
-	if (a === null || b === null) return a === b;
-	if (a.kind === "stacked" || b.kind === "stacked") return a.kind === b.kind && a.width === b.width;
-	return a.question === b.question && a.answer === b.answer;
-}
-
-/** Measurements per question, card kind and reading font — never per
- *  width — so reopening a session or scrolling back to an answered card
- *  never measures again, and a resize only decides. */
-type Measured = { measure: QuestionMeasure; content: string };
-const measured = new Map<string, Measured>();
-const MEASURED_MAX = 256;
-function remember(key: string, entry: Measured) {
-	measured.delete(key);
-	measured.set(key, entry);
-	if (measured.size > MEASURED_MAX) measured.delete(measured.keys().next().value!);
-}
-
-/** The LIVE rendered question: what content readiness, the fingerprint and
- *  late-content detection read. */
-export interface LiveQuestion {
-	root: HTMLElement;
-	/** Label + question + context (may be display: contents). */
-	question: HTMLElement;
-	options: HTMLElement | null;
-	/** Boxes whose height change at an unchanged width is late content. */
-	observe: (HTMLElement | null)[];
-}
-
-export interface UseQuestionLayout {
-	/** Cache identity, unique per question and card kind. */
-	cacheId: string;
-	/** null = adaptation off (or not yet near the screen). */
-	request: QuestionLayoutRequest | null;
-	/** Reset identity: a different question re-solves. */
-	identity: unknown;
-	live: () => LiveQuestion | null;
-	/** The parts measured (default: the live parts + confidence). */
-	parts: (live: LiveQuestion) => QuestionParts;
-	onLayout?: (layout: QuestionLayout | null) => void;
-	/** Called just BEFORE the arrangement changes (columns ⇄ stacked; null
-	 *  lays out stacked), while the DOM still shows the old one. */
-	onSwitch?: (from: QuestionLayout | null, to: QuestionLayout | null) => void;
-}
-
 const arrangement = (l: QuestionLayout | null) => (l?.kind === "columns" ? "columns" : "stacked");
 
 export function useQuestionLayout({ cacheId, request, identity, live, parts, onLayout, onSwitch }: UseQuestionLayout): QuestionLayout | null {
@@ -101,16 +35,11 @@ export function useQuestionLayout({ cacheId, request, identity, live, parts, onL
 	const partsRef = useRef(parts);
 	partsRef.current = parts;
 	const layoutRef = useRef<QuestionLayout | null>(null);
-	// A content bump (diagram, image, font, late styles) means the content
-	// changed since the last solve: measure again, never reuse.
 	const seenVersionRef = useRef(contentVersion);
 	const staleRef = useRef(false);
 	const hostRef = useRef<HTMLElement | null>(null);
-	// A measurement waits for rich content/fonts: whatever settles it
-	// (fonts finishing — even with nothing new or a failure — a diagram, an
-	// image) must bring the solve back.
 	const deferredRef = useRef(false);
-	const enabled = !!request;
+	const enabled = Boolean(request);
 	useIsoLayoutEffect(() => {
 		let next: QuestionLayout | null = null;
 		const now = liveRef.current();
@@ -125,16 +54,11 @@ export function useQuestionLayout({ cacheId, request, identity, live, parts, onL
 				return hostRef.current;
 			};
 			const content = questionContentFingerprint(now);
-			const known = measured.get(key);
+			const known = getCachedQuestionMeasure(key);
 			if (!staleRef.current && known && known.content === content) {
-				// DECIDE: arithmetic over the saved measurements.
 				deferredRef.current = false;
 				next = solveMeasured(known.measure, request);
 			} else if (!questionContentReady(now)) {
-				// Not settled yet: the settling signal brings us back. Until
-				// then the CURRENT budget still rules — the previous
-				// measurements decide for it, and without any, a layout
-				// that no longer fits falls back to stacked.
 				deferredRef.current = true;
 				const current = layoutRef.current;
 				if (known) next = solveMeasured(known.measure, request);
@@ -143,27 +67,23 @@ export function useQuestionLayout({ cacheId, request, identity, live, parts, onL
 				} else return;
 			} else {
 				deferredRef.current = false;
-				const result = measureQuestionLayout(partsRef.current(now), request, host());
+				const result = measureQuestionLayout(partsRef.current(now) as QuestionParts, request, host());
 				next = result.layout;
 				staleRef.current = false;
-				remember(key, { measure: result.measure, content });
+				rememberQuestionMeasure(key, { measure: result.measure, content });
 			}
 		}
 		if (sameLayout(layoutRef.current, next)) return;
 		if (arrangement(layoutRef.current) !== arrangement(next)) onSwitchRef.current?.(layoutRef.current, next);
 		layoutRef.current = next;
-		// Same commit for both: a caller's width and the columns land together.
 		setLayout(next);
 		onLayoutRef.current?.(next);
-		// The request's fields (not its identity) are the inputs.
 	}, [identity, cacheId, enabled, request?.available, request?.base, request?.floor, request?.key, contentVersion]);
 	useEffect(() => () => {
 		onLayoutRef.current?.(null);
 		hostRef.current?.remove();
 		hostRef.current = null;
 	}, []);
-	// Late content: a height change at an UNCHANGED width is content (our
-	// own width changes always move the width and are ignored).
 	useEffect(() => {
 		if (!enabled) return;
 		const now = liveRef.current();
@@ -185,14 +105,11 @@ export function useQuestionLayout({ cacheId, request, identity, live, parts, onL
 		for (const el of now.observe) if (el) ro.observe(el);
 		const fonts = typeof document !== "undefined" ? document.fonts : undefined;
 		const offFonts = onFontsLoaded(fonts, schedule);
-		// Readiness, distinct from invalidation: a deferred solve retries
-		// when fonts stop loading, whether or not anything new loaded.
 		let alive = true;
 		const onFontsSettled = () => { if (alive && deferredRef.current && fonts?.status !== "loading") schedule(); };
 		fonts?.addEventListener?.("loadingdone", onFontsSettled);
 		fonts?.addEventListener?.("loadingerror", onFontsSettled);
 		void fonts?.ready?.then(onFontsSettled, onFontsSettled);
-		// Images with fixed sizes finish loading without changing height.
 		const root = now.root;
 		const onLoad = (e: Event) => { if ((e.target as Element | null)?.tagName === "IMG") schedule(); };
 		root.addEventListener("load", onLoad, true);
@@ -207,8 +124,6 @@ export function useQuestionLayout({ cacheId, request, identity, live, parts, onL
 			root.removeEventListener("error", onLoad, true);
 			if (frame) cancelAnimationFrame(frame);
 		};
-		// A layout switch keeps the subtree, but observe again so a caller
-		// whose boxes did change is followed too.
 	}, [enabled, identity, layout?.kind]);
 	return layout;
 }

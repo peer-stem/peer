@@ -9,7 +9,7 @@ import {
 	type PluginProblemAvailability,
 	type PluginQuestionAvailability,
 	type SessionState,
-} from "../../../components/session-core.ts";
+} from "../engine/index.ts";
 import type { ChatKind, ImageSnapshot } from "../../core/contracts/chat.ts";
 import type { LhMessage } from "../../core/native-messages.ts";
 import type { LhViewMessage } from "../../core/view.ts";

@@ -6,6 +6,7 @@
 
 import { LIGHT_THEME } from "cloudcanvas/theme";
 import { LIB_LIGHT_THEME } from "cloudcanvas-lib";
+import { UI_LIGHT_THEME } from "peer-kit";
 import { FACTORY_SETTINGS } from "../../core/settings.ts";
 import type { EffectiveAppearance } from "../../core/settings-resolution.ts";
 import {
@@ -94,7 +95,7 @@ function buildCcTokens(
 	onAccent: string,
 ): Readonly<Record<`--cc-${string}`, string>> {
 	const base: Readonly<Record<`--cc-${string}`, string>> =
-		mode === "light" ? { ...LIGHT_THEME, ...LIB_LIGHT_THEME } : {};
+		mode === "light" ? { ...LIGHT_THEME, ...LIB_LIGHT_THEME, ...UI_LIGHT_THEME } : {};
 	const cc: Record<`--cc-${string}`, string> = {
 		...base,
 		"--cc-bg": c.background,

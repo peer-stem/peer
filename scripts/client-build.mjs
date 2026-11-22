@@ -46,6 +46,7 @@ function createEsbuildOptions(rootDir, outdir, logLevel) {
 		absWorkingDir: rootDir,
 		entryPoints: {
 			state: path.join(rootDir, "src/client/state/index.ts"),
+			engine: path.join(rootDir, "src/client/engine/index.ts"),
 			keyboard: path.join(rootDir, "src/core/keyboard.ts"),
 			"blocks-math": path.join(rootDir, "src/client/state/vendor-math.ts"),
 			"blocks-code": path.join(rootDir, "src/client/state/vendor-code.ts"),
@@ -67,6 +68,7 @@ function createEsbuildOptions(rootDir, outdir, logLevel) {
 			"cloudcanvas/*",
 			"cloudcanvas-lib",
 			"cloudcanvas-lib/*",
+			"peer-kit",
 		],
 		define: {
 			"process.env.APP_VERSION": JSON.stringify(pkg.version ?? "0.0.0"),
