@@ -20,6 +20,10 @@ function resolveDiskPathForUrl(mappedUrl: string): string | null {
 		const rel = mappedUrl.slice("/client/shims/".length);
 		return path.join(WORKTREE_ROOT, "public", "client", "shims", rel);
 	}
+	if (mappedUrl.startsWith("/client/src/")) {
+		const rel = mappedUrl.slice("/client/src/".length);
+		return path.join(WORKTREE_ROOT, "src", "client", rel);
+	}
 	return null;
 }
 

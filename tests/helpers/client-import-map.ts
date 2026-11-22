@@ -13,6 +13,8 @@ export interface ClientImportMap {
 
 export const PEER_BROWSER_IMPORTS: Readonly<Record<string, string>> = {
 	"peer-state": "/client/build/state.js",
+	"peer-engine": "/client/build/engine.js",
+	"peer-kit": "/client/src/kit/index.js",
 	"peer-keyboard": "/client/build/keyboard.js",
 	"peer-blocks-math": "/client/build/blocks-math.js",
 	"peer-blocks-code": "/client/build/blocks-code.js",

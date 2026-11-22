@@ -19,6 +19,8 @@ function buildSpecifierMap() {
 	addPackageFileUrls(map, "extern/cloudcanvas");
 	addPackageFileUrls(map, "extern/cloudcanvas-lib");
 	map.set("peer-state", pathToFileURL(path.join(REPO_ROOT, "src/client/state/index.ts")).href);
+	map.set("peer-engine", pathToFileURL(path.join(REPO_ROOT, "src/client/engine/index.ts")).href);
+	map.set("peer-kit", pathToFileURL(path.join(REPO_ROOT, "src/client/kit/index.js")).href);
 	map.set("peer-keyboard", pathToFileURL(path.join(REPO_ROOT, "src/core/keyboard.ts")).href);
 	map.set("peer-blocks-math", pathToFileURL(path.join(REPO_ROOT, "src/client/state/vendor-math.ts")).href);
 	map.set("peer-blocks-code", pathToFileURL(path.join(REPO_ROOT, "src/client/state/vendor-code.ts")).href);

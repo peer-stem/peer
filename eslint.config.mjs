@@ -43,9 +43,10 @@ export default defineConfig([
 							target: "./components",
 							from: "./src",
 							// NOTE: the plugin resolves `except` relative to the zone's `from` path.
-							except: ["./core/index.ts"],
+							// `./client/engine` is permitted for 1-line shims until `components/` is deleted in F5.
+							except: ["./core/index.ts", "./client/engine"],
 							message:
-								"Browser shell imports ONLY the pure core barrel: `from \"@/src/core\"` (architecture: docs/architecture.md).",
+								"Browser shell imports ONLY the pure core barrel or client/engine shims (architecture: ARCHITECTURE.md).",
 						},
 						{
 							target: "./app",
@@ -68,9 +69,44 @@ export default defineConfig([
 						},
 						{
 							target: "./src/client",
-							from: ["./src/agent", "./src/memory", "./src/server", "./src/store"],
+							from: ["./src/agent", "./src/memory", "./src/server", "./src/store", "./src/api"],
 							message:
-								"Browser client code never imports server, agent, memory, or store layers (ARCHITECTURE.md §2).",
+								"Browser client code never imports server, api, agent, memory, or store layers (ARCHITECTURE.md §2).",
+						},
+						{
+							target: "./src/client/kit",
+							from: [
+								"./src/core",
+								"./src/client/state",
+								"./src/client/views",
+								"./src/client/blocks",
+								"./src/client/theme",
+								"./src/client/engine",
+								"./components",
+								"./app",
+							],
+							message:
+								"src/client/kit/ contains strictly product-agnostic CloudCanvas UI controls (ready to PR upstream into cloudcanvas-lib/ui) and must NEVER import peer modules.",
+						},
+						{
+							target: "./src/client/engine",
+							from: [
+								"./src/client/state",
+								"./src/client/views",
+								"./src/client/blocks",
+								"./src/client/theme",
+								"./src/client/kit",
+								"./components",
+								"./app",
+							],
+							message:
+								"src/client/engine/ contains pure framework-free domain/canvas mechanics and may import ONLY src/core and vendor math/layout libraries.",
+						},
+						{
+							target: ["./src/client/state", "./src/client/views", "./src/client/blocks", "./src/client/theme"],
+							from: "./components",
+							message:
+								"CloudCanvas client modules never import legacy React components/; import pure client mechanics from src/client/engine or peer-engine.",
 						},
 						{
 							target: ["./src/client/views", "./src/client/blocks"],

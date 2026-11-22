@@ -81,3 +81,27 @@ declare module "cloudcanvas-lib/ui" {
 		options?: { readonly nonce?: string },
 	): HTMLStyleElement | null;
 }
+
+declare module "peer-kit" {
+	export const UI_LIGHT_THEME: Readonly<Record<`--cc-${string}`, string>>;
+	export const KIT_STYLE_ID: "cloudcanvas-ui-kit-staging-styles";
+	export const KIT_CSS: string;
+	export function injectKitStyles(doc?: Document): HTMLStyleElement | null;
+	export function createKitMarkdown(host: Element, hooks?: Record<string, unknown>): { root: HTMLElement; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function renderKitInline(source: string, options?: Record<string, unknown>): DocumentFragment;
+	export function createModal(host: HTMLElement, callbacks?: { onClose?: (reason: "escape" | "backdrop" | "button") => void }): { body: HTMLElement; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function createStickyScroll(host: HTMLElement, callbacks?: Record<string, unknown>): { root: HTMLElement; viewport: HTMLElement; content: HTMLElement; isAtBottom(): boolean; stickToBottom(): void; notifyGrowth(): void; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function createDisclosure(host: HTMLElement, callbacks?: { onToggle?: (open: boolean) => void }): { root: HTMLElement; header: HTMLButtonElement; body: HTMLElement; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function createTooltip(target: HTMLElement, options?: Record<string, unknown>): { bubble: HTMLElement; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function createSpinner(host: HTMLElement): { root: HTMLElement; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function createRingProgress(host: HTMLElement, options?: Record<string, unknown>): { root: HTMLElement; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function createNumberField(host: HTMLElement, callbacks?: { onChange?: (value: number) => void }): { root: HTMLElement; input: HTMLInputElement; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function createSliderField(host: HTMLElement, callbacks?: { onInput?: (value: number) => void; onChange?: (value: number) => void }): { root: HTMLElement; input: HTMLInputElement; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function createSearchMenu(host: HTMLElement, callbacks?: Record<string, unknown>): { root: HTMLElement; trigger: HTMLButtonElement; panel: HTMLElement; open(): void; close(): void; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function createTokenInput(host: HTMLElement, callbacks?: Record<string, unknown>): { root: HTMLElement; focus(): void; serialize(): { text: string; tokens: Array<{ id: string; kind: string; value: string }> }; insertToken(token: Record<string, unknown>): void; clear(): void; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function createPanZoom(host: HTMLElement, options?: Record<string, unknown>): { root: HTMLElement; stage: HTMLElement; getTransform(): { x: number; y: number; k: number }; setTransform(next: { x: number; y: number; k: number }): void; reset(): void; fit(bounds: { x?: number; y?: number; width: number; height: number }, padding?: number): void; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function createEditableTree(host: HTMLElement, callbacks?: Record<string, unknown>): { root: HTMLElement; startRename(id: string): void; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function createFloatingWindow(host: HTMLElement, callbacks?: Record<string, unknown>): { root: HTMLElement; body: HTMLElement; getGeometry(): { x: number; y: number; width: number; height: number }; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function createSelectionPopover(host: HTMLElement, options: Record<string, unknown>): { root: HTMLElement; hide(): void; update(model?: Record<string, unknown>): void; destroy(): void };
+	export function createFindBar(host: HTMLElement, options: Record<string, unknown>): { root: HTMLElement; input: HTMLInputElement; getMatchCount(): number; focus(): void; step(delta: number): void; update(model?: Record<string, unknown>): void; destroy(): void };
+}

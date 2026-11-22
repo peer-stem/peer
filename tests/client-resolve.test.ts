@@ -11,6 +11,8 @@ const EXPECTED_NODE_TARGETS: ReadonlyArray<readonly [string, string]> = [
 	["cloudcanvas/tokens", "extern/cloudcanvas/graphics/tokens.js"],
 	["cloudcanvas-lib", "extern/cloudcanvas-lib/index.js"],
 	["cloudcanvas-lib/ui", "extern/cloudcanvas-lib/ui/index.js"],
+	["peer-kit", "src/client/kit/index.js"],
+	["peer-engine", "src/client/engine/index.ts"],
 	["peer-state", "src/client/state/index.ts"],
 	["peer-keyboard", "src/core/keyboard.ts"],
 	["peer-blocks-math", "src/client/state/vendor-math.ts"],

@@ -4,7 +4,7 @@
  * into a flat read-only `SessionScreenModel` for `views/session/session-view.js`.
  */
 
-import type { SessionStatus } from "../../../../components/session-core.ts";
+import type { SessionStatus } from "../../engine/index.ts";
 import type { ChatKind } from "../../../core/contracts/chat.ts";
 import type { LhViewMessage } from "../../../core/view.ts";
 import type { AppearanceIntent, AppearanceModel } from "../appearance.ts";

@@ -1,0 +1,42 @@
+import {
+	pendingPluginQuestionOf,
+	pluginQuestionCallsOf,
+	samePluginQuestionOccurrence,
+	type LhMessage,
+	type PluginQuestionOccurrence,
+} from "../../../core/index.ts";
+
+export interface PluginQuestionDismissalTarget {
+	readonly occurrence: PluginQuestionOccurrence;
+	readonly questionId?: string;
+}
+
+export function capturePluginQuestionDismissal(messages: readonly LhMessage[]): PluginQuestionDismissalTarget | null {
+	const pending = pendingPluginQuestionOf(messages);
+	const unreadable = pending ? undefined : pluginQuestionCallsOf(messages).find((call) => call.status === "unreadable");
+	const occurrence = pending?.occurrence ?? unreadable?.occurrence;
+	if (!occurrence) return null;
+	const annotation = unreadable?.annotation;
+	const questionId = pending?.questionId
+		?? (annotation?.status === "unreadable" ? annotation.binding?.questionId ?? annotation.identity?.questionId : undefined);
+	return Object.freeze({
+		occurrence: Object.freeze({ ...occurrence }),
+		...(questionId === undefined ? {} : { questionId }),
+	});
+}
+
+export function confirmPluginQuestionDismissal(
+	target: PluginQuestionDismissalTarget,
+	current: {
+		canonicalMessages: readonly LhMessage[];
+		reconciliation: "ready" | "syncing" | "failed";
+		stop(): void;
+		dismissPluginQuestion(occurrence: PluginQuestionOccurrence, questionId?: string): Promise<void>;
+	},
+): void {
+	if (current.reconciliation !== "ready") return;
+	const pending = capturePluginQuestionDismissal(current.canonicalMessages);
+	if (!pending || pending.questionId !== target.questionId || !samePluginQuestionOccurrence(pending.occurrence, target.occurrence)) return;
+	current.stop();
+	void current.dismissPluginQuestion(target.occurrence, target.questionId);
+}
