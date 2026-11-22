@@ -1,6 +1,6 @@
 # peer: architecture
 
-Status: updated 2026-11-19 for Sprint `C1` client base & `PEER_FOREST_DIR` substrate startup wiring (`.context/logs/plans/2026-11-16-lumberjack-mfn-cloudcanvas-integration-plan.md`, `2026-11-19-client-contract-{views,state,seams}.md`).
+Status: updated 2026-11-21 for upstream `v0.7.0` (`069a6a11`) sync (`52` routes / `76` methods) and the `F0–F5` CloudCanvas finalization architecture (`src/client/kit/`, `src/client/engine/`, default LLM compaction with `PEER_MFN_ENABLED=1` opt-in, and `userData` `~/.config/peer` default desktop state root).
 
 ## 1. System Topology
 
@@ -25,10 +25,12 @@ Browser Window (Client = Host)     Node Process (src/api/main.ts -> src/server/s
 |---|---|---|---|
 | `src/substrate/` | Hardware guardrail (`cpu` / `vulkan` only), child env scrubbing, native build & runtime path helpers | Env & binary safety checks | Allow CUDA/ROCm or `/tmp` paths |
 | `src/store/lumberjack/` | Implement engine storage ports + multi-parent DAG, `/objects` snapshots, `ic_lj_stream_poll` SSE feed, and explicit LearnHarness importer (`importLearnHarnessData`) | `PEER_FOREST_DIR` (`/usr/lib/persist/peer/state/lumberjack`) | Write raw JSON/JSONL state files or import `src/client` |
-| `src/memory/mfn/` | Supervise MFN 2.0 (`ifr`, `dsr`, `alm`, `cpe`, `psr`, `mfn-gateway`), manage `0600` `MFN_EMBEDDERS_FILE`, execute `turn.recall` & `turn.ingest`, persist `MfnIngestOutbox` (`startAutoFlush`) | `/usr/lib/persist/peer/state/mfn` | Use LLM compaction summaries or expose non-loopback ports |
-| `src/core`, `src/agent`, `src/server` | Pedagogical loops (`Prober`, `Teacher`, `Practitioner`, `Extractor`, `Auditor`), FSRS-6, speech, CLI/API providers, and `src/server/stores.ts` LumberJack/SSE/MFN startup composition | Domain types & turn orchestration | Import `src/api` or `src/client` |
-| `src/api/` | Standalone `node:http` + Web `Request -> Response` router, desktop gate, `POST /api/settings/import-learnharness`, stream passthrough, and `src/api/static.ts` 5-item `C1` static delivery (`index.html` SPA routes, allowlisted `/client/vendor/**`, `/client/src/**`, dotfile `404`, `Cache-Control: no-cache`) | HTTP transport & static delivery | Render HTML or hold application state |
+| `src/memory/mfn/` | Supervise opt-in MFN 2.0 (`PEER_MFN_ENABLED=1`: `ifr`, `dsr`, `alm`, `cpe`, `psr`, `mfn-gateway`), manage `0600` `MFN_EMBEDDERS_FILE`, execute `turn.recall` & `turn.ingest`, persist `MfnIngestOutbox` (`startAutoFlush`). LLM summarization (`compaction.ts`) remains the default when MFN is not explicitly enabled | `<stateRoot>/mfn` | Expose non-loopback ports |
+| `src/core`, `src/agent`, `src/server` | Pedagogical loops (`Prober`, `Teacher`, `Practitioner`, `Extractor`, `Auditor`), default LLM compaction (`compaction.ts`), FSRS-6, speech, CLI/API providers (`pi-ai 1.5.2`), remote `pi.dev` catalog overlay (`config/model-catalog`), and `src/server/stores.ts` LumberJack/SSE/MFN startup composition | Domain types & turn orchestration | Import `src/api` or `src/client` |
+| `src/api/` | Standalone `node:http` + Web `Request -> Response` router (`52` routes, `76` methods), desktop gate, `POST /api/settings/import-learnharness`, stream passthrough, and `src/api/static.ts` 5-item `C1` static delivery (`index.html` SPA routes, allowlisted `/client/vendor/**`, `/client/src/**`, dotfile `404`, `Cache-Control: no-cache`) | HTTP transport & static delivery | Render HTML or hold application state |
 | `public/client/` | Static HTML entry (`index.html` with source-file `<script type="importmap">` and `[data-theme-pending]`), base styles (`peer.css`), committed OFL `fonts/`, `shims/node-crypto.js`, and gitignored `esbuild` `build/` outputs (`scripts/client-build.mjs`) | Static client assets & import map | Inline secrets or drift from `extern/cloudcanvas*/package.json` |
+| `src/client/kit/` | Isolated product-agnostic CloudCanvas UI controls (`L-1..L-21` + `UI_LIGHT_THEME`, `create<Name>(host, callbacks) => { update, destroy }`, `--cc-*` tokens only), ready to PR upstream into `CloudsEcosys/cloudcanvas-lib` | Reusable CloudCanvas primitives | Import `peer` state, views, `src/core`, or `--peer-*` tokens |
+| `src/client/engine/` | Relocated & modularized framework-free `.ts` algorithms and DOM/canvas renderers (`graph/`, `session/`, `plugins/`, `dom/`) compiled via `esbuild` | Pure client domain & canvas mechanics | Import React, Next.js, or `src/server` |
 | `src/client/main.js` | Single client composition root (`R5`): wires `createState()`, `createBlockRegistry()`, `applyThemeTokens(document.documentElement, ...)`, and `createShell(document.body, ...)` | Client boot & root wiring | Put application state in views |
 | `src/client/state/` | TypeScript `ApiClient` (`api.ts`), universal `Store<M, I>` (`1/microtask`), SSE/router/settings/appearance/shell/session stores, and `screens/*.ts` projections | All client `/api/**` I/O, SSE & app state | Import CloudCanvas or touch the DOM |
 | `src/client/theme/` | Maps 12-colour `Theme` palettes onto `--cc-*` and `--peer-*` tokens (`tokens.ts`) and applies them to `<html>` (`apply.js`, `R6`) | `<html>` theme/typography tokens | Mutate body views or fetch `/api/**` |
@@ -73,4 +75,4 @@ LumberJack nodes (`core.Node`) support multi-parent links (`Parents`), `Kind`, c
 | `/usr/lib/persist/peer/state/{lumberjack,mfn}` | Dedicated runtime databases & `0600` secrets (`auth.json`, `mfn/secrets/api-token`, `mfn/embedders.json`) |
 | `/usr/lib/persist/peer/scratch/` | Ephemeral build/test `TMPDIR` on SSD (`/tmp` is never written) |
 
-Signature: Google gemini-4-carbon high - 04da2a6d-9328-4ad4-b892-398e4c39b74c
+Signature: Google Gemini 4 Carbon High - ebb091ba-315a-46f2-8fa2-a62f9c138c72

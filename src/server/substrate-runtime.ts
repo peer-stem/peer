@@ -12,6 +12,7 @@ import type {
 	MfnSupervisor,
 } from "../memory/mfn/index.ts";
 import { assertGraphFormat } from "../store/graph-format.ts";
+import { writeFileAtomicSync } from "../store/atomic-write.ts";
 import { importLearnHarnessData, type LearnHarnessImportReport } from "../store/import-learnharness.ts";
 import {
 	createLumberJackStores,
@@ -25,6 +26,8 @@ import {
 	readRenderSettings as flatReadRenderSettings,
 	writeRenderSettings as flatWriteRenderSettings,
 } from "../store/render-settings.ts";
+import { readSettings as flatReadSettings } from "../store/settings.ts";
+import type { UserSettings } from "../core/settings.ts";
 import { resolveComputeBackend, sanitizeComputeEnv, type ComputeBackend } from "../substrate/hardware-guard.ts";
 
 export type { ParsedMutationBatch } from "../store/lumberjack/stream-events.ts";
@@ -68,12 +71,28 @@ interface StartedMfnBinding {
 
 const ACTIVE_LJ_BUNDLE_KEY = Symbol.for("peer.lumberjack.activeBundle");
 const ACTIVE_LJ_SUBSTRATE_KEY = Symbol.for("peer.lumberjack.activeSubstrate");
+const SUBSTRATE_LISTENERS_KEY = Symbol.for("peer.lumberjack.listeners");
 const SAFE_TASK_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 type GlobalWithSubstrate = typeof globalThis & {
 	[ACTIVE_LJ_BUNDLE_KEY]?: LumberJackStoreBundle | null;
 	[ACTIVE_LJ_SUBSTRATE_KEY]?: ActiveLumberJackSubstrate | null;
+	[SUBSTRATE_LISTENERS_KEY]?: Set<() => void>;
 };
+
+function substrateListeners(): Set<() => void> {
+	const holder = globalThis as GlobalWithSubstrate;
+	return (holder[SUBSTRATE_LISTENERS_KEY] ??= new Set());
+}
+
+export function onSubstrateStoreChanged(listener: () => void): void {
+	substrateListeners().add(listener);
+}
+
+function notifySubstrateChanged(onChange?: () => void): void {
+	onChange?.();
+	for (const listener of substrateListeners()) listener();
+}
 
 export function getActiveLumberJackBundle(): LumberJackStoreBundle | null {
 	return (globalThis as GlobalWithSubstrate)[ACTIVE_LJ_BUNDLE_KEY] ?? null;
@@ -165,7 +184,7 @@ async function teardownSubstrateResources(
 	stopBridge();
 	if (getActiveLumberJackBundle() === bundle) setActiveLumberJackBundle(null);
 	bundle.close();
-	onChange?.();
+	notifySubstrateChanged(onChange);
 }
 
 export async function activateLumberJackSubstrate(
@@ -186,7 +205,7 @@ export async function activateLumberJackSubstrate(
 		throw err;
 	}
 	setActiveLumberJackBundle(bundle);
-	options.onChange?.();
+	notifySubstrateChanged(options.onChange);
 	let closing: Promise<void> | null = null;
 	const handle: ActiveLumberJackSubstrate = {
 		bundle,
@@ -231,12 +250,38 @@ export function readRenderSettingsFromActiveStore(): GraphRenderSettings | null 
 	return sanitizeRenderSettings(snap.slot);
 }
 
+export function readSettingsRecordFromActiveStore(): UserSettings | null {
+	const bundle = getActiveLumberJackBundle();
+	return bundle ? bundle.settingsStore.readSettings() : flatReadSettings();
+}
+
 export function writeRenderSettingsToActiveStore(raw: unknown): GraphRenderSettings {
 	const bundle = getActiveLumberJackBundle();
 	if (!bundle) return flatWriteRenderSettings(raw);
 	const settings = sanitizeRenderSettings(raw);
 	bundle.forest.upsertNode({ path: "config/render-settings", type: "leaf", kind: "config", slot: settings });
 	return settings;
+}
+
+export function readModelCatalogFromActiveStore(maxBytes: number): unknown {
+	const bundle = getActiveLumberJackBundle();
+	if (bundle) {
+		const snap = bundle.forest.getNode("config/model-catalog");
+		return snap && snap.slot !== undefined ? snap.slot : null;
+	}
+	const file = path.join(PATHS.data, "model-catalog.json");
+	if (fs.statSync(file).size > maxBytes) return null;
+	return JSON.parse(fs.readFileSync(file, "utf-8"));
+}
+
+export function writeModelCatalogToActiveStore(payload: unknown, text: string): void {
+	const bundle = getActiveLumberJackBundle();
+	if (bundle) {
+		bundle.forest.upsertNode({ path: "config/model-catalog", type: "leaf", kind: "config", slot: payload });
+		return;
+	}
+	fs.mkdirSync(PATHS.data, { recursive: true });
+	writeFileAtomicSync(path.join(PATHS.data, "model-catalog.json"), text);
 }
 
 export function readActivePluginMetadata(name: "render-settings.json" | "format.json"): unknown {

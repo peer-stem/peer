@@ -96,7 +96,7 @@ function hasValidTaskCoreFields(r: Record<string, unknown>, expectedId: string):
 	if (typeof r.requestId !== "string" || !r.requestId.length) return false;
 	if (!isTimestamp(r.createdAt) || !isTimestamp(r.updatedAt) || typeof r.prompt !== "string") return false;
 	if (!Object.hasOwn(r, "input")) return false;
-	if (!Number.isSafeInteger(r.maxTurns) || (r.maxTurns as number) < 1) return false;
+	if (r.maxTurns !== undefined && (!Number.isSafeInteger(r.maxTurns) || (r.maxTurns as number) < 1)) return false;
 	if (!Number.isSafeInteger(r.turns) || (r.turns as number) < 0) return false;
 	if (r.purpose !== "user" && r.purpose !== "background") return false;
 	if (!isPlainObject(r.model) || typeof r.model.provider !== "string" || !r.model.provider.trim()) return false;

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { gunzipSync } from "node:zlib";
 import { connectWireStream, countOccurrences, openWireStream, sendRawSocket, sendWire } from "./api-parity-wire.ts";
-import { compareResponseHeaders, runParityRequest, type ParityHarness } from "./api-parity-compare.ts";
+import { compareResponseBodies, compareResponseHeaders, runParityRequest, type ParityHarness } from "./api-parity-compare.ts";
 import { GOLDEN_SIDE_THREAD, GOLDEN_TEACH_CHAT } from "./api-test-helpers.ts";
 import { openEventsWithPulse, pulseEventsBusOnBoth } from "./api-parity-routes-b.ts";
 
@@ -250,9 +251,16 @@ export async function caseGzip(h: ParityHarness): Promise<void> {
 			sendWire(h.pair.next.port, { method: "GET", path: reqPath, headers: { "Accept-Encoding": "gzip" } }),
 			sendWire(h.pair.api.port, { method: "GET", path: reqPath, headers: { "Accept-Encoding": "gzip" } }),
 		]);
-		assert.equal(nextRes.headers["content-encoding"], undefined, `Next unexpected content-encoding on ${reqPath}`);
 		assert.equal(apiRes.headers["content-encoding"], undefined, `API unexpected content-encoding on ${reqPath}`);
-		compareResponseHeaders(h, nextRes.headers, apiRes.headers, { requestLabel: `gzip GET ${reqPath}` });
+		const nextHeaders = { ...nextRes.headers };
+		if (nextHeaders["content-encoding"] === "gzip") {
+			const unzipped = gunzipSync(nextRes.rawBody);
+			compareResponseBodies(h, { ...nextRes, rawBody: unzipped, text: unzipped.toString("utf8") }, apiRes, `gzip GET ${reqPath}`);
+			delete nextHeaders["content-encoding"];
+		} else {
+			assert.equal(nextHeaders["content-encoding"], undefined, `Next unexpected content-encoding on ${reqPath}`);
+		}
+		compareResponseHeaders(h, nextHeaders, apiRes.headers, { requestLabel: `gzip GET ${reqPath}` });
 	}
 	const { nextEv: nEv, apiEv: aEv } = await openEventsWithPulse(
 		h.pair.next.port,

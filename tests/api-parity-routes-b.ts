@@ -89,7 +89,23 @@ async function runGraphReadAndSettingsSuite(h: ParityHarness): Promise<void> {
 	});
 }
 
-async function runDeleteFolderAndNode(h: ParityHarness, folderIds: Record<ServerSide, string>): Promise<void> {
+async function runDeleteFolderAndNode(
+	h: ParityHarness,
+	folderIds: Record<ServerSide, string>,
+	scopedFolderIds: Record<ServerSide, string>,
+): Promise<void> {
+	await runParityRequest(h, {
+		label: "row 27b DELETE /api/graph/sources/folders/[id] (scoped empty folder)",
+		pattern: "/api/graph/sources/folders/[id]",
+		isWrite: true,
+		expectedStatus: 200,
+		request: (side) => ({
+			method: "DELETE",
+			path: `/api/graph/sources/folders/${scopedFolderIds[side]}?mode=preserve-graph`,
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ parentId: null, folderIds: [scopedFolderIds[side]], chatIds: [], noteIds: [] }),
+		}),
+	});
 	await runParityRequest(h, {
 		label: "row 27 DELETE /api/graph/sources (delete empty folder)",
 		pattern: "/api/graph/sources",
@@ -119,13 +135,23 @@ async function runGraphSourcesAndNodeDeleteSuite(h: ParityHarness): Promise<void
 		next: (JSON.parse(created.nextRes.text) as { createdFolderId: string }).createdFolderId,
 		api: (JSON.parse(created.apiRes.text) as { createdFolderId: string }).createdFolderId,
 	};
+	const scopedCreated = await runParityRequest(h, {
+		label: "row 27 POST /api/graph/sources (create-folder scoped)",
+		isWrite: true,
+		expectedStatus: 200,
+		request: { method: "POST", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "create-folder", name: "Parity Scoped Folder", parentId: null }) },
+	});
+	const scopedFolderIds: Record<ServerSide, string> = {
+		next: (JSON.parse(scopedCreated.nextRes.text) as { createdFolderId: string }).createdFolderId,
+		api: (JSON.parse(scopedCreated.apiRes.text) as { createdFolderId: string }).createdFolderId,
+	};
 	await runParityRequest(h, {
 		label: "row 27 POST /api/graph/sources (rename-folder)",
 		isWrite: true,
 		expectedStatus: 200,
 		request: (side) => ({ method: "POST", path: "/api/graph/sources", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "rename-folder", id: folderIds[side], name: "Parity Folder Renamed" }) }),
 	});
-	await runDeleteFolderAndNode(h, folderIds);
+	await runDeleteFolderAndNode(h, folderIds, scopedFolderIds);
 }
 
 async function runGraphImportAndExtractSuite(h: ParityHarness): Promise<void> {

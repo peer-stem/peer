@@ -25,6 +25,7 @@ import * as r24 from "@/app/api/graph/positions/route.ts";
 import * as r25 from "@/app/api/graph/render-settings/route.ts";
 import * as r26 from "@/app/api/graph/route.ts";
 import * as r27 from "@/app/api/graph/sources/route.ts";
+import * as r27b from "@/app/api/graph/sources/folders/[id]/route.ts";
 import * as r28 from "@/app/api/graph/status/route.ts";
 import * as r29 from "@/app/api/jobs/route.ts";
 import * as r30 from "@/app/api/keys/[id]/route.ts";
@@ -85,6 +86,7 @@ const ROUTE_MODULES: readonly (readonly [string, RouteModule])[] = [
 	["app/api/graph/render-settings/route.ts", r25],
 	["app/api/graph/route.ts", r26],
 	["app/api/graph/sources/route.ts", r27],
+	["app/api/graph/sources/folders/[id]/route.ts", r27b],
 	["app/api/graph/status/route.ts", r28],
 	["app/api/jobs/route.ts", r29],
 	["app/api/keys/[id]/route.ts", r30],

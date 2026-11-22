@@ -125,6 +125,8 @@ function createCloseHandler(
 }
 
 async function initPluginsSafely(logger: Logger): Promise<void> {
+	const { initializeModelCatalog } = await import("@/src/server/remote-model-catalog.ts");
+	initializeModelCatalog();
 	const { initializePlugins } = await import("@/src/server/plugins.ts");
 	try {
 		await initializePlugins();

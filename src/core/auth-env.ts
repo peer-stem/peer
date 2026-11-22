@@ -15,7 +15,17 @@ export function authEnvRecord(): AuthBoot {
 
 /** The app server's own access and data location (as browserServiceSpawnEnv
  * scrubs them): with these a CLI child could call the app API as the user. */
-const SERVER_ONLY_ENV = ["LH_DESKTOP_API_SECRET", "LH_DESKTOP_SERVER", "LH_AUTH_FILE", "LH_DATA_DIR", "PORT"];
+const SERVER_ONLY_ENV = [
+	"LH_DESKTOP_API_SECRET",
+	"LH_DESKTOP_SERVER",
+	"LH_AUTH_FILE",
+	"LH_DATA_DIR",
+	"PEER_STATE_ROOT",
+	"PEER_FOREST_DIR",
+	"PEER_MFN_TOKEN",
+	"PEER_MFN_ENDPOINT",
+	"PORT",
+];
 
 /** External CLIs own their authentication. Never pass LearnHarness-only injections. */
 export function externalCliEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {

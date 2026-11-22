@@ -237,6 +237,7 @@ async function runCliSettingsAndReads(h: ParityHarness): Promise<void> {
 		request: { method: "GET", path: "/api/external-cli?id=agy-cli", headers: { "x-learnharness-external-cli": "1" } },
 	});
 	await runParityRequest(h, { label: "row 32 GET /api/models", pattern: "/api/models", expectedStatus: 200, request: { method: "GET", path: "/api/models" } });
+	await runParityRequest(h, { label: "row 32 POST /api/models (no-providers)", pattern: "/api/models", expectedStatus: 200, request: { method: "POST", path: "/api/models" } });
 }
 
 export async function runRoutesGroupA(h: ParityHarness): Promise<void> {

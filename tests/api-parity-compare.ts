@@ -24,6 +24,7 @@ export {
 };
 
 export const NEXT_APP_ROUTE_VARY = "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch";
+export const NEXT_APP_ROUTE_VARY_ENCODING = `${NEXT_APP_ROUTE_VARY}, Accept-Encoding`;
 export const NEXT_PROXY_VARY = "Accept-Encoding";
 const NEXT_TRACE_CACHE_CONTROL = "private, no-cache, no-store, max-age=0, must-revalidate";
 const IGNORED_HEADERS = new Set(["date", "connection", "keep-alive", "transfer-encoding", "content-length"]);
@@ -154,8 +155,8 @@ function stripRecordedHeaderDiffs(
 		normNext["content-type"] = "text/plain; charset=utf-8";
 		return;
 	}
-	if (normNext.vary === NEXT_APP_ROUTE_VARY && normApi.vary === undefined) {
-		harness.recordObservation({ ruleId: "next-app-route-vary", request: opts.requestLabel, nextSummary: `vary: ${NEXT_APP_ROUTE_VARY}`, apiSummary: "(absent)" });
+	if ((normNext.vary === NEXT_APP_ROUTE_VARY || normNext.vary === NEXT_APP_ROUTE_VARY_ENCODING) && normApi.vary === undefined) {
+		harness.recordObservation({ ruleId: "next-app-route-vary", request: opts.requestLabel, nextSummary: `vary: ${normNext.vary}`, apiSummary: "(absent)" });
 		delete normNext.vary;
 	} else if (normNext.vary === NEXT_PROXY_VARY && normApi.vary === undefined) {
 		harness.recordObservation({ ruleId: "next-proxy-vary", request: opts.requestLabel, nextSummary: `vary: ${NEXT_PROXY_VARY}`, apiSummary: "(absent)" });

@@ -21,9 +21,9 @@ Status: implemented on `src/api` (merged in PR #5 `4fc52b3`, A2 follow-ups 1–8
 
 | In | Out |
 |---|---|
-| The 50 route files, 73 exported methods, and 5 streams under `/api` (R §1.4), plugin assets included (row 33) | Pages, `/_next/**`, server-side rendering |
+| The 52 route files, 76 exported methods (`50` baseline + `POST /api/settings/import-learnharness` in `C1` + `DELETE /api/graph/sources/folders/[id]` and `POST /api/models` in `v0.7.0` `F0`), and 5 streams under `/api` (R §1.4), plugin assets included (row 33) | Pages, `/_next/**`, server-side rendering |
 | Serving the client's static files unchanged on the same origin (§2.11) | Modifying static client files in transit |
-| Calling existing route handlers in `app/api/**/route.ts` unwrapped with a web `Request` | Removing Next.js before Phase 5 (`C3`) cutover (`N15` closed) |
+| Calling existing route handlers in `app/api/**/route.ts` unwrapped with a web `Request` (relocated to `src/api/handlers/**/route.ts` at `F5` cutover) | Removing Next.js before Phase `F5` cutover (`N15` closed) |
 
 ### 2.2 Route record and handler
 
@@ -127,7 +127,7 @@ No `x-powered-by`, no Next `RSC` `Vary` header (`next-app-route-vary`, `next-pro
 
 ## 4. MFN 2.0 Learned Memory & Context Mapping Contract (`src/memory/mfn/`)
 
-1. **Owner Benching Ruling (`2026-11-18`, `owner-decision-bench-mfn-tuning-beyond-basic-wiring`)**: MFN implementation beyond basic turn-bridge/runtime wiring stays frozen at its Governor-verified `S3` state (PR #9 `f767f64`) while upstream MFN evolves. Fine-tuning of recall structure (`§3`), staleness rules, recall fencing/budget (`M4`, `M5`), recall fault/fallback behavior (`N3`), active daemon probes (`M3`), supervisor single-flight/lockfile (`N5`), outbox edge cases (`N17–N19`), and partial lexical hydration (`N22`) is **benched** for a dedicated MFN phase.
+1. **Owner Benching & Default Compaction Rulings (`2026-11-18` & `2026-11-21`)**: MFN implementation beyond basic turn-bridge/runtime wiring stays frozen at its Governor-verified `S3` state (PR #9 `f767f64`) while upstream MFN evolves, and **LearnHarness LLM-summarization (`src/core/compaction.ts` + `src/server/compaction.ts`) remains the default** for long conversations until MFN 2.0 is proven and refined. MFN activates only on explicit opt-in (`PEER_MFN_ENABLED=1`). Fine-tuning of recall structure (`§3`), staleness rules, recall fencing/budget (`M4`, `M5`), recall fault/fallback behavior (`N3`), active daemon probes (`M3`), supervisor single-flight/lockfile (`N5`), outbox edge cases (`N17–N19`), and partial lexical hydration (`N22`) is **benched** for a dedicated MFN phase.
 2. **Dedicated Supervised Instance**: `peer` supervises its own MFN 2.0 controller (`ifr`, `dsr`, `alm`, `cpe`, `psr`, `mfn-gateway`) on `127.0.0.1` over `0700` sibling directories `state/mfn/data` and `state/mfn/runtime` with `0600` `state/mfn/secrets/api-token`, strict 13-key OS environment allow-listing, live child-exit readiness reset, `/proc` `(pid, starttime)` + `MFN_RUNTIME_DIR` detached-child cleanup on timeout/stop, and a clean-exit `process.on("exit")` `SIGTERM` hook (`N5` benched).
 3. **Embedder Pin (`MFN_EMBEDDERS_FILE`)**: Atomic `0600` single-link file (`format_version: 1`) targeting loopback IP literal `http://127.0.0.1:11434`, `nomic-embed-text:latest` (`768` dims), and verified 64-hex `model_digest`.
 4. **Context Assembly (`turn.recall`) & Basic Turn-Bridge Wiring (`S3` Frozen Baseline)**:
@@ -203,4 +203,4 @@ No `x-powered-by`, no Next `RSC` `Vary` header (`next-app-route-vary`, `next-pro
 | `§9.4` (`N15`) | Next 16.4.3 upstream advisory notice | **Closed (no Next upgrade; Next removed at `C3`)** |
 | `§8.5` + `S4` | `N9` (ledger/progress hygiene), `N11` (`stream-events`), `N14` (file splits), `N20` (single-check asserts + peek skip), `N21` (`test:parity`) | **Resolved in `S4`** (`N5` **Benched 2026-11-18**) |
 
-Signature: Google gemini-4-carbon high - 04da2a6d-9328-4ad4-b892-398e4c39b74c
+Signature: Google Gemini 4 Carbon High - ebb091ba-315a-46f2-8fa2-a62f9c138c72
