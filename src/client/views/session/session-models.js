@@ -9,6 +9,8 @@ import { derivePlanStatuses, derivedNodeStatus } from "peer-engine";
 const SNAPSHOT_ID_RE = /^[0-9a-f]{64}$/i;
 const SAFE_IMAGE_MIME_RE = /^image\/(?:png|jpeg|jpg|gif|webp)$/i;
 const QUESTION_TOOL_NAMES = new Set(["quiz", "probe", "ask_user_question", "explain", "recall"]);
+const DISPATCH_TOOL_NAMES = new Set(["research", "demo", "visual", "pdf"]);
+const SYNC_TOOL_CALL_NAMES = new Set(["read", "ls", "find", "grep", "show_image", "list_propositions", "list_sessions"]);
 
 export function isSnapshotId(value) {
 	return typeof value === "string" && SNAPSHOT_ID_RE.test(value);
@@ -122,26 +124,14 @@ function deriveQuestionToolPart(part, id, toolName, options) {
 	const state = String(part.state ?? "");
 	if (state === "output-available" && part.output !== undefined && part.output !== null) {
 		return {
-			kind: "answered-card",
-			id,
-			partType: String(part.type),
-			toolName,
-			toolCallId,
-			input: part.input,
-			output: part.output,
-			mode: options.mode,
-			adaptiveQuestions: options.adaptiveQuestions,
-			availableWidth: options.availableWidth,
-			appearance: options.appearance,
+			kind: "answered-card", id, partType: String(part.type), toolName, toolCallId,
+			input: part.input, output: part.output, mode: options.mode,
+			adaptiveQuestions: options.adaptiveQuestions, availableWidth: options.availableWidth, appearance: options.appearance,
 		};
 	}
 	if (state === "input-error" || state === "output-error" || part.malformed === true) {
 		return {
-			kind: "malformed-question",
-			id,
-			partType: String(part.type),
-			toolName,
-			toolCallId,
+			kind: "malformed-question", id, partType: String(part.type), toolName, toolCallId,
 			sourceMessageId: part.sourceMessageId ? String(part.sourceMessageId) : undefined,
 			sourceContentIndex: typeof part.sourceContentIndex === "number" ? part.sourceContentIndex : undefined,
 			errorText: part.errorText ? String(part.errorText) : null,
@@ -149,40 +139,22 @@ function deriveQuestionToolPart(part, id, toolName, options) {
 			busy: options.status === "streaming" || options.status === "submitted",
 		};
 	}
-	return {
-		kind: "question-preview",
-		id,
-		partType: String(part.type),
-		toolName,
-		toolCallId,
-		state,
-		input: part.input,
-		mode: options.mode,
-	};
+	return { kind: "question-preview", id, partType: String(part.type), toolName, toolCallId, state, input: part.input, mode: options.mode };
 }
 
 function derivePracticeToolPart(part, id, toolName, options) {
 	const input = asRecord(part.input) ?? {};
 	if (toolName === "problem") {
 		return {
-			kind: "problem-card",
-			id,
-			partType: "tool-problem",
-			toolCallId: String(part.toolCallId ?? id),
-			statement: String(input.statement ?? input.prompt ?? ""),
-			mode: options.mode,
+			kind: "problem-card", id, partType: "tool-problem",
+			toolCallId: String(part.toolCallId ?? id), statement: String(input.statement ?? input.prompt ?? ""), mode: options.mode,
 		};
 	}
 	return {
-		kind: "conclude-card",
-		id,
-		partType: "tool-conclude",
-		toolCallId: String(part.toolCallId ?? id),
-		input,
-		problemInput: asRecord(part.problemInput) ?? {},
+		kind: "conclude-card", id, partType: "tool-conclude", toolCallId: String(part.toolCallId ?? id),
+		input, problemInput: asRecord(part.problemInput) ?? {},
 		reveal: typeof part.reveal === "string" ? part.reveal : String(input.solutionReveal ?? ""),
-		mode: options.mode,
-		nodeNames: options.nodeNames ?? null,
+		mode: options.mode, nodeNames: options.nodeNames ?? null,
 	};
 }
 
@@ -238,13 +210,19 @@ function deriveDataCard(part, id, options) {
 	}
 	if (part.type === "data-subagent-artifact" || part.type === "data-subagent-aborted") {
 		const subKind = String(data?.kind ?? "job");
-		const result = asRecord(data?.result);
-		const detail = String(result?.title ?? result?.brief ?? result?.notes ?? data?.failure ?? "").trim();
-		const aborted = part.type === "data-subagent-aborted";
+		const ui = asRecord(data?.ui);
+		const isAborted = part.type === "data-subagent-aborted";
 		return {
-			kind: "card", id, partType: part.type, cardKind: "artifact",
-			title: aborted ? `Sub-agent ${subKind} aborted` : `Sub-agent ${subKind}`,
-			meta: aborted ? "aborted" : "ready", lines: detail ? [detail] : [], errorText: null,
+			kind: "steer-card",
+			id,
+			partType: part.type,
+			messageId: String(options.messageId ?? id),
+			subagentType: isAborted ? "aborted" : "artifact",
+			hasArtifactData: !isAborted && data !== null,
+			subKind,
+			result: data?.result ?? null,
+			failure: typeof data?.failure === "string" ? data.failure : undefined,
+			inverted: Boolean(ui?.inverted),
 		};
 	}
 	const fallback = summarizeAnswerValue(data);
@@ -256,11 +234,32 @@ function deriveDataCard(part, id, options) {
 
 function deriveStructuredPart(part, msgId, index, options) {
 	const id = String(part.toolCallId ?? part.id ?? `${msgId}_part_${index}`);
-	if (!part.type.startsWith("tool-")) return deriveDataCard(part, id, options);
+	if (!part.type.startsWith("tool-")) return deriveDataCard(part, id, { ...options, messageId: msgId });
 	const toolName = part.type.slice(5);
+	const toolCallId = String(part.toolCallId ?? id);
 	if (part.pluginQuestion || part.pluginProblem) return derivePluginCard(part, id, toolName);
 	if (QUESTION_TOOL_NAMES.has(toolName)) return deriveQuestionToolPart(part, id, toolName, options);
 	if (toolName === "problem" || toolName === "conclude") return derivePracticeToolPart(part, id, toolName, options);
+	if (part.state === "input-streaming") {
+		return { kind: "live-tool-card", id, partType: String(part.type), toolName, toolCallId, input: part.input };
+	}
+	if (toolName === "probe_done") {
+		return {
+			kind: "probe-done-card", id, partType: "tool-probe_done", toolCallId,
+			state: String(part.state ?? ""), input: part.input, output: part.output,
+		};
+	}
+	if (DISPATCH_TOOL_NAMES.has(toolName)) {
+		if (part.state !== "output-available") return null;
+		return { kind: "dispatch-card", id, partType: String(part.type), dispatchKind: toolName, toolCallId };
+	}
+	if (SYNC_TOOL_CALL_NAMES.has(toolName)) {
+		return {
+			kind: "tool-call-card", id, partType: String(part.type), toolName, toolCallId,
+			state: String(part.state ?? ""), input: part.input, output: part.output,
+			errorText: typeof part.errorText === "string" ? part.errorText : undefined,
+		};
+	}
 	const input = asRecord(part.input);
 	const summary = String(input?.path ?? input?.question ?? input?.brief ?? input?.title ?? input?.query ?? "").trim();
 	return {
@@ -337,13 +336,13 @@ export function deriveTranscriptItem(message, options = {}) {
 	}
 	if (parts.length === 0) return null;
 	const only = parts.length === 1 ? parts[0].kind : null;
-	const standalone = only === "graph-context" || only === "compaction-cut" || only === "compaction";
+	const standalone = only === "graph-context" || only === "compaction-cut" || only === "compaction" || only === "steer-card";
 	return {
 		key: String(message.id),
 		id: String(message.id),
 		role: message.role === "assistant" ? "assistant" : "user",
 		standalone,
-		parts,
+		parts: parts.map((p) => (p.kind === "text" ? { ...p, role: message.role === "assistant" ? "assistant" : "user" } : p)),
 		snapshotIds,
 	};
 }

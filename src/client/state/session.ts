@@ -1,6 +1,6 @@
 /**
- * Per-chat session store (`c2a-frozen-contracts §3.6`, `client-contract-state §2.3, §3`).
- * Wraps `SessionModel` (`peer-engine`), hydrates `/objects` snapshots,
+ * Per-chat session store (`c2a-frozen-contracts §3.6`, `f3-c2b §4`).
+ * Wraps `SessionModel` (`peer-engine`), hydrates `/images` snapshots and `/api/jobs`,
  * manages `opening-prompt.ts` handoff, and gates `continue-if-owed` on `configured`.
  */
 
@@ -10,6 +10,7 @@ import {
 	type ChatKind,
 	type ChatSettings,
 	type ImageSnapshot,
+	type JobRecord,
 	type LhMessage,
 	type PlanTree,
 	type QuestionAnswerData,
@@ -29,10 +30,14 @@ import { ApiError, apiPath, isAbortError, type ApiClient } from "./api.ts";
 import type { Events } from "./events.ts";
 import {
 	handleDockOrRecoveryIntent,
+	handleSessionMetadataIntent,
 	latestTreeFromMessages,
+	loadSessionJobs,
+	requestSessionExtract,
 	runInitialMountHandoff,
 	scanAndHydrateImages,
 	sendComposerIntent,
+	setSessionArtifactInverted,
 	settlePendingMountWork,
 	type SessionHydrationTarget,
 } from "./session-helpers.ts";
@@ -68,6 +73,7 @@ export interface SessionStoreModel {
 	readonly state: SessionState | null;
 	readonly turnError: string | null;
 	readonly imageSnapshots: Readonly<Record<string, ImageSnapshotEntry>>;
+	readonly jobs: readonly JobRecord[];
 	readonly tree?: PlanTree | null;
 	readonly chatSettings?: ChatSettings | null;
 	readonly pricing?: SessionPricing | null;
@@ -116,6 +122,8 @@ export type SessionIntent =
 	| { readonly type: "save-question-draft"; readonly questionKey: string; readonly draft: Partial<QuestionDraft> }
 	| { readonly type: "rename"; readonly title: string }
 	| { readonly type: "save-chat-settings"; readonly settings: ChatSettings }
+	| { readonly type: "set-artifact-inverted"; readonly messageId: string; readonly inverted: boolean }
+	| { readonly type: "request-extract" }
 	| { readonly type: "clear-error" };
 
 export interface CreateSessionStoreOptions {
@@ -147,15 +155,14 @@ interface SessionContext extends SessionHydrationTarget {
 	activeLoad: AbortController | null;
 	load: LoadState;
 	error: string | null;
-	title: string;
 	kind: ChatKind;
 	compacting: boolean;
-	serverTurnError: string | null;
 	serverTree: PlanTree | null;
-	chatSettings: ChatSettings | null;
 	pricing: SessionPricing | null;
 	coverage: Readonly<Record<string, unknown>> | null;
 }
+
+const EMPTY_JOBS: readonly JobRecord[] = Object.freeze([]);
 
 function isModelBusy(model: SessionModel | null): boolean {
 	return model !== null && (model.status === "submitted" || model.status === "streaming");
@@ -187,6 +194,7 @@ function publishSession(ctx: SessionContext): void {
 		state,
 		turnError: state?.error?.message ?? ctx.serverTurnError,
 		imageSnapshots: ctx.imageSnapshots,
+		jobs: ctx.jobs,
 		tree,
 		chatSettings: ctx.chatSettings,
 		pricing: ctx.pricing,
@@ -266,31 +274,6 @@ async function loadChatRecord(ctx: SessionContext): Promise<void> {
 	}
 }
 
-async function handleMetadataIntent(
-	ctx: SessionContext,
-	intent: Extract<SessionIntent, { type: "rename" | "save-chat-settings" }>,
-): Promise<void> {
-	if (intent.type === "rename") {
-		const trimmed = intent.title.trim();
-		if (!trimmed) return;
-		const res = await ctx.api.json<{ title?: string }>(apiPath`/api/chats/${ctx.chatId}`, {
-			method: "PUT",
-			json: { title: trimmed },
-		});
-		if (ctx.disposed) return;
-		ctx.title = typeof res.title === "string" ? res.title : trimmed;
-		publishSession(ctx);
-		return;
-	}
-	const res = await ctx.api.json<{ settings?: ChatSettings }>(apiPath`/api/chats/${ctx.chatId}/settings`, {
-		method: "PUT",
-		json: intent.settings,
-	});
-	if (ctx.disposed) return;
-	ctx.chatSettings = res.settings ?? intent.settings;
-	publishSession(ctx);
-}
-
 function abortActiveSessionTurn(ctx: SessionContext): void {
 	ctx.model?.stop();
 	const body = { kind: "turn", id: ctx.chatId };
@@ -301,7 +284,8 @@ function abortActiveSessionTurn(ctx: SessionContext): void {
 async function handleTurnActionIntent(ctx: SessionContext, intent: SessionIntent): Promise<void> {
 	switch (intent.type) {
 		case "reload":
-			return loadChatRecord(ctx);
+			await Promise.all([loadChatRecord(ctx), loadSessionJobs(ctx)]);
+			return;
 		case "send-text":
 		case "steer":
 		case "submit-thinking":
@@ -323,7 +307,11 @@ async function handleTurnActionIntent(ctx: SessionContext, intent: SessionIntent
 			return;
 		case "rename":
 		case "save-chat-settings":
-			return handleMetadataIntent(ctx, intent);
+			return handleSessionMetadataIntent(ctx, intent);
+		case "set-artifact-inverted":
+			return setSessionArtifactInverted(ctx, intent.messageId, intent.inverted);
+		case "request-extract":
+			return requestSessionExtract(ctx);
 		case "clear-error":
 			ctx.serverTurnError = null;
 			ctx.error = null;
@@ -337,8 +325,13 @@ async function handleTurnActionIntent(ctx: SessionContext, intent: SessionIntent
 
 function wireSessionEvents(ctx: SessionContext, events: Events): Unsubscribe {
 	const offs: Unsubscribe[] = [
+		events.on("jobs-changed", ({ chatId }) => {
+			if (chatId === undefined || chatId === ctx.chatId) void loadSessionJobs(ctx);
+		}),
 		events.on("record-changed", ({ chatId }) => {
-			if (chatId === ctx.chatId && !isModelBusy(ctx.model)) void loadChatRecord(ctx);
+			if (chatId !== ctx.chatId) return;
+			if (!isModelBusy(ctx.model)) void loadChatRecord(ctx);
+			void loadSessionJobs(ctx);
 		}),
 		events.on("compaction-changed", ({ chatId, running }) => {
 			if (chatId !== ctx.chatId) return;
@@ -353,6 +346,7 @@ function wireSessionEvents(ctx: SessionContext, events: Events): Unsubscribe {
 		}),
 		events.onResync(() => {
 			if (!isModelBusy(ctx.model)) void loadChatRecord(ctx);
+			void loadSessionJobs(ctx);
 		}),
 		ctx.settings ? ctx.settings.subscribe(() => settlePendingMountWork(ctx)) : () => {},
 	];
@@ -372,6 +366,7 @@ function createInitialSessionCell(chatId: string): Cell<SessionStoreModel> {
 		state: null,
 		turnError: null,
 		imageSnapshots: {},
+		jobs: EMPTY_JOBS,
 		tree: null,
 		chatSettings: null,
 		pricing: null,
@@ -394,6 +389,7 @@ function createSessionContext(opts: CreateSessionStoreOptions): SessionContext {
 		initialPrompt: opts.initialPrompt,
 		seenSnapshots: new Set(),
 		imageControllers: new Set(),
+		jobStatuses: new Map(),
 		disposed: false,
 		loadTicket: 0,
 		activeLoad: null,
@@ -408,12 +404,17 @@ function createSessionContext(opts: CreateSessionStoreOptions): SessionContext {
 		pricing: null,
 		coverage: null,
 		imageSnapshots: {},
+		jobs: EMPTY_JOBS,
+		activeJobsLoad: null,
+		inFlightJobs: null,
+		pendingJobsReload: false,
 		model: null,
 		openingDraft: null,
 		initialHandled: false,
 		pendingAutoPrompt: null,
 		deferredMountContinue: false,
 		publish: () => publishSession(ctx),
+		reloadRecord: () => loadChatRecord(ctx),
 	};
 	return ctx;
 }
@@ -422,6 +423,7 @@ function disposeSessionContext(ctx: SessionContext, offEvents: Unsubscribe): voi
 	ctx.disposed = true;
 	offEvents();
 	ctx.activeLoad?.abort();
+	ctx.activeJobsLoad?.abort();
 	for (const c of ctx.imageControllers) c.abort();
 	ctx.imageControllers.clear();
 	if (!ctx.model) return;
@@ -436,6 +438,7 @@ export function createSessionStore(
 	const ctx = createSessionContext(options);
 	const offEvents = wireSessionEvents(ctx, options.events);
 	void loadChatRecord(ctx);
+	void loadSessionJobs(ctx);
 
 	return createStoreFromCell<SessionStoreModel, SessionIntent>(ctx.cell, {
 		onSend: (intent) => handleTurnActionIntent(ctx, intent),

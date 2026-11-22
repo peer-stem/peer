@@ -1,17 +1,20 @@
 /**
  * Shell DOM skeleton (`views §2.1`) and persistent layer overlays (`settings`,
- * `setup`, `cheat-sheet`, `startup-message`, and `pan-zoom-viewer`).
- * Never touches `<html>` (`R6`).
+ * `setup`, `cheat-sheet`, `startup-message`, and `pan-zoom-viewer`), plus
+ * `createSidebarView` (`C2b`). Never touches `<html>` (`R6`).
  */
-import { button, createLife, documentOf, el, injectUiStyles, textNode, writeText } from 'cloudcanvas-lib/ui';
+import { createLife, documentOf, el, injectUiStyles, textNode, writeText } from 'cloudcanvas-lib/ui';
 import { createCheatSheet } from '../overlays/cheat-sheet.js';
 import { createPanZoomViewer } from '../overlays/pan-zoom-viewer.js';
 import { createStartupMessageDialog } from '../overlays/startup-message.js';
 import { createSettingsDialog } from '../settings/settings-dialog.js';
 import { createSetupDialog } from '../settings/setup-dialog.js';
+import { createSidebarView } from '../sidebar/sidebar-view.js';
 import { injectShellStyles } from './shell.css.js';
 
-const AUX_STORE_KEYS = ['settings', 'models', 'appearance', 'desktop', 'prefs'];
+const AUX_STORE_KEYS = [
+  'settings', 'models', 'appearance', 'desktop', 'prefs', 'sessions', 'activity', 'activeRoute'
+];
 
 function isLegacySettingsModel(aux) {
   if (!aux || typeof aux !== 'object') return false;
@@ -20,40 +23,39 @@ function isLegacySettingsModel(aux) {
 }
 
 function normalizeAuxStores(aux) {
-  if (!aux || typeof aux !== 'object') {
-    return { settings: null, models: null, appearance: null, desktop: null, prefs: null };
-  }
-  if (isLegacySettingsModel(aux)) {
-    return { settings: aux, models: null, appearance: null, desktop: null, prefs: null };
-  }
+  const empty = {
+    settings: null, models: null, appearance: null, desktop: null,
+    prefs: null, sessions: null, activity: null, activeRoute: null
+  };
+  if (!aux || typeof aux !== 'object') return empty;
+  if (isLegacySettingsModel(aux)) return { ...empty, settings: aux };
   return {
     settings: aux.settings ?? null,
     models: aux.models ?? null,
     appearance: aux.appearance ?? null,
     desktop: aux.desktop ?? null,
-    prefs: aux.prefs ?? null
+    prefs: aux.prefs ?? null,
+    sessions: aux.sessions ?? null,
+    activity: aux.activity ?? null,
+    activeRoute: aux.activeRoute ?? null
   };
 }
 
-function buildSidebar(doc, life, callbacks) {
-  const side = el(doc, 'aside', { className: 'peer-shell-side', attrs: { 'aria-label': 'Workspace navigation' } });
-  const nav = el(doc, 'nav', { className: 'peer-shell-nav' });
-  nav.append(
-    button(doc, {
-      label: 'New', signal: life.signal, attrs: { 'data-peer-nav': 'new-session' },
-      onClick: () => callbacks.onNavigate?.({ name: 'new-session', mode: 'teach' })
-    }),
-    button(doc, {
-      label: 'Graph', signal: life.signal, attrs: { 'data-peer-nav': 'home' },
-      onClick: () => callbacks.onNavigate?.({ name: 'home' })
-    }),
-    button(doc, {
-      label: 'Settings', signal: life.signal, attrs: { 'data-peer-nav': 'settings' },
-      onClick: () => callbacks.onOpenSettings?.()
-    })
-  );
-  side.append(nav);
-  return side;
+function deriveSidebarModel(auxStores) {
+  const activeRoute = auxStores.activeRoute;
+  const activeChatId = activeRoute?.name === 'session'
+    ? activeRoute.id
+    : (auxStores.sessions?.activeChatId ?? null);
+  const appearance = auxStores.appearance?.appearance
+    ?? auxStores.settings?.effective?.appearance
+    ?? auxStores.settings?.record?.appearance
+    ?? null;
+  return {
+    sessionsStore: auxStores.sessions ?? {},
+    activity: auxStores.activity ?? {},
+    activeChatId,
+    appearance
+  };
 }
 
 function syncSettingsLayer(state, shellModel, auxStores) {
@@ -159,6 +161,7 @@ function applyFrameUpdate(state, nodes, shellModel = {}, aux = null) {
   nodes.root.setAttribute('data-peer-electron', String(Boolean(shellModel?.electron)));
   nodes.side.hidden = !shellModel?.sidebar?.open;
   nodes.side.setAttribute('data-peer-narrow', String(Boolean(shellModel?.sidebar?.narrow)));
+  state.sidebarView.update(deriveSidebarModel(auxStores));
   const upd = shellModel?.update ?? auxStores.desktop?.update ?? null;
   const bannerMsg = upd ? `Update ${upd.version} (${upd.status})` : '';
   writeText(nodes.updateText, bannerMsg);
@@ -177,16 +180,21 @@ export function createShellFrame(host, { layers, ...callbacks } = {}) {
     className: 'peer-shell',
     attrs: { 'data-peer-platform': 'web', 'data-peer-electron': 'false' }
   });
-  const side = buildSidebar(doc, life, callbacks);
+  const side = el(doc, 'aside', { className: 'peer-shell-side', attrs: { 'aria-label': 'Workspace navigation' } });
   const content = el(doc, 'main', { className: 'peer-shell-content' });
   const layerHost = el(doc, 'div', { className: 'peer-shell-layer' });
   const updateBanner = el(doc, 'div', { className: 'peer-shell-update', attrs: { 'data-peer-update': '', hidden: true } });
   const updateText = textNode(doc, updateBanner);
   layerHost.append(updateBanner);
+  const sidebarView = createSidebarView(side, {
+    ...callbacks,
+    layerHost,
+    layers
+  });
   root.append(side, content, layerHost);
   host.append(root);
   const state = {
-    doc, life, layerHost, layers, callbacks, lastStartupId: null,
+    doc, life, layerHost, layers, callbacks, sidebarView, lastStartupId: null,
     settingsOverlay: null, setupOverlay: null, cheatOverlay: null, startupOverlay: null, viewerOverlay: null
   };
   const nodes = { root, side, updateBanner, updateText };
@@ -198,6 +206,7 @@ export function createShellFrame(host, { layers, ...callbacks } = {}) {
     state.cheatOverlay?.destroy();
     state.setupOverlay?.destroy();
     state.settingsOverlay?.destroy();
+    state.sidebarView.destroy();
     state.viewerOverlay = null;
     state.startupOverlay = null;
     state.cheatOverlay = null;
@@ -209,6 +218,7 @@ export function createShellFrame(host, { layers, ...callbacks } = {}) {
   return {
     root, side, content, layerHost,
     update: (shellModel, aux) => applyFrameUpdate(state, nodes, shellModel, aux),
+    focusSidebarSearch: () => sidebarView.focusSearch(),
     openViewer: (payload) => openViewerOverlay(state, payload),
     closeViewer: () => closeViewerOverlay(state),
     destroy

@@ -1,7 +1,12 @@
 /**
- * Public `peer-state` barrel and `createState()` composition root (`state §2.3`, `c2a §3`).
+ * Public `peer-state` barrel and `createState()` composition root (`state §2.3`, `c2a §3`, `f3-c2b §4`).
  */
 
+import {
+	createActivityStore,
+	type ActivityIntent,
+	type ActivityStoreModel,
+} from "./activity.ts";
 import { createApiClient, type ApiClient } from "./api.ts";
 import {
 	createAppearanceStore,
@@ -49,6 +54,11 @@ import {
 	type SessionStoreModel,
 } from "./session.ts";
 import {
+	createSessionsStore,
+	type SessionsIntent,
+	type SessionsModel,
+} from "./sessions.ts";
+import {
 	createSettingsStore,
 	type SettingsIntent,
 	type SettingsModel,
@@ -58,6 +68,11 @@ import {
 	type ShellIntent,
 	type ShellModel,
 } from "./shell.ts";
+import {
+	createSideThreadStore,
+	type SideThreadIntent,
+	type SideThreadStoreModel,
+} from "./side-thread.ts";
 import type { Store, Unsubscribe } from "./store.ts";
 
 export * from "./store.ts";
@@ -71,6 +86,9 @@ export * from "./settings.ts";
 export * from "./appearance.ts";
 export * from "./shell.ts";
 export * from "./graph.ts";
+export * from "./sessions.ts";
+export * from "./activity.ts";
+export * from "./side-thread.ts";
 export * from "./session.ts";
 export * from "./screens/session.ts";
 export * from "./screens/home.ts";
@@ -102,13 +120,16 @@ export interface PeerState {
 	readonly appearance: Store<AppearanceModel, AppearanceIntent>;
 	readonly shell: Store<ShellModel, ShellIntent>;
 	readonly graph: Store<GraphStoreModel, GraphIntent>;
+	readonly sessions: Store<SessionsModel, SessionsIntent>;
+	readonly activity: Store<ActivityStoreModel, ActivityIntent>;
 	openSession(id: string): Store<SessionStoreModel, SessionIntent>;
+	openSideThread(chatId: string): Store<SideThreadStoreModel, SideThreadIntent>;
 	screen(routeModel: RouteModel): Store<object, { readonly type: string }>;
 	dispose(): void;
 }
 
-interface ActiveSessionEntry {
-	store: Store<SessionStoreModel, SessionIntent>;
+interface PooledEntry<M, I extends { readonly type: string }> {
+	store: Store<M, I>;
 	refs: number;
 }
 
@@ -121,20 +142,22 @@ interface ScreenFactoryDeps {
 	readonly appearance: Store<AppearanceModel, AppearanceIntent>;
 	readonly shell: Store<ShellModel, ShellIntent>;
 	readonly openSession: (id: string) => Store<SessionStoreModel, SessionIntent>;
+	readonly openSideThread: (id: string) => Store<SideThreadStoreModel, SideThreadIntent>;
 	readonly getGraph: () => Store<GraphStoreModel, GraphIntent>;
 }
 
-function createSessionHandle(
+function createPooledHandle<M, I extends { readonly type: string }>(
 	id: string,
-	entry: ActiveSessionEntry,
-	active: Map<string, ActiveSessionEntry>,
-): Store<SessionStoreModel, SessionIntent> {
+	entry: PooledEntry<M, I>,
+	active: Map<string, PooledEntry<M, I>>,
+	disposedLabel: string,
+): Store<M, I> {
 	let handleDisposed = false;
 	return {
 		get: () => entry.store.get(),
 		subscribe: (listener) => entry.store.subscribe(listener),
 		send(intent) {
-			if (handleDisposed) return Promise.reject(new Error("Session handle is disposed"));
+			if (handleDisposed) return Promise.reject(new Error(disposedLabel));
 			return entry.store.send(intent);
 		},
 		dispose() {
@@ -154,7 +177,7 @@ function createSessionPool(
 	router: RouterStore,
 	settings: Store<SettingsModel, SettingsIntent>,
 ) {
-	const active = new Map<string, ActiveSessionEntry>();
+	const active = new Map<string, PooledEntry<SessionStoreModel, SessionIntent>>();
 	let poolDisposed = false;
 
 	const openSession = (id: string): Store<SessionStoreModel, SessionIntent> => {
@@ -167,7 +190,53 @@ function createSessionPool(
 			active.set(id, entry);
 		}
 		entry.refs += 1;
-		return createSessionHandle(id, entry, active);
+		return createPooledHandle(id, entry, active, "Session handle is disposed");
+	};
+
+	const peekSession = (id: string): Store<SessionStoreModel, SessionIntent> | undefined =>
+		active.get(id)?.store;
+
+	const disposeAll = () => {
+		poolDisposed = true;
+		for (const entry of active.values()) entry.store.dispose();
+		active.clear();
+	};
+
+	return { openSession, peekSession, disposeAll };
+}
+
+function buildPooledSideThread(
+	chatId: string,
+	api: ApiClient,
+	events: Events,
+	peekSession: (id: string) => Store<SessionStoreModel, SessionIntent> | undefined,
+): Store<SideThreadStoreModel, SideThreadIntent> {
+	return createSideThreadStore({
+		chatId,
+		api,
+		events,
+		getMessages: () => peekSession(chatId)?.get().state?.nativeMessages ?? [],
+		getWorking: () => peekSession(chatId)?.get().questionDraft?.readingThinking || undefined,
+	});
+}
+
+function createSideThreadPool(
+	api: ApiClient,
+	events: Events,
+	peekSession: (id: string) => Store<SessionStoreModel, SessionIntent> | undefined,
+) {
+	const active = new Map<string, PooledEntry<SideThreadStoreModel, SideThreadIntent>>();
+	let poolDisposed = false;
+
+	const openSideThread = (chatId: string): Store<SideThreadStoreModel, SideThreadIntent> => {
+		if (poolDisposed) throw new Error("State is disposed");
+		let entry = active.get(chatId);
+		if (!entry) {
+			entry = { store: buildPooledSideThread(chatId, api, events, peekSession), refs: 0 };
+			active.set(chatId, entry);
+		}
+		entry.refs += 1;
+		return createPooledHandle(chatId, entry, active, "SideThread handle is disposed");
 	};
 
 	const disposeAll = () => {
@@ -176,7 +245,7 @@ function createSessionPool(
 		active.clear();
 	};
 
-	return { openSession, disposeAll };
+	return { openSideThread, disposeAll };
 }
 
 function wireSidebarPrefs(
@@ -209,7 +278,7 @@ function openScreenForRoute(
 	routeModel: RouteModel,
 	d: ScreenFactoryDeps,
 ): Store<object, { readonly type: string }> {
-	const { api, router, prefs, models, settings, appearance, shell, openSession, getGraph } = d;
+	const { api, router, prefs, models, settings, appearance, shell, openSession, openSideThread, getGraph } = d;
 	if (routeModel.route.name === "home") {
 		return asGenericScreen(
 			createHomeScreenStore({ api, router, graph: getGraph(), settings, appearance, prefs, shell }),
@@ -221,9 +290,10 @@ function openScreenForRoute(
 		);
 	}
 	if (routeModel.route.name === "session") {
-		return asGenericScreen(
-			createSessionScreenStore({ routeModel, router, openSession, appearance, settings, models, prefs, shell }),
-		);
+		const sessionOpts = {
+			routeModel, router, openSession, openSideThread, appearance, settings, models, prefs, shell,
+		};
+		return asGenericScreen(createSessionScreenStore(sessionOpts));
 	}
 	return asGenericScreen(createPendingScreenStore({ routeModel, router, settings, shell }));
 }
@@ -258,24 +328,32 @@ export function createState(options?: CreateStateOptions): PeerState {
 	});
 	const appearance = createAppearanceStore({ api, settings, shell, events });
 	appearanceRef = appearance;
+	const sessions = createSessionsStore({ api, events, storage: options?.storage });
+	const activity = createActivityStore({ api, events });
 	const pool = createSessionPool(api, events, router, settings);
+	const sidePool = createSideThreadPool(api, events, pool.peekSession);
 	const offSidebar = wireSidebarPrefs(shell, prefs);
 	let graphInstance: Store<GraphStoreModel, GraphIntent> | null = null;
 	const getGraph = () => (graphInstance ??= createGraphStore({ api, events }));
 	const deps: ScreenFactoryDeps = {
-		api, router, prefs, models, settings, appearance, shell, openSession: pool.openSession, getGraph,
+		api, router, prefs, models, settings, appearance, shell,
+		openSession: pool.openSession,
+		openSideThread: sidePool.openSideThread,
+		getGraph,
 	};
 	const cleanupExtras = () => {
 		offSidebar();
+		sidePool.disposeAll();
 		pool.disposeAll();
 		graphInstance?.dispose();
 	};
-	const ownedStores = [appearance, settings, models, desktop, prefs, shell, router, events];
+	const ownedStores = [activity, sessions, appearance, settings, models, desktop, prefs, shell, router, events];
 
 	return {
-		api, events, router, prefs, desktop, models, settings, appearance, shell,
+		api, events, router, prefs, desktop, models, settings, appearance, shell, sessions, activity,
 		get graph() { return getGraph(); },
 		openSession: pool.openSession,
+		openSideThread: sidePool.openSideThread,
 		screen: (rm) => openScreenForRoute(rm, deps),
 		dispose: () => disposePeerStores(ownedStores, cleanupExtras),
 	};
