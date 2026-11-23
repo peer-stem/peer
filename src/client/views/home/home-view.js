@@ -9,11 +9,13 @@
 import {
   button, createLife, documentOf, el, injectUiStyles, input, setOff, show, textNode, writeText
 } from 'cloudcanvas-lib/ui';
+import { createInteractionScopeController, joinDictation, registerSurfaceBoundary } from 'peer-engine';
 import { createChainsTable } from '../graph/chains-table.js';
 import { deriveHomeViewModel } from '../graph/graph-models.js';
 import { createGraphView } from '../graph/graph-view.js';
 import { createNotesImport } from '../graph/notes-import.js';
 import { createTopBar } from '../shared/top-bar.js';
+import { createDictationControl } from '../voice/dictation-control.js';
 import { injectHomeStyles } from './home.css.js';
 
 function dispatchHomeIntent(send, intent) {
@@ -185,9 +187,14 @@ function buildHomeDock(doc, life, callbacks) {
   life.on(composerInput, 'keydown', (ev) => {
     if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); callbacks.onSubmit(); }
   });
-  form.append(composerInput, startBtn);
+  const dictSlot = el(doc, 'div');
+  const dictCtl = createDictationControl(dictSlot, {
+    onTranscript: (chunk) => { composerInput.value = joinDictation(composerInput.value, chunk); },
+    onOpenDeepgramKey: () => callbacks.onOpenKeys()
+  });
+  form.append(composerInput, dictSlot, startBtn);
   dock.append(meta.metaRow, startErrorEl, form);
-  return { ...meta, dock, startErrorEl, startErrorText, composerInput, startBtn };
+  return { ...meta, dock, startErrorEl, startErrorText, composerInput, dictCtl, startBtn };
 }
 
 function syncHomeDock(doc, life, state, vm) {
@@ -225,7 +232,7 @@ function syncHomeBody(state, vm) {
       const opts = { send: state.send, navigate: state.navigate, onPickFiles: state.onPickFiles };
       state.graphView = createGraphView(state.bodyHost, opts);
     }
-    state.graphView.update(vm);
+    state.graphView.update({ ...vm, plugins: state.lastModel?.plugins ?? null, pluginManager: state.lastModel?.pluginManager ?? null });
     return;
   }
   if (state.graphView) { state.graphView.destroy(); state.graphView = null; }
@@ -257,6 +264,7 @@ function submitHomePrompt(state) {
 
 function handleHomeCommand(state, action) {
   if (state.life.dead) return false;
+  if (action === 'toggle-dictation') return state.dock.dictCtl.toggle();
   if (action === 'focus-composer' || action === 'cycle-field') {
     state.dock.composerInput.focus();
     return true;
@@ -285,6 +293,7 @@ function applyHomeUpdate(doc, state, model = {}) {
   state.tabs.chainsTab.setAttribute('aria-selected', String(vm.viewTab === 'chains'));
   syncHomeBody(state, vm);
   syncHomeDock(doc, state.life, state, vm);
+  state.dock.dictCtl.update({ dictation: model?.dictation ?? null, disabled: Boolean(vm.starting) });
 }
 
 function handleHomeModePick(doc, state, mode) {
@@ -299,6 +308,7 @@ function handleHomeModePick(doc, state, mode) {
 
 function teardownHomeView(state, root) {
   if (!state.life.destroy()) return;
+  state.dock.dictCtl.destroy();
   state.graphView?.destroy();
   state.chainsPane?.destroy();
   state.graphView = null;
@@ -323,7 +333,11 @@ export function createHomeView(host, { send, navigate, onToggleSidebar, onPickFi
     onOpenSettings: () => dispatchHomeIntent(send, { type: 'open-settings' })
   });
   const tabs = buildHomeTabs(doc, life, send);
-  const bodyHost = el(doc, 'div', { className: 'peer-home-body' });
+  const bodyHost = el(doc, 'div', { className: 'peer-home-body', style: 'position:relative' });
+  const surfReg = el(doc, 'div', { className: 'peer-plugin-surface-region', attrs: { 'data-session-surface-region': '' } });
+  surfReg.append(el(doc, 'div', { attrs: { 'data-session-surface-mounts': '' } }));
+  bodyHost.append(surfReg);
+  registerSurfaceBoundary(bodyHost, life.signal, createInteractionScopeController());
   const state = {
     life, send, navigate, onPickFiles, topBar, tabs, bodyHost, dock: null, setupCtaBtn: null,
     graphView: null, chainsPane: null, fallbackMode: 'teach', lastModel: null, lastVm: null
@@ -331,7 +345,11 @@ export function createHomeView(host, { send, navigate, onToggleSidebar, onPickFi
   state.dock = buildHomeDock(doc, life, {
     onSetMode: (mode) => handleHomeModePick(doc, state, mode),
     onClearPicks: () => dispatchHomeIntent(send, { type: 'clear-picks' }),
-    onSubmit: () => submitHomePrompt(state)
+    onOpenKeys: () => dispatchHomeIntent(send, { type: 'open-settings', section: 'keys' }),
+    onSubmit: () => {
+      if (state.dock.dictCtl.isActive()) { void state.dock.dictCtl.finish().then(() => submitHomePrompt(state)); return; }
+      submitHomePrompt(state);
+    }
   });
   root.append(topBarHost, tabs.subbar, bodyHost, state.dock.dock);
   host.append(root);

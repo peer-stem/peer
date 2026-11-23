@@ -5,11 +5,18 @@
  */
 
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { OPENING_PROMPT_FAILURE, SessionStarter } from "../../engine/index.ts";
+import {
+	OPENING_PROMPT_FAILURE,
+	SessionStarter,
+	type PluginFrontendManager,
+	type PluginSnapshot,
+} from "../../engine/index.ts";
 import type { ApiClient } from "../api.ts";
 import type { AppearanceIntent, AppearanceModel } from "../appearance.ts";
+import type { DictationStore } from "../dictation.ts";
 import type { GraphIntent, GraphStoreModel } from "../graph.ts";
 import type { CatalogModelEntry, ModelsIntent, ModelsStoreModel } from "../models.ts";
+import type { PluginsStore } from "../plugins.ts";
 import type { RouteModel, RouterStore } from "../router.ts";
 import type { SettingsIntent, SettingsModel } from "../settings.ts";
 import type { ShellIntent, ShellModel } from "../shell.ts";
@@ -33,6 +40,9 @@ export interface NewSessionScreenModel {
 	readonly availableModels: readonly CatalogModelEntry[];
 	readonly starting: boolean;
 	readonly error: string | null;
+	readonly plugins?: PluginSnapshot | null;
+	readonly pluginManager?: PluginFrontendManager | null;
+	readonly dictation?: DictationStore | null;
 }
 
 export type NewSessionScreenIntent =
@@ -60,6 +70,8 @@ export interface CreateNewSessionScreenStoreOptions {
 	appearance: Store<AppearanceModel, AppearanceIntent>;
 	shell: Store<ShellModel, ShellIntent>;
 	routeModel?: RouteModel;
+	plugins?: PluginsStore;
+	dictation?: DictationStore;
 }
 
 interface NewSessionLocalState {
@@ -110,6 +122,9 @@ function projectNewSessionScreen(
 		availableModels: models.models,
 		starting: local.starting,
 		error: local.error,
+		plugins: opts.plugins ? opts.plugins.get() : null,
+		pluginManager: opts.plugins ? opts.plugins.manager : null,
+		dictation: opts.dictation ?? null,
 	};
 }
 
@@ -266,6 +281,7 @@ export function createNewSessionScreenStore(
 		options.models.subscribe(publish),
 		options.appearance.subscribe(publish),
 		options.router.subscribe((rm) => syncNewSessionRoute(rm, local, publish)),
+		options.plugins ? options.plugins.subscribe(publish) : () => {},
 	];
 
 	return createStoreFromCell<NewSessionScreenModel, NewSessionScreenIntent>(cell, {

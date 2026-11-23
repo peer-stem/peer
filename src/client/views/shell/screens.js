@@ -3,6 +3,7 @@
  */
 import { createHomeView } from '../home/home-view.js';
 import { createNewSessionView } from '../new-session/new-session-view.js';
+import { createPluginView } from '../plugin/plugin-view.js';
 import { createSessionView } from '../session/session-view.js';
 import { createNotFoundScreen } from '../shared/not-found-screen.js';
 import { createPendingScreen } from '../shared/pending-screen.js';
@@ -36,6 +37,9 @@ export function resolveScreenFactory(route, {
     return (host, ctx) => createSessionView(host, {
       ...ctx, blocks, onToggleSidebar, onExpand, onPickDirectory, onPickFiles
     });
+  }
+  if (route?.name === 'plugin-view') {
+    return (host, ctx) => createPluginView(host, { ...ctx, onToggleSidebar });
   }
   if (route?.name === 'not-found') {
     return (host, ctx) => createNotFoundScreen(host, ctx);

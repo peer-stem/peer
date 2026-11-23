@@ -28,3 +28,17 @@ export function isInteractionElementVisible(element: HTMLElement | null): elemen
 	}
 	return !element.matches(":disabled, [disabled], [aria-disabled='true'], input[type='hidden']");
 }
+
+export function createInteractionScopeController(): InteractionScopeController {
+	const empty: readonly SurfaceLayerSnapshot[] = Object.freeze([]);
+	return {
+		isElementEligible: (element) => isInteractionElementVisible(element),
+		getTopLayer: () => null,
+		ownerOf: () => null,
+		belongsTo: (id, ancestorId) => id === ancestorId,
+		isPopupOrigin: () => false,
+		getGeneration: () => 0,
+		getFocusRevision: () => 0,
+		getSnapshot: () => empty,
+	};
+}

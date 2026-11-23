@@ -11,10 +11,17 @@ import {
 	type SourceDirectory,
 	type SourceOrganization,
 } from "../../../core/index.ts";
-import { OPENING_PROMPT_FAILURE, SessionStarter } from "../../engine/index.ts";
+import {
+	OPENING_PROMPT_FAILURE,
+	SessionStarter,
+	type PluginFrontendManager,
+	type PluginSnapshot,
+} from "../../engine/index.ts";
 import type { ApiClient } from "../api.ts";
 import type { AppearanceIntent, AppearanceModel } from "../appearance.ts";
+import type { DictationStore } from "../dictation.ts";
 import type { GraphIntent, GraphStoreModel } from "../graph.ts";
+import type { PluginsStore } from "../plugins.ts";
 import type { GraphCamera, PrefsIntent, PrefsModel } from "../prefs.ts";
 import type { RouterStore } from "../router.ts";
 import type { SettingsIntent, SettingsModel } from "../settings.ts";
@@ -51,6 +58,9 @@ export interface HomeScreenModel {
 	readonly fontFamily: string;
 	readonly startError: string | null;
 	readonly starting: boolean;
+	readonly plugins?: PluginSnapshot | null;
+	readonly pluginManager?: PluginFrontendManager | null;
+	readonly dictation?: DictationStore | null;
 }
 
 export type HomeScreenIntent =
@@ -81,6 +91,8 @@ export interface CreateHomeScreenStoreOptions {
 	appearance: Store<AppearanceModel, AppearanceIntent>;
 	prefs: Store<PrefsModel, PrefsIntent>;
 	shell: Store<ShellModel, ShellIntent>;
+	plugins?: PluginsStore;
+	dictation?: DictationStore;
 }
 
 interface HomeLocalState {
@@ -190,6 +202,9 @@ function projectHomeScreen(
 		fontFamily: appearance.tokens.peer["--peer-font-prose"] ?? DEFAULT_FONT_STACK,
 		startError: local.startError,
 		starting: local.starting,
+		plugins: opts.plugins ? opts.plugins.get() : null,
+		pluginManager: opts.plugins ? opts.plugins.manager : null,
+		dictation: opts.dictation ?? null,
 	};
 }
 
@@ -354,6 +369,7 @@ export function createHomeScreenStore(
 		options.settings.subscribe(publish),
 		options.appearance.subscribe(publish),
 		options.prefs.subscribe(publish),
+		options.plugins ? options.plugins.subscribe(publish) : () => {},
 	];
 
 	return createStoreFromCell<HomeScreenModel, HomeScreenIntent>(cell, {

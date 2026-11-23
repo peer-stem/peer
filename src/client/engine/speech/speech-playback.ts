@@ -59,8 +59,8 @@ export function splitForSpeech(text: string, limit: number = PIECE_CHARS): strin
 	return pieces;
 }
 
-async function fetchAudio(text: string, signal: AbortSignal): Promise<string> {
-	const response = await fetch("/api/tts/speak", {
+async function fetchAudio(text: string, signal: AbortSignal, request: typeof fetch = fetch): Promise<string> {
+	const response = await request("/api/tts/speak", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ text }),
@@ -91,12 +91,12 @@ function playUrl(url: string, signal: AbortSignal): Promise<void> {
 	});
 }
 
-async function playPieces(pieces: string[], current: number, signal: AbortSignal): Promise<void> {
-	let next: Promise<string> | undefined = fetchAudio(pieces[0]!, signal);
+async function playPieces(pieces: string[], current: number, signal: AbortSignal, request: typeof fetch = fetch): Promise<void> {
+	let next: Promise<string> | undefined = fetchAudio(pieces[0]!, signal, request);
 	try {
 		for (let index = 0; index < pieces.length && current === generation; index++) {
 			const url = await next!;
-			next = index + 1 < pieces.length ? fetchAudio(pieces[index + 1]!, signal) : undefined;
+			next = index + 1 < pieces.length ? fetchAudio(pieces[index + 1]!, signal, request) : undefined;
 			next?.catch(() => {});
 			if (current !== generation) return URL.revokeObjectURL(url);
 			publish({ loading: false });
@@ -114,7 +114,7 @@ export function stopSpeaking(): void {
 	if (state.speakingId !== null || state.loading) publish({ speakingId: null, loading: false });
 }
 
-export function speak(id: string, markdown: string): void {
+export function speak(id: string, markdown: string, request: typeof fetch = fetch): void {
 	stopSpeaking();
 	const pieces = splitForSpeech(toSpeakable(markdown));
 	if (pieces.length === 0) return;
@@ -122,7 +122,7 @@ export function speak(id: string, markdown: string): void {
 	const controller = new AbortController();
 	abort = controller;
 	publish({ speakingId: id, loading: true, error: null, errorId: null });
-	playPieces(pieces, current, controller.signal)
+	playPieces(pieces, current, controller.signal, request)
 		.catch((error: unknown) => {
 			if (current === generation) publish({ error: error instanceof Error ? error.message : "Reading aloud failed", errorId: id });
 		})

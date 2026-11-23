@@ -62,7 +62,7 @@ function dispatchAction(event, action, onShellAction, onScreenAction) {
   }
 }
 
-export function createShortcutRouter(win, { onShellAction, onScreenAction, layers, getOverrides } = {}) {
+export function createShortcutRouter(win, { onShellAction, onScreenAction, onRawKeyDown, layers, getOverrides } = {}) {
   const life = createLife();
 
   const onKeyDown = (event) => {
@@ -76,6 +76,7 @@ export function createShortcutRouter(win, { onShellAction, onScreenAction, layer
       return;
     }
     if (event.defaultPrevented) return;
+    if (onRawKeyDown?.(event)) return;
     const action = resolveAction(eventBinding(event), getOverrides?.());
     if (!action) return;
     const hasModifier = Boolean(event.metaKey || event.ctrlKey || event.altKey);

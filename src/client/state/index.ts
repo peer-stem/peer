@@ -2,6 +2,7 @@
  * Public `peer-state` barrel and `createState()` composition root (`state §2.3`, `c2a §3`, `f3-c2b §4`).
  */
 
+import type { PluginFrontendModule } from "../../core/index.ts";
 import {
 	createActivityStore,
 	type ActivityIntent,
@@ -19,6 +20,12 @@ import {
 	type DesktopStore,
 } from "./desktop.ts";
 import {
+	createDictationStore,
+	type AudioCaptureFactory,
+	type DictationStore,
+	type WebSocketLike,
+} from "./dictation.ts";
+import {
 	createEventsStore,
 	type Events,
 	type EventSourceLike,
@@ -34,6 +41,10 @@ import {
 	type ModelsStoreModel,
 } from "./models.ts";
 import {
+	createPluginsStore,
+	type PluginsStore,
+} from "./plugins.ts";
+import {
 	createPrefsStore,
 	type PrefsIntent,
 	type PrefsModel,
@@ -47,6 +58,7 @@ import {
 import { createHomeScreenStore } from "./screens/home.ts";
 import { createNewSessionScreenStore } from "./screens/new-session.ts";
 import { createPendingScreenStore } from "./screens/pending.ts";
+import { createPluginViewScreenStore } from "./screens/plugin-view.ts";
 import { createSessionScreenStore } from "./screens/session.ts";
 import {
 	createSessionStore,
@@ -73,6 +85,11 @@ import {
 	type SideThreadIntent,
 	type SideThreadStoreModel,
 } from "./side-thread.ts";
+import {
+	createSpeechStore,
+	type SpeechIntent,
+	type SpeechModel,
+} from "./speech.ts";
 import type { Store, Unsubscribe } from "./store.ts";
 
 export * from "./store.ts";
@@ -90,9 +107,13 @@ export * from "./sessions.ts";
 export * from "./activity.ts";
 export * from "./side-thread.ts";
 export * from "./session.ts";
+export * from "./plugins.ts";
+export * from "./speech.ts";
+export * from "./dictation.ts";
 export * from "./screens/session.ts";
 export * from "./screens/home.ts";
 export * from "./screens/new-session.ts";
+export * from "./screens/plugin-view.ts";
 export * from "./screens/pending.ts";
 
 export const APP_VERSION: string = process.env.APP_VERSION ?? "0.0.0";
@@ -107,6 +128,11 @@ export interface CreateStateOptions {
 	shell?: Partial<ShellModel>;
 	storage?: Storage | null;
 	desktopBridge?: DesktopBridge | null;
+	doc?: Document | null;
+	importPluginModule?: (url: string) => Promise<PluginFrontendModule>;
+	autoStartPlugins?: boolean;
+	dictationCaptureFactory?: AudioCaptureFactory;
+	dictationWebSocketFactory?: (url: string, protocols: string[]) => WebSocketLike;
 }
 
 export interface PeerState {
@@ -122,6 +148,9 @@ export interface PeerState {
 	readonly graph: Store<GraphStoreModel, GraphIntent>;
 	readonly sessions: Store<SessionsModel, SessionsIntent>;
 	readonly activity: Store<ActivityStoreModel, ActivityIntent>;
+	readonly plugins: PluginsStore;
+	readonly speech: Store<SpeechModel, SpeechIntent>;
+	readonly dictation: DictationStore;
 	openSession(id: string): Store<SessionStoreModel, SessionIntent>;
 	openSideThread(chatId: string): Store<SideThreadStoreModel, SideThreadIntent>;
 	screen(routeModel: RouteModel): Store<object, { readonly type: string }>;
@@ -141,6 +170,9 @@ interface ScreenFactoryDeps {
 	readonly settings: Store<SettingsModel, SettingsIntent>;
 	readonly appearance: Store<AppearanceModel, AppearanceIntent>;
 	readonly shell: Store<ShellModel, ShellIntent>;
+	readonly plugins: PluginsStore;
+	readonly speech: Store<SpeechModel, SpeechIntent>;
+	readonly dictation: DictationStore;
 	readonly openSession: (id: string) => Store<SessionStoreModel, SessionIntent>;
 	readonly openSideThread: (id: string) => Store<SideThreadStoreModel, SideThreadIntent>;
 	readonly getGraph: () => Store<GraphStoreModel, GraphIntent>;
@@ -278,22 +310,25 @@ function openScreenForRoute(
 	routeModel: RouteModel,
 	d: ScreenFactoryDeps,
 ): Store<object, { readonly type: string }> {
-	const { api, router, prefs, models, settings, appearance, shell, openSession, openSideThread, getGraph } = d;
+	const { api, router, prefs, models, settings, appearance, shell, plugins, speech, dictation, openSession, openSideThread, getGraph } = d;
 	if (routeModel.route.name === "home") {
 		return asGenericScreen(
-			createHomeScreenStore({ api, router, graph: getGraph(), settings, appearance, prefs, shell }),
+			createHomeScreenStore({ api, router, graph: getGraph(), settings, appearance, prefs, shell, plugins, dictation }),
 		);
 	}
 	if (routeModel.route.name === "new-session") {
 		return asGenericScreen(
-			createNewSessionScreenStore({ api, router, graph: getGraph(), settings, models, appearance, shell, routeModel }),
+			createNewSessionScreenStore({ api, router, graph: getGraph(), settings, models, appearance, shell, routeModel, plugins, dictation }),
 		);
 	}
 	if (routeModel.route.name === "session") {
 		const sessionOpts = {
-			routeModel, router, openSession, openSideThread, appearance, settings, models, prefs, shell,
+			routeModel, router, openSession, openSideThread, appearance, settings, models, prefs, shell, plugins, speech, dictation,
 		};
 		return asGenericScreen(createSessionScreenStore(sessionOpts));
+	}
+	if (routeModel.route.name === "plugin-view") {
+		return asGenericScreen(createPluginViewScreenStore({ routeModel, router, plugins, shell }));
 	}
 	return asGenericScreen(createPendingScreenStore({ routeModel, router, settings, shell }));
 }
@@ -311,6 +346,29 @@ function disposePeerStores(stores: readonly { dispose(): void }[], extraCleanup:
 	for (const store of stores) store.dispose();
 }
 
+function buildVoiceAndPluginStores(
+	api: ApiClient,
+	events: Events,
+	router: RouterStore,
+	shell: Store<ShellModel, ShellIntent>,
+	settings: Store<SettingsModel, SettingsIntent>,
+	options?: CreateStateOptions,
+) {
+	const plugins = createPluginsStore({
+		api, events, router, shell,
+		doc: options?.doc,
+		importModule: options?.importPluginModule,
+		autoStart: options?.autoStartPlugins,
+	});
+	const speech = createSpeechStore({ api, settings, events });
+	const dictation = createDictationStore({
+		api, speech,
+		captureFactory: options?.dictationCaptureFactory,
+		webSocketFactory: options?.dictationWebSocketFactory,
+	});
+	return { plugins, speech, dictation };
+}
+
 export function createState(options?: CreateStateOptions): PeerState {
 	const api = createApiClient({ fetch: options?.fetch });
 	const events = createEventsStore({ createEventSource: options?.createEventSource, url: options?.eventsUrl });
@@ -321,8 +379,7 @@ export function createState(options?: CreateStateOptions): PeerState {
 	const models = createModelsStore({ api, events });
 	let appearanceRef: Store<AppearanceModel, AppearanceIntent> | null = null;
 	const settings = createSettingsStore({
-		api,
-		events,
+		api, events,
 		onModelsMayChange: () => { void models.send({ type: "reload" }); },
 		onThemesMayChange: () => { void appearanceRef?.send({ type: "reload" }); },
 	});
@@ -330,27 +387,21 @@ export function createState(options?: CreateStateOptions): PeerState {
 	appearanceRef = appearance;
 	const sessions = createSessionsStore({ api, events, storage: options?.storage });
 	const activity = createActivityStore({ api, events });
+	const { plugins, speech, dictation } = buildVoiceAndPluginStores(api, events, router, shell, settings, options);
 	const pool = createSessionPool(api, events, router, settings);
 	const sidePool = createSideThreadPool(api, events, pool.peekSession);
 	const offSidebar = wireSidebarPrefs(shell, prefs);
 	let graphInstance: Store<GraphStoreModel, GraphIntent> | null = null;
 	const getGraph = () => (graphInstance ??= createGraphStore({ api, events }));
 	const deps: ScreenFactoryDeps = {
-		api, router, prefs, models, settings, appearance, shell,
-		openSession: pool.openSession,
-		openSideThread: sidePool.openSideThread,
-		getGraph,
+		api, router, prefs, models, settings, appearance, shell, plugins, speech, dictation,
+		openSession: pool.openSession, openSideThread: sidePool.openSideThread, getGraph,
 	};
-	const cleanupExtras = () => {
-		offSidebar();
-		sidePool.disposeAll();
-		pool.disposeAll();
-		graphInstance?.dispose();
-	};
-	const ownedStores = [activity, sessions, appearance, settings, models, desktop, prefs, shell, router, events];
+	const cleanupExtras = () => { offSidebar(); sidePool.disposeAll(); pool.disposeAll(); graphInstance?.dispose(); };
+	const ownedStores = [dictation, speech, plugins, activity, sessions, appearance, settings, models, desktop, prefs, shell, router, events];
 
 	return {
-		api, events, router, prefs, desktop, models, settings, appearance, shell, sessions, activity,
+		api, events, router, prefs, desktop, models, settings, appearance, shell, sessions, activity, plugins, speech, dictation,
 		get graph() { return getGraph(); },
 		openSession: pool.openSession,
 		openSideThread: sidePool.openSideThread,

@@ -5,6 +5,7 @@
  * and Dictation language controls.
  */
 import { button, createLife, createSwitch, documentOf, el, input, textNode, writeText } from 'cloudcanvas-lib/ui';
+import { createSpeechSettingsView } from '../voice/speech-section.js';
 
 export const FALLBACK_PROVIDER_KEYS = Object.freeze([
   { id: 'openai', envVar: 'OPENAI_API_KEY', label: 'OpenAI' },
@@ -19,16 +20,6 @@ export const FALLBACK_PROVIDER_KEYS = Object.freeze([
   { id: 'brave', envVar: 'BRAVE_API_KEY', label: 'Brave Search' },
   { id: 'exa', envVar: 'EXA_API_KEY', label: 'Exa Search' },
   { id: 'deepgram', envVar: 'DEEPGRAM_API_KEY', label: 'Deepgram Dictation' }
-]);
-
-const DICTATION_LANGUAGES = Object.freeze([
-  ['en', 'English'],
-  ['multi', 'Multilingual'],
-  ['es', 'Spanish'],
-  ['fr', 'French'],
-  ['de', 'German'],
-  ['ja', 'Japanese'],
-  ['zh', 'Chinese']
 ]);
 
 export function resolveProviderOptions(providerKeys) {
@@ -200,19 +191,7 @@ function buildConnectionsGroup(doc, life, onSettingsIntent) {
   });
   group.append(claudeWrap);
   const cliText = makeStatusRow('External CLI', 'data-peer-external-cli');
-
-  const dictRow = el(doc, 'div', { className: 'peer-settings-row', attrs: { 'data-testid': 'group-dictation' } });
-  const dictSelect = el(doc, 'select', {
-    className: 'peer-settings-select peer-settings-select-narrow',
-    attrs: { 'aria-label': 'Dictation language', 'data-testid': 'dictation-language-select', 'data-peer-dictation-language': '' }
-  });
-  for (const [val, text] of DICTATION_LANGUAGES) dictSelect.append(el(doc, 'option', { text, attrs: { value: val } }));
-  life.on(dictSelect, 'change', () => {
-    onSettingsIntent?.({ type: 'save-section', section: 'dictation', value: { language: dictSelect.value } });
-  });
-  dictRow.append(el(doc, 'span', { className: 'peer-settings-row-label', text: 'Dictation language' }), dictSelect);
-  group.append(dictRow);
-  return { group, subsText, claudeText, claudeSwitch, cliText, dictSelect };
+  return { group, subsText, claudeText, claudeSwitch, cliText };
 }
 
 function syncCustomFields(customUi, cp, fallbackCp) {
@@ -247,10 +226,9 @@ function syncKeysSection(doc, life, addForm, listEl, customUi, connUi, state, on
   });
   writeText(connUi.cliText, summarizeRecord(settings?.externalCli, 'None configured'));
   writeText(connUi.subsText, summarizeRecord(settings?.subscriptions, 'No active subscriptions'));
-  connUi.dictSelect.value = settings?.record?.dictation?.language ?? settings?.effective?.dictation?.language ?? 'en';
 }
 
-export function createKeysSection(host, { onSettingsIntent } = {}) {
+export function createKeysSection(host, { onSettingsIntent, onSpeechIntent } = {}) {
   const doc = documentOf(host);
   const life = createLife();
   const root = el(doc, 'div', { className: 'peer-settings-panel', attrs: { 'data-peer-settings-section': 'keys' } });
@@ -261,14 +239,26 @@ export function createKeysSection(host, { onSettingsIntent } = {}) {
   const addForm = buildKeyAddForm(doc, life, onSettingsIntent);
   const customUi = buildCustomEndpointGroup(doc, life, onSettingsIntent);
   const connUi = buildConnectionsGroup(doc, life, onSettingsIntent);
-  root.append(listGroup, addForm.group, customUi.group, connUi.group);
+  const speechHost = el(doc, 'div');
+  const speechUi = createSpeechSettingsView(speechHost, { onSpeechIntent, onSettingsIntent });
+  root.append(listGroup, addForm.group, customUi.group, connUi.group, speechHost);
   host.append(root);
   const state = { settings: null, prevSig: '' };
-  const update = ({ settings = null } = {}) => {
+  const update = ({ settings = null, speech = null } = {}) => {
     if (life.dead) return;
     state.settings = settings;
     syncKeysSection(doc, life, addForm, listEl, customUi, connUi, state, onSettingsIntent);
+    speechUi.update({ settings, speech });
   };
   update({});
-  return { update, destroy: () => { if (life.destroy()) { connUi.claudeSwitch.destroy(); root.remove(); } } };
+  return {
+    update,
+    destroy: () => {
+      if (life.destroy()) {
+        speechUi.destroy();
+        connUi.claudeSwitch.destroy();
+        root.remove();
+      }
+    }
+  };
 }

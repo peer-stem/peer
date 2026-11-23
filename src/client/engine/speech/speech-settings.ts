@@ -15,24 +15,24 @@ function publish(next: ResolvedSpeech): ResolvedSpeech {
 	return next;
 }
 
-async function read(): Promise<ResolvedSpeech> {
-	const response = await fetch("/api/settings", { cache: "no-store" });
+async function read(request: typeof fetch = fetch): Promise<ResolvedSpeech> {
+	const response = await request("/api/settings", { cache: "no-store" });
 	if (!response.ok) throw new Error("Could not load speech settings.");
 	const body = (await response.json()) as { settings: UserSettings | null };
 	return publish(resolveSpeech(body.settings?.speech));
 }
 
-export function loadSpeech(refresh = false): Promise<ResolvedSpeech> {
+export function loadSpeech(refresh = false, request: typeof fetch = fetch): Promise<ResolvedSpeech> {
 	if (cache && !refresh) return Promise.resolve(cache);
-	reading ??= read().finally(() => {
+	reading ??= read(request).finally(() => {
 		reading = undefined;
 	});
 	return reading;
 }
 
 /** Replaces the whole section; unset fields return to their defaults. */
-export async function saveSpeech(next: SpeechSettings): Promise<boolean> {
-	const response = await fetch("/api/settings/speech", {
+export async function saveSpeech(next: SpeechSettings, request: typeof fetch = fetch): Promise<boolean> {
+	const response = await request("/api/settings/speech", {
 		method: "PUT",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify(next),

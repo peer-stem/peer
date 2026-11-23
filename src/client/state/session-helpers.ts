@@ -4,6 +4,7 @@
  */
 
 import {
+	pluginQuestionOccurrenceKey,
 	setSteerUiInverted,
 	type ChatSettings,
 	type ImageSnapshot,
@@ -388,7 +389,10 @@ type DockOrRecoveryIntent = Extract<
 	{
 		type:
 			| "answer-question"
+			| "answer-plugin-question"
 			| "dismiss-question"
+			| "dismiss-plugin-question"
+			| "submit-plugin-problem"
 			| "dismiss-problem"
 			| "next-problem"
 			| "retry"
@@ -396,6 +400,22 @@ type DockOrRecoveryIntent = Extract<
 			| "continue-if-owed";
 	}
 >;
+
+async function sendPluginQuestionAnswer(
+	ctx: SessionHydrationTarget,
+	intent: Extract<SessionIntent, { type: "answer-plugin-question" }>,
+): Promise<void> {
+	const payload = {
+		type: "plugin-question-answer" as const,
+		questionId: intent.questionId,
+		occurrence: intent.occurrence,
+		answer: intent.answer,
+		...(intent.thinking ? { thinking: intent.thinking } : {}),
+		...(intent.readingThinking ? { readingThinking: intent.readingThinking } : {}),
+		...(intent.images ? { images: intent.images } : {}),
+	};
+	await ctx.model?.send(payload, undefined, pluginQuestionOccurrenceKey(intent.occurrence));
+}
 
 export async function handleDockOrRecoveryIntent(
 	ctx: SessionHydrationTarget,
@@ -405,8 +425,23 @@ export async function handleDockOrRecoveryIntent(
 		case "answer-question":
 			await ctx.model?.submitAnswer(intent.tool, intent.toolCallId, intent.answer, intent.questionKey);
 			return;
+		case "answer-plugin-question":
+			return sendPluginQuestionAnswer(ctx, intent);
 		case "dismiss-question":
 			await ctx.model?.dismissQuestion(intent.toolCallId, intent.answer, intent.questionKey);
+			return;
+		case "dismiss-plugin-question":
+			await ctx.model?.dismissPluginQuestion(intent.occurrence, intent.questionId);
+			return;
+		case "submit-plugin-problem":
+			await ctx.model?.send({
+				type: "plugin-problem-submission",
+				problemId: intent.problemId,
+				occurrence: intent.occurrence,
+				submission: intent.submission,
+				...(intent.thinking ? { thinking: intent.thinking } : {}),
+				...(intent.images ? { images: intent.images } : {}),
+			});
 			return;
 		case "dismiss-problem":
 			await ctx.model?.dismissProblem(intent.problemCallId);

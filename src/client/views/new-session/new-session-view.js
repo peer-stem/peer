@@ -6,8 +6,10 @@
  * `[data-peer-action="start-session"]`, and `[data-peer-setup-cta]`.
  */
 import { FIELD_CLASS, button, createLife, documentOf, el, injectUiStyles, input, textNode, writeText } from "cloudcanvas-lib/ui";
+import { createInteractionScopeController, joinDictation, registerSurfaceBoundary } from "peer-engine";
 import { appendPathTokenToText, extractPathTokens, removePathTokenFromText } from "../session/composer-tokens.js";
 import { createTopBar } from "../shared/top-bar.js";
+import { createDictationControl } from "../voice/dictation-control.js";
 import {
 	deriveNewSessionViewModel,
 	formatDraftThinkingLabel,
@@ -130,6 +132,11 @@ function buildComposerCardNodes(doc, life, handlers) {
 	const errorText = textNode(doc, errorEl, "");
 	const actions = el(doc, "div", { className: "peer-new-session-actions" });
 	const attach = buildDraftAttachGroup(doc, life, handlers);
+	const dictSlot = el(doc, "div");
+	const dictCtl = createDictationControl(dictSlot, {
+		onTranscript: (chunk) => { draftInput.value = joinDictation(draftInput.value, chunk); handlers.onDraftChanged?.(); },
+		onOpenDeepgramKey: () => handlers.onOpenKeys?.(),
+	});
 	const startBtn = button(doc, {
 		className: "peer-new-session-start is-primary",
 		label: "Start lesson",
@@ -138,9 +145,9 @@ function buildComposerCardNodes(doc, life, handlers) {
 		attrs: { "data-peer-action": "start-session" },
 	});
 	const startBtnText = startBtn.firstChild;
-	actions.append(attach.leftActions, startBtn);
+	actions.append(attach.leftActions, dictSlot, startBtn);
 	card.append(setupCta, chipsRow, draftInput, errorEl, actions);
-	return { card, setupCta, chipsRow, draftInput, errorEl, errorText, pickFilesBtn: attach.pickFilesBtn, pickDirBtn: attach.pickDirBtn, startBtn, startBtnText };
+	return { card, setupCta, chipsRow, draftInput, dictCtl, errorEl, errorText, pickFilesBtn: attach.pickFilesBtn, pickDirBtn: attach.pickDirBtn, startBtn, startBtnText };
 }
 
 function renderPropositionList(doc, pickerNodes, vm, send) {
@@ -237,6 +244,7 @@ function applyNewSessionVm(doc, state) {
 	writeText(state.composerNodes.startBtnText, vm.startLabel);
 	writeText(state.composerNodes.errorText, vm.error);
 	state.composerNodes.errorEl.hidden = vm.error === "";
+	state.composerNodes.dictCtl.update({ dictation: state.rawModel?.dictation ?? null, disabled });
 	syncDraftChipsAndButton(doc, state);
 }
 
@@ -268,6 +276,7 @@ function bindNewSessionEvents(doc, life, state, submitStart) {
 
 function executeNewSessionCommand(state, action) {
 	if (state.life.dead) return false;
+	if (action === "toggle-dictation") return state.composerNodes.dictCtl.toggle();
 	if (action === "focus-composer") {
 		state.composerNodes.draftInput.focus();
 		return true;
@@ -327,16 +336,28 @@ export function createNewSessionView(host, opts = {}) {
 		onNavigateHome: navigate ? () => navigate({ name: "home" }) : undefined,
 		onOpenSettings: send ? () => send({ type: "open-settings" }) : undefined,
 	});
-	const body = el(doc, "div", { className: "peer-new-session-body" });
+	const body = el(doc, "div", { className: "peer-new-session-body", style: "position:relative" });
+	const surfReg = el(doc, "div", { className: "peer-plugin-surface-region", attrs: { "data-session-surface-region": "" } });
+	surfReg.append(el(doc, "div", { attrs: { "data-session-surface-mounts": "" } }));
+	body.append(surfReg);
+	registerSurfaceBoundary(body, life.signal, createInteractionScopeController());
 	const state = {
 		life, send, topBar, rawModel: {}, fallbackFilter: "", vm: null, modelSig: "", thinkSig: "",
 		toolbarNodes: null, pickerNodes: null, composerNodes: null,
 	};
-	const submitStart = () => submitDraftStart(state);
+	const submitStart = () => {
+		if (state.composerNodes.dictCtl.isActive()) {
+			void state.composerNodes.dictCtl.finish().then(() => submitDraftStart(state));
+			return;
+		}
+		submitDraftStart(state);
+	};
 	state.toolbarNodes = buildToolbarNodes(doc, life, send);
 	state.pickerNodes = buildNodePickerNodes(doc, life, send, (q) => handleNodeFilterChange(doc, state, send, q));
 	state.composerNodes = buildComposerCardNodes(doc, life, {
 		onOpenSetup: () => send?.({ type: "open-setup" }),
+		onOpenKeys: () => send?.({ type: "open-settings", section: "keys" }),
+		onDraftChanged: () => syncDraftChipsAndButton(doc, state),
 		onStart: submitStart,
 		onPickFiles,
 		onPickDirectory,
@@ -350,6 +371,6 @@ export function createNewSessionView(host, opts = {}) {
 	return {
 		update: (model = {}) => { if (!life.dead) { state.rawModel = model; applyNewSessionVm(doc, state); } },
 		command: (action) => executeNewSessionCommand(state, action),
-		destroy: () => { if (life.destroy()) { topBar.destroy(); root.remove(); } },
+		destroy: () => { if (life.destroy()) { state.composerNodes.dictCtl.destroy(); topBar.destroy(); root.remove(); } },
 	};
 }
