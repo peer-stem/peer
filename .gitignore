@@ -34,4 +34,5 @@ xai-credentials.json*
 .pdl/
 .sessions/
 .shamash/
+.peer-build/
 /public/client/build/

@@ -55,8 +55,14 @@ const BUILD_ONLY_PACKAGES = new Set([
 const ALLOWED_CLIENT_SRC_EXTS = new Set([".js", ".css", ".json", ".svg"]);
 const FORBIDDEN_GPU_LIB_RE =
 	/lib(?:cuda|cudart|cublas|cudnn|cufft|curand|cusolver|cusparse|nccl|nvrtc|amdhip64|hiprtc|rocblas|MIOpen|rocm_smi|hsa-runtime64)\.so/i;
+function resolveDefaultPersistRoot() {
+	if (process.env.PEER_PERSIST_ROOT?.trim()) return path.resolve(process.env.PEER_PERSIST_ROOT.trim());
+	if (fs.existsSync("/usr/lib/persist/peer")) return "/usr/lib/persist/peer";
+	return path.join(ROOT, ".peer-build");
+}
+
 const DEFAULT_ADDON_PATH = path.join(
-	process.env.PEER_PERSIST_ROOT ?? "/usr/lib/persist/peer",
+	resolveDefaultPersistRoot(),
 	"build",
 	"lumberjack",
 	"lumberjack_peer.node",
@@ -186,6 +192,11 @@ function stageNativeAddon(standaloneDir) {
 		const ldd = spawnSync("ldd", [addonSrc], { encoding: "utf8" });
 		if (ldd.status === 0 && FORBIDDEN_GPU_LIB_RE.test(ldd.stdout)) {
 			fail(`[build-server] REFUSING: ${addonSrc} links forbidden CUDA/ROCm libraries:\n${ldd.stdout}`);
+		}
+	} else if (process.platform === "darwin") {
+		const otool = spawnSync("otool", ["-L", addonSrc], { encoding: "utf8" });
+		if (otool.status === 0 && FORBIDDEN_GPU_LIB_RE.test(otool.stdout)) {
+			fail(`[build-server] REFUSING: ${addonSrc} links forbidden CUDA/ROCm libraries:\n${otool.stdout}`);
 		}
 	}
 	const dest = path.join(standaloneDir, "native", "lumberjack_peer.node");

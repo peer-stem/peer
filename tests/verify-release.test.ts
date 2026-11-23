@@ -80,6 +80,21 @@ describe("release gate — expected asset inventory", () => {
 		]);
 	});
 
+	it("supports explicit platform subsets (mac + linux = 8 verified builder outputs)", () => {
+		const sub = expectedAssets(VERSION, ["mac", "linux"]);
+		assert.deepEqual(sub.files, [
+			"peer-0.2.0-arm64.dmg",
+			"peer-0.2.0-arm64-mac.zip",
+			"peer-0.2.0-x86_64.AppImage",
+			"peer-0.2.0-amd64.deb",
+			"peer-0.2.0-arm64.dmg.blockmap",
+			"peer-0.2.0-arm64-mac.zip.blockmap",
+			"latest-mac.yml",
+			"latest-linux.yml",
+		]);
+		assert.deepEqual(feedExpectations(sub).map((f) => f.file), ["latest-mac.yml", "latest-linux.yml"]);
+	});
+
 	it("accepts plain semver versions and nothing else", () => {
 		assert.ok(checkVersion("1.2.3").ok);
 		assert.ok(checkVersion("1.2.3-beta.1").ok);
@@ -322,7 +337,7 @@ describe("release gate — workflow wiring", () => {
 	});
 
 	it("exposes the elevated token only to the two API-reading steps", () => {
-		const readers = ["List every release, drafts included", "Download the three update feeds"];
+		const readers = ["List every release, drafts included", "Download update feeds"];
 		for (const step of verify.steps) {
 			if (readers.includes(step.name)) assert.equal(step.env?.GH_TOKEN, "${{ github.token }}");
 			else assert.equal(step.env?.GH_TOKEN, undefined, String(step.name ?? step.uses));
@@ -354,10 +369,17 @@ describe("release gate — workflow wiring", () => {
 		}
 	});
 
-	it("download step fetches exactly the three update feeds from the selected draft", () => {
-		const download = verify.steps.find((step: any) => step.name === "Download the three update feeds");
+	it("download step fetches every packaged platform's update feed from the selected draft", () => {
+		const download = verify.steps.find((step: any) => step.name === "Download update feeds");
 		assert.ok(download);
-		for (const feed of ["latest-mac.yml", "latest.yml", "latest-linux.yml"]) assert.ok(download.run.includes(feed));
+		const matrixPlatforms: string[] = workflow.jobs.package.strategy.matrix.include.map((m: any) => String(m.platform));
+		const expectedFeeds = [
+			...(matrixPlatforms.some((p) => p.startsWith("mac")) ? ["latest-mac.yml"] : []),
+			...(matrixPlatforms.some((p) => p.startsWith("win")) ? ["latest.yml"] : []),
+			...(matrixPlatforms.some((p) => p.startsWith("linux")) ? ["latest-linux.yml"] : []),
+		];
+		assert.ok(expectedFeeds.length >= 2);
+		for (const feed of expectedFeeds) assert.ok(download.run.includes(feed), `missing ${feed}`);
 		assert.match(download.run, /releases\/assets\/\$id/);
 	});
 });

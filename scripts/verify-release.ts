@@ -87,9 +87,13 @@ export type DraftSelection =
 	| { ok: true; release: ReleaseRecord; warnings: string[] }
 	| Failures;
 
-/** The full expected asset inventory for one version (11 files). */
+export type ReleasePlatform = "mac" | "win" | "linux";
+export const ALL_RELEASE_PLATFORMS: readonly ReleasePlatform[] = ["mac", "win", "linux"];
+
+/** The full expected asset inventory for one version (11 files across all 3 platforms, or filtered by active platforms). */
 export type ExpectedAssets = {
 	version: string;
+	platforms: readonly ReleasePlatform[];
 	mac: { dmg: string; zip: string; feed: string };
 	win: { exe: string; feed: string };
 	linux: { appImage: string; deb: string; feed: string };
@@ -117,7 +121,11 @@ export function checkVersion(version: unknown): { ok: true; version: string } | 
 }
 
 /** The exact asset set the installed builder emits for this repo's config. */
-export function expectedAssets(version: string): ExpectedAssets {
+export function expectedAssets(
+	version: string,
+	platforms: readonly ReleasePlatform[] = ALL_RELEASE_PLATFORMS,
+): ExpectedAssets {
+	const set = new Set<ReleasePlatform>(platforms);
 	const mac = {
 		dmg: `${PRODUCT_NAME}-${version}-arm64.dmg`,
 		zip: `${PRODUCT_NAME}-${version}-arm64-mac.zip`,
@@ -132,15 +140,30 @@ export function expectedAssets(version: string): ExpectedAssets {
 		deb: `${PRODUCT_NAME}-${version}-amd64.deb`,
 		feed: "latest-linux.yml",
 	};
-	// Sidecar differential-update blockmaps: emitted for dmg, mac zip and
-	// NSIS exe (createBlockmap); AppImage/deb have none in app-builder-lib 26.15.3.
-	const blockmaps = [mac.dmg, mac.zip, win.exe].map((name) => `${name}.blockmap`);
+	const installers: string[] = [];
+	const blockmaps: string[] = [];
+	const feeds: string[] = [];
+	if (set.has("mac")) {
+		installers.push(mac.dmg, mac.zip);
+		blockmaps.push(`${mac.dmg}.blockmap`, `${mac.zip}.blockmap`);
+		feeds.push(mac.feed);
+	}
+	if (set.has("win")) {
+		installers.push(win.exe);
+		blockmaps.push(`${win.exe}.blockmap`);
+		feeds.push(win.feed);
+	}
+	if (set.has("linux")) {
+		installers.push(linux.appImage, linux.deb);
+		feeds.push(linux.feed);
+	}
 	return {
 		version,
+		platforms: [...platforms],
 		mac,
 		win,
 		linux,
-		files: [mac.dmg, mac.zip, win.exe, linux.appImage, linux.deb, ...blockmaps, mac.feed, win.feed, linux.feed],
+		files: [...installers, ...blockmaps, ...feeds],
 	};
 }
 
@@ -340,11 +363,12 @@ type FeedExpectation = {
 };
 
 export function feedExpectations(expected: ExpectedAssets): FeedExpectation[] {
-	return [
-		{ file: expected.mac.feed, urls: [expected.mac.zip, expected.mac.dmg], first: expected.mac.zip },
-		{ file: expected.win.feed, urls: [expected.win.exe] },
-		{ file: expected.linux.feed, urls: [expected.linux.appImage, expected.linux.deb] },
-	];
+	const set = new Set<ReleasePlatform>(expected.platforms ?? ALL_RELEASE_PLATFORMS);
+	const out: FeedExpectation[] = [];
+	if (set.has("mac")) out.push({ file: expected.mac.feed, urls: [expected.mac.zip, expected.mac.dmg], first: expected.mac.zip });
+	if (set.has("win")) out.push({ file: expected.win.feed, urls: [expected.win.exe] });
+	if (set.has("linux")) out.push({ file: expected.linux.feed, urls: [expected.linux.appImage, expected.linux.deb] });
+	return out;
 }
 
 /** An updater reference must be a bare file name: no directories, no
@@ -460,7 +484,7 @@ function usage(): string {
 	return [
 		"usage:",
 		"  verify-release.ts select <releases.json> --tag <tag>",
-		"  verify-release.ts verify <releases.json> <metadata-dir> --tag <tag>",
+		"  verify-release.ts verify <releases.json> <metadata-dir> --tag <tag> [--platforms mac,win,linux]",
 	].join("\n");
 }
 
@@ -510,26 +534,46 @@ function fail(errors: Issues): number {
 	return 1;
 }
 
-function parseArgs(argv: string[]): { ok: true; command: string; positional: string[]; tag?: string } | { ok: false; errors: Issues } {
+export function parsePlatformsCsv(raw: string): { ok: true; platforms: ReleasePlatform[] } | { ok: false; errors: Issues } {
+	const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
+	if (parts.length === 0) return { ok: false, errors: ["--platforms cannot be empty"] };
+	const seen = new Set<ReleasePlatform>();
+	for (const part of parts) {
+		if (part !== "mac" && part !== "win" && part !== "linux") {
+			return { ok: false, errors: [`unknown platform "${part}" in --platforms (expected mac, win, linux)`] };
+		}
+		seen.add(part);
+	}
+	return { ok: true, platforms: ALL_RELEASE_PLATFORMS.filter((p) => seen.has(p)) };
+}
+
+function parseArgs(argv: string[]): { ok: true; command: string; positional: string[]; tag?: string; platforms: readonly ReleasePlatform[] } | { ok: false; errors: Issues } {
 	const positional: string[] = [];
 	let tag: string | undefined;
+	let platforms: readonly ReleasePlatform[] = ALL_RELEASE_PLATFORMS;
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i]!;
 		if (arg === "--tag") {
 			tag = argv[++i];
 			if (tag == null || tag === "") return { ok: false, errors: ["--tag needs a value"] };
+		} else if (arg === "--platforms") {
+			const raw = argv[++i];
+			if (raw == null || raw === "") return { ok: false, errors: ["--platforms needs a comma-separated value"] };
+			const parsedPlatforms = parsePlatformsCsv(raw);
+			if (!parsedPlatforms.ok) return parsedPlatforms;
+			platforms = parsedPlatforms.platforms;
 		} else {
 			positional.push(arg);
 		}
 	}
 	const [command] = positional;
 	if (command !== "select" && command !== "verify") return { ok: false, errors: [usage()] };
-	return { ok: true, command, positional: positional.slice(1), tag };
+	return { ok: true, command, positional: positional.slice(1), tag, platforms };
 }
 
 /** Tag ↔ version agreement + release-list load, shared by both commands. */
 function startGate(argv: string[]):
-	| { ok: true; tag: string; version: string; releases: ReleaseRecord[]; config: unknown; pkg: unknown; positional: string[] }
+	| { ok: true; tag: string; version: string; platforms: readonly ReleasePlatform[]; releases: ReleaseRecord[]; config: unknown; pkg: unknown; positional: string[] }
 	| { ok: false; errors: Issues } {
 	const parsed = parseArgs(argv);
 	if (!parsed.ok) return parsed;
@@ -550,6 +594,7 @@ function startGate(argv: string[]):
 		ok: true,
 		tag: parsed.tag,
 		version: versioned.version,
+		platforms: parsed.platforms,
 		releases: releases.releases,
 		config: repo.config,
 		pkg: repo.pkg,
@@ -560,7 +605,7 @@ function startGate(argv: string[]):
 function main(argv: string[]): number {
 	const start = startGate(argv);
 	if (!start.ok) return fail(start.errors);
-	const expected = expectedAssets(start.version);
+	const expected = expectedAssets(start.version, start.platforms);
 
 	if (argv[0] === "select") {
 		const selection = selectDraft(start.releases, start.tag, start.version);
@@ -589,8 +634,9 @@ function main(argv: string[]): number {
 	for (const warning of selection.warnings) console.log(`WARNING: ${warning}`);
 	const assets = verifyAssets(selection.release, expected);
 	if (!assets.ok) errors.push(...assets.errors);
+	const feedNames = feedExpectations(expected).map((entry) => entry.file);
 	const files: Record<string, string> = {};
-	for (const name of [expected.mac.feed, expected.win.feed, expected.linux.feed]) {
+	for (const name of feedNames) {
 		try {
 			files[name] = fs.readFileSync(path.join(metadataDir, name), "utf8");
 		} catch {
@@ -602,7 +648,7 @@ function main(argv: string[]): number {
 	if (errors.length > 0) return fail(errors);
 	const present = expected.files.filter((name) => selection.release.assets.some((asset) => asset.name === name));
 	console.log(`assets: ${present.length}/${expected.files.length} expected files present, non-zero size, and "uploaded"`);
-	console.log(`feeds: ${expected.mac.feed}, ${expected.win.feed}, ${expected.linux.feed} parse, carry version ${start.version}, and reference only uploaded assets by exact name`);
+	console.log(`feeds: ${feedNames.join(", ")} parse, carry version ${start.version}, and reference only uploaded assets by exact name`);
 	console.log(`OK: draft for ${start.tag} is complete and consistent — ready for the owner to review and publish.`);
 	return 0;
 }

@@ -239,14 +239,14 @@ function ingestSelectedFiles(state, fileList, syncDraftUi) {
 	});
 }
 
-function ingestPickedPaths(state, picked, syncDraftUi) {
+function ingestPickedPaths(state, picked, syncDraftUi, options = {}) {
 	if (state.life.dead || !picked) return;
 	const list = Array.isArray(picked) ? picked : [picked];
 	let changed = false;
 	for (const entry of list) {
 		const rawPath = typeof entry === "string" ? entry : entry?.path;
 		if (typeof rawPath === "string" && rawPath.trim()) {
-			state.nodes.textarea.value = appendPathTokenToText(state.nodes.textarea.value, rawPath);
+			state.nodes.textarea.value = appendPathTokenToText(state.nodes.textarea.value, rawPath, options);
 			changed = true;
 		}
 	}
@@ -369,7 +369,7 @@ function buildComposerHandlers(state, callbacks, syncDraftUi) {
 		onPickFiles: callbacks.onPickFiles,
 		onPickDirectory: callbacks.onPickDirectory,
 		pickFiles: () => void Promise.resolve(callbacks.onPickFiles?.()).then((res) => ingestPickedPaths(state, res, syncDraftUi)),
-		pickDirectory: () => void Promise.resolve(callbacks.onPickDirectory?.()).then((res) => ingestPickedPaths(state, res, syncDraftUi)),
+		pickDirectory: () => void Promise.resolve(callbacks.onPickDirectory?.()).then((res) => ingestPickedPaths(state, res, syncDraftUi, { directory: true })),
 	};
 }
 

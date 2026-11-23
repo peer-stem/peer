@@ -7,7 +7,7 @@
  */
 import { FIELD_CLASS, button, createLife, documentOf, el, injectUiStyles, input, textNode, writeText } from "cloudcanvas-lib/ui";
 import { createInteractionScopeController, joinDictation, registerSurfaceBoundary } from "peer-engine";
-import { appendPathTokenToText, extractPathTokens, removePathTokenFromText } from "../session/composer-tokens.js";
+import { appendPathTokenToText, extractPathTokens, readDroppedOrPickedFiles, removePathTokenFromText } from "../session/composer-tokens.js";
 import { createTopBar } from "../shared/top-bar.js";
 import { createDictationControl } from "../voice/dictation-control.js";
 import {
@@ -184,7 +184,7 @@ function renderPropositionList(doc, pickerNodes, vm, send) {
 }
 
 function createDraftChipNode(doc, tok, onRemoveRaw) {
-	const chip = el(doc, "span", { className: "peer-new-session-chip", attrs: { "data-peer-path-chip": tok.path } });
+	const chip = el(doc, "span", { className: "peer-new-session-chip", attrs: { "data-peer-path-chip": tok.path, title: tok.path } });
 	const rm = button(doc, {
 		label: "×",
 		ariaLabel: `Remove ${tok.path}`,
@@ -256,6 +256,16 @@ function bindNewSessionEvents(doc, life, state, submitStart) {
 		event.preventDefault();
 		submitStart();
 	});
+	life.on(composerNodes.card, "dragover", (event) => {
+		if (event.dataTransfer?.types?.includes?.("Files")) event.preventDefault();
+	});
+	life.on(composerNodes.card, "drop", (event) => {
+		if (!event.dataTransfer?.files?.length) return;
+		event.preventDefault();
+		void readDroppedOrPickedFiles(event.dataTransfer.files).then(({ paths }) => {
+			appendPickedDraftPaths(doc, state, paths);
+		});
+	});
 	life.on(toolbarNodes.modelSelect, "change", () => {
 		const entry = state.vm?.catalog.find((item) => item.key === toolbarNodes.modelSelect.value);
 		if (!entry) return;
@@ -296,14 +306,14 @@ function executeNewSessionCommand(state, action) {
 	return false;
 }
 
-function appendPickedDraftPaths(doc, state, picked) {
+function appendPickedDraftPaths(doc, state, picked, options = {}) {
 	if (state.life.dead || !picked) return;
 	const list = Array.isArray(picked) ? picked : [picked];
 	let changed = false;
 	for (const entry of list) {
 		const rawPath = typeof entry === "string" ? entry : entry?.path;
 		if (typeof rawPath === "string" && rawPath.trim()) {
-			state.composerNodes.draftInput.value = appendPathTokenToText(state.composerNodes.draftInput.value, rawPath);
+			state.composerNodes.draftInput.value = appendPathTokenToText(state.composerNodes.draftInput.value, rawPath, options);
 			changed = true;
 		}
 	}
@@ -362,7 +372,7 @@ export function createNewSessionView(host, opts = {}) {
 		onPickFiles,
 		onPickDirectory,
 		pickFiles: () => void Promise.resolve(onPickFiles?.()).then((res) => appendPickedDraftPaths(doc, state, res)),
-		pickDirectory: () => void Promise.resolve(onPickDirectory?.()).then((res) => appendPickedDraftPaths(doc, state, res)),
+		pickDirectory: () => void Promise.resolve(onPickDirectory?.()).then((res) => appendPickedDraftPaths(doc, state, res, { directory: true })),
 	});
 	body.append(state.toolbarNodes.toolbar, state.pickerNodes.picker, state.composerNodes.card);
 	root.append(topBarHost, body);

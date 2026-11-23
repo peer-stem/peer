@@ -126,7 +126,14 @@ export interface LumberJackForestMethods {
 	close(): void;
 }
 
-const DEFAULT_PERSIST_ROOT = process.env.PEER_PERSIST_ROOT ?? "/usr/lib/persist/peer";
+function resolveDefaultPersistRoot(): string {
+	if (process.env.PEER_PERSIST_ROOT?.trim()) return path.resolve(process.env.PEER_PERSIST_ROOT.trim());
+	if (fs.existsSync("/usr/lib/persist/peer")) return "/usr/lib/persist/peer";
+	const repoCandidate = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+	return path.join(repoCandidate, ".peer-build");
+}
+
+const DEFAULT_PERSIST_ROOT = resolveDefaultPersistRoot();
 export const DEFAULT_ADDON_PATH = path.join(DEFAULT_PERSIST_ROOT, "build", "lumberjack", "lumberjack_peer.node");
 
 function resolveRuntimeAddonPath(): string {

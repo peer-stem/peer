@@ -51,8 +51,9 @@ function handleShellShortcut(action, shell, router, frame) {
 }
 
 function buildDesktopPickers(desktop) {
-  const hasPickDirectory = typeof desktop?.pickDirectory === 'function';
-  const hasPickFiles = typeof desktop?.pickFiles === 'function';
+  const isElectron = typeof desktop?.get === 'function' ? Boolean(desktop.get()?.electron) : Boolean(desktop);
+  const hasPickDirectory = isElectron && typeof desktop?.pickDirectory === 'function';
+  const hasPickFiles = isElectron && typeof desktop?.pickFiles === 'function';
   return {
     hasPickDirectory,
     onPickDirectory: hasPickDirectory ? () => desktop.pickDirectory() : undefined,

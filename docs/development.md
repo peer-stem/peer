@@ -4,20 +4,21 @@ For product setup, see [Getting started](getting-started.md). For runtime flows,
 
 ## Setup
 
-CI and release builds use **Node 26**. Use the lockfile and a compatible native build environment:
+CI and release builds use **Node 26** and **Go 1.26+** (for the embedded LumberJack C-ABI v2 N-API addon). Clone with submodules (`--recurse-submodules`) and prepare the addon and plugin SDKs:
 
 ```sh
 npm ci
-npm run plugins:setup  # generate local SDKs and install locked source-plugin dependencies
-npm run dev            # normally http://localhost:3000
-npm run desktop:dev    # Next dev + Electron on localhost:3000
+npm run lumberjack:addon  # compile liblumberjack_peer.a + lumberjack_peer.node (Linux/macOS)
+npm run plugins:setup     # generate local SDKs and install locked source-plugin dependencies
+npm run dev               # CloudCanvas watcher + standalone API on http://127.0.0.1:3000
+npm run desktop:dev       # local dev server + Electron shell on http://127.0.0.1:3000
 ```
 
 `plugins:setup` prepares each source package under `plugins/`: it generates its ignored `.sdk/` when needed, then runs `npm ci`. Run it after a fresh checkout and again after public API or plugin lockfile changes. Root typecheck/build includes plugin sources, so CI uses the same preparation. It does not build plugin bundles, install/enable plugins in your learning-data directory, or populate `core-plugins/`.
 
-`npm run plugins:build-core` builds the four IDs in `core-plugins.json` and stages complete app-owned packages in generated `core-plugins/<id>/`. `dev` and `build` run it automatically; `desktop:dev`, `desktop:dist` and `dev:fresh` use those entry points. Core code loads directly from this directory; restart the server after source edits/rebuilding (there is no plugin hot reload). Do not use raw `next dev`/`next build` without first staging core packages. Fresh checkouts need `plugins:setup` before these commands.
+`npm run plugins:build-core` builds the four IDs in `core-plugins.json` and stages complete app-owned packages in generated `core-plugins/<id>/`. `dev` and `build` run it automatically; `desktop:dev`, `desktop:dist` and `dev:fresh` use those entry points. Core code loads directly from this directory; restart the server after source edits/rebuilding (there is no plugin hot reload). Fresh checkouts need `lumberjack:addon` and `plugins:setup` before these commands.
 
-`desktop:dev` waits for the development server to answer HTTP before opening its Electron window, including core-package staging and first-route compilation. Startup has a 30-second total budget; an unavailable server produces a terminal/log error and unsuccessful exit, while Next's development error pages remain visible normally.
+`desktop:dev` waits for the development server to answer HTTP before opening its Electron window, including core-package staging and client bundle compilation. Startup has a 30-second total budget; an unavailable server produces a terminal/log error and unsuccessful exit.
 
 For a community/developer plugin, build in its source directory and follow the [installation guide](plugin-authoring.md#package-and-installation). Generated `core-plugins/`, plugin `dist/`, `.sdk/` and `node_modules/` stay out of Git. UI Showcase remains a developer example, not a shipped core package. Never install a community package using a reserved core ID.
 
@@ -26,11 +27,11 @@ Core data lives in `<learning data>/core-plugin-data/<id>/`; community code/data
 No key is needed to open the UI. Configure connections and the Strong/Cheap/Vision slots before model-driven use; there are no factory model selections. OpenRouter is supported, not mandatory.
 
 ```sh
-npm run build          # stage core plugins, then Next production/standalone build
-npm start              # serve the production build with Next
+npm run build          # stage core plugins + client build + standalone server payload (dist/server-payload/standalone)
+npm start              # serve dist/server-payload/server.mjs on 127.0.0.1:3000
 ```
 
-`npm run desktop:dist` is the local **signed macOS** packaging path, not a portable unsigned shortcut. Prerequisites and Windows/Linux instructions are in [Desktop builds and releases](desktop-release.md).
+`npm run desktop:dist` builds, verifies runtime confinement (`smoke-provider-runtime.mjs` + `smoke-server.mjs --electron`), and packages Linux x64 AppImage + `.deb` via `electron-builder`. Platform details are in [Desktop builds and releases](desktop-release.md).
 
 ### Other devices on your network
 
@@ -44,12 +45,15 @@ The API accepts `localhost` and IP addresses as the host name. To use any other 
 
 ## Configuration
 
-Nonsecret settings are deltas in `<data root>/settings.json`; absent values resolve through `src/core/settings.ts` and `settings-resolution.ts`. Models and role overrides are settings, not environment variables. [Prompt overrides](../src/agent/prompts/README.md) live under `<data root>/prompts/` and require explicit enable switches.
+Nonsecret settings, prompt overrides, themes, sessions, and the knowledge graph are persisted in the LumberJack DAG forest (`PEER_FOREST_DIR`, defaulting to `<PEER_STATE_ROOT>/lumberjack`). Absent settings values resolve through `src/core/settings.ts` and `settings-resolution.ts`. Models and role overrides are settings, not environment variables.
 
 | Variable | Purpose |
 | --- | --- |
-| `LH_DATA_DIR` | Mutable chats/jobs/graph/settings/prompts; default repo `data/`. |
-| `LH_AUTH_FILE` | Keys/custom-endpoint binding; default repo-root `auth.json`, outside `data/`. |
+| `PEER_STATE_ROOT` | Root directory for `lumberjack/`, `auth.json`, `boot-appearance.json`, and `data/` (default desktop `userData`, e.g. `~/.config/peer`). |
+| `PEER_FOREST_DIR` | Explicit LumberJack DAG forest directory override. |
+| `LH_DATA_DIR` | Plugin data root (`core-plugin-data/`, `plugins/`) and optional legacy LearnHarness flat-file import source. |
+| `LH_AUTH_FILE` | Keys/custom-endpoint binding; default `<PEER_STATE_ROOT>/auth.json` (or repo-root `auth.json` in dev). |
+| `PEER_MFN_ENABLED` | Set to `1` to opt into MFN 2.0 spreading-activation recall/ingest (`compaction.ts` LLM summarization is the default). |
 | Provider API-key variables | Optional, selected-provider dependent; UI names are in `src/core/auth-keys.ts`. |
 | `TAVILY_API_KEY`, `BRAVE_API_KEY`, `EXA_API_KEY`, `FIRECRAWL_API_KEY`, `OLLAMA_API_KEY` | Optional search adapters. Without a Settings pin, the first keyed engine wins: Tavily → Brave → Exa → Firecrawl → Ollama. A pinned engine requires its own key; no silent fallback. Ollama search is hosted at ollama.com, not a local model server. Page fetching is independent; research can fetch known URLs without a search key. |
 | `DEEPGRAM_API_KEY` | Optional dictation token minting. |
@@ -106,10 +110,12 @@ For frontend failures, inspect the actual UI, requests, console, and state. A st
 ## Checks
 
 ```sh
-npm test               # node:test via tsx; injected engines, fixtures, fake transports
+npm run test:gate      # node:test via tsx with PEER_REQUIRE_SUBSTRATE=1
+npm run test:substrate # LumberJack C-ABI v2 + MFN 2.0 integration suites
+npm run test:client:e2e # headless Chrome CloudCanvas E2E suites (C1, C2a, C2b, C2c)
 npm run typecheck      # tsc --noEmit
-npm run lint           # ESLint, including import restrictions
-npm run build          # Next production build
+npm run lint           # ESLint, including import/kit boundaries
+npm run build          # core plugins + client bundle + standalone server payload
 ```
 
 The suite requires no paid models or real sign-in. Some tests use temporary files, native processes, or local fake endpoints: deterministic does not mean every test is pure or cannot bind a loopback port. Inspect focused-suite setup before running beside a live app.

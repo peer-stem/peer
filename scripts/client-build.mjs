@@ -37,9 +37,10 @@ function copyKatexAssets(rootDir, outdir) {
  * @param {string} rootDir
  * @param {string} outdir
  * @param {"silent" | "info" | "warning" | "error"} logLevel
+ * @param {boolean} minify
  * @returns {esbuild.BuildOptions}
  */
-function createEsbuildOptions(rootDir, outdir, logLevel) {
+function createEsbuildOptions(rootDir, outdir, logLevel, minify) {
 	const pkgPath = path.join(rootDir, "package.json");
 	const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
 	return {
@@ -59,6 +60,7 @@ function createEsbuildOptions(rootDir, outdir, logLevel) {
 		target: "es2022",
 		bundle: true,
 		splitting: true,
+		minify,
 		sourcemap: "linked",
 		metafile: true,
 		logLevel,
@@ -82,6 +84,7 @@ function createEsbuildOptions(rootDir, outdir, logLevel) {
  *   rootDir?: string;
  *   outdir?: string;
  *   watch?: boolean;
+ *   minify?: boolean;
  *   logLevel?: "silent" | "info" | "warning" | "error";
  * }} [options]
  */
@@ -89,10 +92,15 @@ export async function buildClient(options = {}) {
 	const rootDir = options.rootDir ?? ROOT_DIR;
 	const outdir = options.outdir ?? path.join(rootDir, "public", "client", "build");
 	const logLevel = options.logLevel ?? "silent";
+	const watch = Boolean(options.watch);
+	const minify = options.minify ?? !watch;
+	if (!watch) {
+		fs.rmSync(outdir, { recursive: true, force: true });
+	}
 	fs.mkdirSync(outdir, { recursive: true });
 	copyKatexAssets(rootDir, outdir);
-	const buildOptions = createEsbuildOptions(rootDir, outdir, logLevel);
-	if (options.watch) {
+	const buildOptions = createEsbuildOptions(rootDir, outdir, logLevel, minify);
+	if (watch) {
 		const context = await esbuild.context(buildOptions);
 		await context.watch();
 		return { outdir, metafile: undefined, context };
