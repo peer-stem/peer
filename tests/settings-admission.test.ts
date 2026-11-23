@@ -23,11 +23,12 @@ const initial = {
 	futureSection: { preserved: true },
 };
 fs.writeFileSync(settingsFile, JSON.stringify(initial));
-const { PUT } = await import("../app/api/settings/[section]/route.ts");
-const { effectiveSettings } = await import("../src/server/stores.ts");
+const { PUT } = await import("../src/api/handlers/settings/[section]/route.ts");
+const { ensureActiveLumberJackBundle, effectiveSettings, readSettings, writeSettings } = await import("../src/server/stores.ts");
 const { configureWorkerRequestAdmission, workerRequestStream } = await import("../src/agent/worker-request-admission.ts");
 const { AssistantMessageEventStream } = await import("@earendil-works/pi-ai/utils/event-stream");
 const { normalizeContext } = await import("@earendil-works/pi-ai");
+writeSettings(initial);
 after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
 const model: Model<"openai-completions"> = {
@@ -62,9 +63,10 @@ test("durable agent PUT refreshes live admission; increases drain, decreases wai
 	await turn();
 	assert.equal(sources.length, 1, "composition root reads the persisted limit, not a second default pool");
 	assert.equal(effectiveSettings().agent.workerRequestConcurrency, 1);
+	const expectedInitial = initial;
 	for (const workerRequestConcurrency of [0, -1, 1.5, "2", null, Number.MAX_SAFE_INTEGER + 1]) {
 		assert.equal((await put({ ...initial.agent, workerRequestConcurrency })).status, 400);
-		assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile, "utf-8")), initial);
+		assert.deepEqual(readSettings(), expectedInitial);
 	}
 	assert.equal(sources.length, 1, "rejected writes never admit queued work");
 
@@ -72,26 +74,26 @@ test("durable agent PUT refreshes live admission; increases drain, decreases wai
 	let limitReads = 0;
 	configureWorkerRequestAdmission(() => { limitReads++; return effectiveSettings().agent.workerRequestConcurrency; });
 	const readsBeforeFailure = limitReads;
-	const originalRename = fs.renameSync;
-	fs.renameSync = (from, to) => {
-		if (to === settingsFile) throw new Error("fixture settings write failure");
-		return originalRename(from, to);
+	const settingsStore = ensureActiveLumberJackBundle().settingsStore;
+	const originalWriteSettings = settingsStore.writeSettings;
+	settingsStore.writeSettings = () => {
+		throw new Error("fixture settings write failure");
 	};
 	try {
 		await assert.rejects(put({ ...initial.agent, workerRequestConcurrency: 3 }), /fixture settings write failure/);
 		assert.equal(limitReads, readsBeforeFailure, "failed durable write never refreshes the policy");
-		assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile, "utf-8")), initial);
+		assert.deepEqual(readSettings(), expectedInitial);
 		assert.equal(sources.length, 1);
 	} finally {
-		fs.renameSync = originalRename;
+		settingsStore.writeSettings = originalWriteSettings;
 		configureWorkerRequestAdmission(() => effectiveSettings().agent.workerRequestConcurrency);
 	}
 
 	assert.equal((await put({ ...initial.agent, workerRequestConcurrency: 2 })).status, 200);
 	await turn();
 	assert.equal(sources.length, 2, "increase drains immediately without waiting for active completion");
-	const stored = JSON.parse(fs.readFileSync(settingsFile, "utf-8"));
-	assert.deepEqual(stored, { ...initial, agent: { ...initial.agent, workerRequestConcurrency: 2 } });
+	const stored = readSettings();
+	assert.deepEqual(stored, { ...expectedInitial, agent: { ...initial.agent, workerRequestConcurrency: 2 } });
 
 	assert.equal((await put(initial.agent)).status, 200);
 	sources[0]!.end(message());
@@ -108,7 +110,7 @@ test("durable agent PUT refreshes live admission; increases drain, decreases wai
 	const { workerRequestConcurrency: _drop, ...siblings } = initial.agent;
 	assert.equal((await put(siblings)).status, 200);
 	assert.equal(effectiveSettings().agent.workerRequestConcurrency, 8);
-	assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile, "utf-8")).agent, siblings);
+	assert.deepEqual(readSettings()?.agent, siblings);
 	const resetRequests = Array.from({ length: 9 }, () => stream(model, normalizeContext({ messages: [] })));
 	await turn();
 	assert.equal(sources.length, 11, "unset restores eight simultaneous requests, leaving the ninth queued");

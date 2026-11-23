@@ -29,12 +29,12 @@ let getChat: (id: string) => { messages: unknown[] } | undefined;
 let buildSubagentSteerFn: typeof import("../src/core/contracts.ts").buildSubagentSteer;
 
 before(async () => {
-	const route = await import("../app/api/chats/[id]/artifact-ui/route.ts");
+	const route = await import("../src/api/handlers/chats/[id]/artifact-ui/route.ts");
 	POST = route.POST;
 	const server = await import("../src/server/chats.ts");
 	createChat = server.createChat;
 	getChat = server.getChat as typeof getChat;
-	const { chatStore } = await import("../src/store/chats.ts");
+	const { chatStore } = await import("../src/server/stores.ts");
 	saveMessages = (id, messages) => chatStore.saveMessages(id, messages as never);
 	const contracts = await import("../src/core/contracts.ts");
 	buildSubagentSteerFn = contracts.buildSubagentSteer;

@@ -23,20 +23,17 @@ import {
 	readActivePluginMetadata,
 	readActivePluginTaskRecord,
 	recoverActivePluginTaskRecords,
+	resolveStateRoot,
 	stores,
 } from "./stores.ts";
 import { isTurnRunning } from "./turn-liveness.ts";
 
 export const pluginDirectory = path.join(/* turbopackIgnore: true */ PATHS.data, "plugins");
 // Explicitly staged by build-server, not discovered by Next's filesystem tracer.
-const core = {
-	directory: path.join(/* turbopackIgnore: true */ PATHS.root, "core-plugins"),
-	dataDirectory: path.join(/* turbopackIgnore: true */ PATHS.data, "core-plugin-data"),
-	ids: corePluginIds,
-};
-const coreData = { directory: core.dataDirectory, ids: core.ids };
+const coreCodeDir = path.join(/* turbopackIgnore: true */ PATHS.root, "core-plugins");
 type Host = ReturnType<typeof createPluginHost>;
 interface Runtime {
+	dataRoot?: string;
 	host: Host;
 	ready: Promise<void>;
 }
@@ -87,29 +84,49 @@ function buildPluginServices(learning: PluginLearningData, { manifest, dataDirec
 	return { learning, inference: inference.inference, agents, workers, createBackgroundTool };
 }
 
-async function bootstrapPluginHost(host: Host, installationErrors: Record<string, string>): Promise<void> {
+async function bootstrapPluginHost(
+	host: Host,
+	pluginsDir: string,
+	coreData: { directory: string; ids: readonly string[] },
+	installationErrors: Record<string, string>,
+): Promise<void> {
 	const recoveryDeps = {
 		jobStore: stores.jobStore,
 		deliver: deliverJobResult,
 		readTask: (pluginId: string, taskId?: string, requestId?: string) =>
-			readActivePluginTaskRecord(pluginDirectory, pluginId, taskId, requestId, coreData),
+			readActivePluginTaskRecord(pluginsDir, pluginId, taskId, requestId, coreData),
 		registerAbort: registerJobAbort,
 		unregisterAbort: unregisterJobAbort,
 	};
 	setPluginJobRecovery((job) => recoverPluginBackgroundJob(job, recoveryDeps));
-	for (const [id, error] of Object.entries(recoverActivePluginTaskRecords(pluginDirectory, coreData))) {
+	for (const [id, error] of Object.entries(recoverActivePluginTaskRecords(pluginsDir, coreData))) {
 		installationErrors[id] = `Task recovery failed: ${error}`;
 	}
 	await host.initialize();
 }
 
-/** Single composition for every Next entry. Importing this module does not load
- * plugin code or touch plugin storage; instrumentation (or a route) initializes it. */
+function resolvePluginDataRoot(): string {
+	const explicitData = process.env.LH_DATA_DIR?.trim();
+	return explicitData ? path.resolve(explicitData) : resolveStateRoot();
+}
+
+/** Single composition per active state root. Importing this module does not load
+ * plugin code or touch plugin storage; server startup (or a route) initializes it. */
 function runtime(): Runtime {
 	const global = globalThis as typeof globalThis & PluginGlobal;
-	if (global.__lhPlugins) return global.__lhPlugins;
+	const dataRoot = resolvePluginDataRoot();
+	if (global.__lhPlugins && (global.__lhPlugins.dataRoot === undefined || global.__lhPlugins.dataRoot === dataRoot)) {
+		return global.__lhPlugins;
+	}
+	if (global.__lhPlugins) {
+		void global.__lhPlugins.host.dispose().catch(() => {});
+		delete global.__lhPlugins;
+	}
+	const pluginsDir = path.join(dataRoot, "plugins");
+	const core = { directory: coreCodeDir, dataDirectory: path.join(dataRoot, "core-plugin-data"), ids: corePluginIds };
+	const coreData = { directory: core.dataDirectory, ids: core.ids };
 	const learning = createPluginLearningData({
-		directory: PATHS.data,
+		directory: dataRoot,
 		chatStore: stores.chatStore,
 		graphStore: stores.graphStore,
 		isBusy: isTurnRunning,
@@ -118,7 +135,7 @@ function runtime(): Runtime {
 	});
 	const installationErrors: Record<string, string> = Object.create(null);
 	const host = createPluginHost({
-		directory: pluginDirectory,
+		directory: pluginsDir,
 		core,
 		appVersion: packageJson.version,
 		installationErrors,
@@ -128,9 +145,17 @@ function runtime(): Runtime {
 		onChange: () => emit("plugins-changed", {}),
 		onNotification: (notification) => emit("plugin-message", notification),
 	});
-	const ready = Promise.resolve().then(() => bootstrapPluginHost(host, installationErrors));
-	global.__lhPlugins = { host, ready };
+	const ready = Promise.resolve().then(() => bootstrapPluginHost(host, pluginsDir, coreData, installationErrors));
+	global.__lhPlugins = { dataRoot, host, ready };
 	return global.__lhPlugins;
+}
+
+export async function disposePluginsForShutdown(): Promise<void> {
+	const global = globalThis as typeof globalThis & PluginGlobal;
+	const active = global.__lhPlugins;
+	if (!active) return;
+	delete global.__lhPlugins;
+	await active.host.dispose().catch(() => {});
 }
 
 export async function initializePlugins(): Promise<void> {
@@ -153,4 +178,7 @@ export async function getPluginQuestionTypeResolver(): Promise<Host["resolveQues
 	return (await getPluginHost()).resolveQuestionType;
 }
 
-export const pluginTransport = createPluginTransport({ getHost: getPluginHost, directory: pluginDirectory });
+export const pluginTransport = createPluginTransport({
+	getHost: getPluginHost,
+	directory: () => path.join(resolvePluginDataRoot(), "plugins"),
+});

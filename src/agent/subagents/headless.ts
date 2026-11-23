@@ -1,10 +1,10 @@
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { PDFPageProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { ROOT } from "@/config.ts";
 import { standardFontsDir } from "./pdf-ops";
-import { svgImageSource } from "../../../lib/svg-image-source";
+import { svgImageSource } from "../../core/svg-image-source.ts";
 
 /**
  * Verification engines for sub-agents: demos use the app's own Electron
@@ -199,8 +199,7 @@ async function connectBrowserService(): Promise<ConnectedBrowserService | null> 
 		// Dev: the bare electron binary needs the repo root as the app arg —
 		// flagless it would open Electron's default app instead of our shell.
 		const appArgs = process.versions.electron ? ["--browser-service"] : [
-			// src/agent/subagents → repo root
-			path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", ".."),
+			ROOT,
 			"--browser-service",
 		];
 		proc = spawn(binary, appArgs, {

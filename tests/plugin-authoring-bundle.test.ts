@@ -137,7 +137,7 @@ it("regenerates deterministic dev and standalone archives without stale expanded
 	assert.equal(fs.existsSync(path.join(again.directory, "stale.txt")), false);
 	const packaged = buildPluginAuthoring({ root, standalone: true });
 	assert.deepEqual(fs.readFileSync(packaged.archive), bytes);
-	assert.equal(packaged.directory, path.join(root, ".next/standalone/plugin-authoring"));
+	assert.equal(packaged.directory, path.join(root, "dist/server-payload/standalone/plugin-authoring"));
 }));
 
 it("refuses unsafe example contents, source symlinks and output symlinks without changing their targets", () => {

@@ -6,18 +6,20 @@ import test, { after, type TestContext } from "node:test";
 
 const testData = mkdtempSync(join(tmpdir(), "lh-cli-opt-in-data-"));
 process.env.LH_DATA_DIR = testData;
-after(() => rmSync(testData, { recursive: true, force: true }));
-const { SETTINGS_FILE } = await import("../config.ts");
-const { PUT } = await import("../app/api/settings/[section]/route.ts");
+const { PUT } = await import("../src/api/handlers/settings/[section]/route.ts");
 const { sanitizeUserSettings, providerKeyMissing } = await import("../src/core/settings.ts");
 const { parseClaudeCodeSettingsBody } = await import("../src/server/settings-body.ts");
 const { claudeCodeAvailable, claudeCodeEnabled } = await import("../src/server/claude-code-config.ts");
 const { claudeCodeInstallationResponse } = await import("../src/server/claude-code.ts");
 const { modelCatalog, validateModelsSettings } = await import("../src/server/model-catalog.ts");
 const { providerKeyPresent } = await import("../src/server/keys.ts");
-const { readSettings, writeSettings } = await import("../src/store/settings.ts");
-const { chatStore } = await import("../src/store/chats.ts");
-const { jobStore } = await import("../src/store/jobs.ts");
+const { ensureActiveLumberJackBundle, readSettings, resetActiveLumberJackForTests, writeSettings } = await import("../src/server/stores.ts");
+after(async () => {
+	await resetActiveLumberJackForTests();
+	rmSync(testData, { recursive: true, force: true });
+});
+const { chatStore } = await import("../src/server/stores.ts");
+const { jobStore } = await import("../src/server/stores.ts");
 const { createJobRunner } = await import("../src/agent/subagents/runner.ts");
 const { CLAUDE_CODE_MODELS } = await import("../src/agent/claude-code/provider.ts");
 
@@ -29,7 +31,7 @@ function setup(t: TestContext) {
 	writeFileSync(join(dir, process.platform === "win32" ? "claude.exe" : "claude"), "", { mode: 0o755 });
 	process.env.PATH = `${dir}${delimiter}${path ?? ""}`;
 	t.after(() => {
-		if (previous) writeSettings(previous); else rmSync(SETTINGS_FILE, { force: true });
+		if (previous) writeSettings(previous); else ensureActiveLumberJackBundle().forest.deleteNode("config/settings");
 		if (path === undefined) delete process.env.PATH; else process.env.PATH = path;
 		rmSync(dir, { recursive: true, force: true });
 	});

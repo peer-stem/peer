@@ -91,7 +91,7 @@ function copyDirectory(root, source, destination) {
 }
 function ownedOutput(root, destination) {
 	const relative = path.relative(root, destination);
-	if (relative.startsWith("..") || path.isAbsolute(relative) || !relative || !["dist", ".next", "public"].includes(relative.split(path.sep)[0]) || relative.split(path.sep).length < 2) throw Error(`Refusing unsafe authoring output: ${destination}`);
+	if (relative.startsWith("..") || path.isAbsolute(relative) || !relative || !["dist", "public"].includes(relative.split(path.sep)[0]) || relative.split(path.sep).length < 2) throw Error(`Refusing unsafe authoring output: ${destination}`);
 	let current = root;
 	for (const part of relative.split(path.sep)) {
 		current = path.join(current, part);
@@ -99,14 +99,20 @@ function ownedOutput(root, destination) {
 	}
 }
 
+function resolveAuthoringScratchBase() {
+	const candidate = process.env.PEER_SCRATCH_DIR || process.env.TMPDIR || path.join(path.resolve(import.meta.dirname, ".."), ".test-scratch");
+	fs.mkdirSync(candidate, { recursive: true });
+	return candidate;
+}
+
 export function buildPluginAuthoring({ root = path.resolve(import.meta.dirname, ".."), standalone = false } = {}) {
-	const base = standalone ? path.join(root, ".next", "standalone") : root;
+	const base = standalone ? path.join(root, "dist", "server-payload", "standalone") : root;
 	const directory = path.join(base, standalone ? "plugin-authoring" : "dist/plugin-authoring");
 	const publicDirectory = path.join(base, "public", "plugin-authoring");
 	ownedOutput(root, directory); ownedOutput(root, publicDirectory);
 	const app = JSON.parse(fs.readFileSync(sourcePath(root, path.join(root, "package.json"), "file"), "utf8"));
 	if (!/^\d+\.\d+\.\d+$/.test(app.version)) throw Error("Authoring requires a numeric app version");
-	const stage = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "lh-authoring-")));
+	const stage = fs.realpathSync(fs.mkdtempSync(path.join(resolveAuthoringScratchBase(), "peer-authoring-")));
 	try {
 		copyFile(root, path.join(root, "LICENSE"), path.join(stage, "LICENSE"));
 		copyFile(root, path.join(root, "scripts", "install-plugin-local.mjs"), path.join(stage, "tools", "install-plugin-local.mjs"));

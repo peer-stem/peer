@@ -10,8 +10,8 @@ import test from "node:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { chatStore } from "../src/store/chats.ts";
-import { jobStore } from "../src/store/jobs.ts";
+import { chatStore } from "../src/server/stores.ts";
+import { jobStore } from "../src/server/stores.ts";
 import { PATHS } from "../config.ts";
 import { activityFeed } from "../src/server/observability.ts";
 
@@ -51,12 +51,10 @@ test("activityFeed: running jobs across ALL chats, running-only, title-joined, o
 		// extraction runs are absent when the pipeline is idle (registry empty)
 		assert.deepEqual(feed.extractions, []);
 	} finally {
-		fs.unlinkSync(`${PATHS.chats}/${chatA.id}.json`);
-		fs.unlinkSync(`${PATHS.chats}/${chatB.id}.json`);
-		const jobsDir = path.join(PATHS.data, "jobs");
-		for (const id of createdJobs) {
-			fs.unlinkSync(path.join(jobsDir, `${id}.json`));
-		}
+		jobStore.deleteJobsForChat(chatA.id);
+		jobStore.deleteJobsForChat(chatB.id);
+		chatStore.deleteChat(chatA.id);
+		chatStore.deleteChat(chatB.id);
 	}
 });
 
@@ -96,10 +94,7 @@ test("activityFeed: contextLimit is the server's live-catalog join (owner amendm
 		assert.equal(bareJob.contextLimit, null, "no usage yet → no context line");
 		assert.equal(bareJob.costUsd, null);
 	} finally {
-		fs.unlinkSync(`${PATHS.chats}/${chat.id}.json`);
-		const jobsDir = path.join(PATHS.data, "jobs");
-		for (const id of createdJobs) {
-			fs.unlinkSync(path.join(jobsDir, `${id}.json`));
-		}
+		jobStore.deleteJobsForChat(chat.id);
+		chatStore.deleteChat(chat.id);
 	}
 });

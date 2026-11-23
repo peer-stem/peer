@@ -59,7 +59,7 @@ import {
 import { getGraph, simplifyChains } from "../src/core/graph.ts";
 import { ModelsNotConfiguredError, ProviderKeyMissingError, providerKeyMissing, type ModelSlotName } from "../src/core/settings.ts";
 import { coverageOf, coverageSlots, messageViewLines } from "../src/core/coverage.ts";
-import { chatStore } from "../src/store/chats.ts";
+import { chatStore } from "../src/server/stores.ts";
 import { subscribe } from "../src/core/events.ts";
 import { PATHS } from "../config.ts";
 
@@ -227,7 +227,7 @@ function fixtureChat() {
 after(() => {
 	for (const id of createdChats) {
 		try {
-			fs.unlinkSync(`${PATHS.chats}/${id}.json`);
+			chatStore.deleteChat(id);
 		} catch {
 			/* already gone */
 		}

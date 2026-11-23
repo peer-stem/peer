@@ -17,15 +17,15 @@ process.env.LH_DATA_DIR = testDataDirectory;
 after(() => { rmSync(testDataDirectory, { recursive: true, force: true }); });
 
 const { createPluginWorkerService } = await import("../src/agent/plugin-workers.ts");
-const { createPluginTaskRecordStore } = await import("../src/store/plugin-task-records.ts");
+const { createPluginTaskRecordStore } = await import("../src/server/stores.ts");
 const { createPluginBackgroundTool, recoverPluginBackgroundJob } = await import("../src/server/plugin-background-tools.ts");
 const { buildAbortSteer, buildSubagentSteer, isSubagentFailure } = await import("../src/core/contracts/jobs.ts");
 const { createJobRunner } = await import("../src/agent/subagents/runner.ts");
 const { abortJob, deliverJobResult, recoverStaleJobs, registerLiveAgent, setJobRespawn, setPluginJobRecovery, setTurnRunner: setRawTurnRunner, settleSteers, unregisterLiveAgent, noteSteersDurable } = await import("../src/server/jobs.ts");
 const { registerJobAbort, unregisterJobAbort, isJobLive } = await import("../src/agent/subagents/aborts.ts");
 const { beginTurn, endTurn } = await import("../src/server/turn-liveness.ts");
-const { chatStore } = await import("../src/store/chats.ts");
-const { jobStore: diskJobs } = await import("../src/store/jobs.ts");
+const { chatStore } = await import("../src/server/stores.ts");
+const { jobStore: diskJobs } = await import("../src/server/stores.ts");
 
 function deferred<T>() {
 	let resolve!: (value: T) => void;

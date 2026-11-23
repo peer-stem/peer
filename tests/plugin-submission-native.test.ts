@@ -246,7 +246,7 @@ test("plugin answer images stay outside arbitrary answer JSON and retain native 
 });
 
 test("steer HTTP route distinguishes stale replacements from the ordinary settled fallback", async () => {
-	const { POST } = await import("../app/api/chats/[id]/steer/route.ts");
+	const { POST } = await import("../src/api/handlers/chats/[id]/steer/route.ts");
 	for (const settled of [false, true]) {
 		const chat = stores.chatStore.createChat("Synthetic steer route race");
 		registerLiveAgent(chat.id, { state: { model }, steer() { throw new Error("must not hand off"); } } as unknown as Agent);

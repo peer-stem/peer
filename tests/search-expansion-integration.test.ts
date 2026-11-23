@@ -11,7 +11,7 @@ process.env.LH_DATA_DIR = path.join(dir, "data");
 process.env.LH_AUTH_FILE = path.join(dir, "auth.json");
 for (const { envVar } of SEARCH_ENGINES) delete process.env[envVar];
 const { saveKey, deleteKey, keyStatuses } = await import("../src/server/keys.ts");
-const { writeSettings, readSettings } = await import("../src/store/settings.ts");
+const { writeSettings, readSettings } = await import("../src/server/stores.ts");
 const { searchStatus, searchProvider } = await import("../src/server/search.ts");
 const realFetch = globalThis.fetch;
 

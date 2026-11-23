@@ -29,8 +29,7 @@ let appendChain: (assertion: unknown) => void;
 before(async () => {
 	({ commitPositions } = await import("../src/server/commit-positions.ts"));
 	const { stores } = await import("../src/server/stores.ts");
-	const positionsFile = path.join(process.env.LH_DATA_DIR!, "graph", "positions.json");
-	readPositions = () => JSON.parse(fs.readFileSync(positionsFile, "utf8")).positions as Record<string, { x: number; y: number }>;
+	readPositions = () => stores.graphStore.readPositions();
 	appendNode = stores.graphStore.appendNode as (node: unknown) => void;
 	appendChain = stores.graphStore.appendChain as (assertion: unknown) => void;
 

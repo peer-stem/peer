@@ -9,7 +9,7 @@ import { Agent } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import { createPluginInference, type PluginInferenceDeps } from "../src/server/plugin-inference.ts";
 import { createPluginAgentService } from "../src/agent/plugin-agents.ts";
-import { createPluginAgentRecordStore } from "../src/store/plugin-agent-records.ts";
+import { createPluginAgentRecordStore } from "../src/server/stores.ts";
 import { runSubagent } from "../src/agent/subagents/pi-run.ts";
 import type { ModelCatalogResponse } from "../src/core/contracts/models.ts";
 import type { PluginModelSpec } from "../src/core/plugin-agents.ts";

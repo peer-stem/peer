@@ -11,7 +11,7 @@ import type { PluginAgentService } from "../src/core/plugin-agents.ts";
 import type { PluginWorkerService } from "../src/core/plugin-workers.ts";
 import type { ServerEvent } from "../src/core/events.ts";
 import { createPluginWorkerService } from "../src/agent/plugin-workers.ts";
-import { createPluginTaskRecordStore } from "../src/store/plugin-task-records.ts";
+import { createPluginTaskRecordStore } from "../src/server/stores.ts";
 
 function fixture(t: TestContext) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "plugin-host-"));

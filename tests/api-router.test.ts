@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import { MAX_IMPORT_BODY_BYTES } from "../lib/notes-import-limits.ts";
+import { MAX_IMPORT_BODY_BYTES } from "../src/core/notes-import-limits.ts";
 import { bodyLimit, createRouter } from "../src/api/router.ts";
 import type { Dispatch, Method, RouteHandler, RouteRecord } from "../src/api/types.ts";
 

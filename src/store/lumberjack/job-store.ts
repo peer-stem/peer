@@ -43,10 +43,15 @@ function foldJobLifecycle(forest: LumberJackForest, id: string): JobRecord | nul
 	if (!snap) return null;
 	const entries = forest.getEntries(nodePath, LIFECYCLE_EVENT);
 	if (entries.length === 0) return null;
-	let current = entries[0]!.content as JobRecord;
+	let current = { ...(entries[0]!.content as JobRecord) };
 	for (let i = 1; i < entries.length; i++) {
-		const patch = entries[i]!.content as Partial<JobRecord>;
+		const entry = entries[i]!;
+		const patch = entry.content as Partial<JobRecord>;
 		current = { ...current, ...patch };
+		const cleared = Array.isArray(entry.metadata?.cleared) ? entry.metadata.cleared : [];
+		for (const key of cleared) {
+			delete (current as unknown as Record<string, unknown>)[String(key)];
+		}
 	}
 	return current;
 }
@@ -88,15 +93,30 @@ function updateChatJob(forest: LumberJackForest, id: string, patch: JobPatch): J
 	const record = foldJobLifecycle(forest, id);
 	if (!record) return null;
 	const updatedAt = patch.updatedAt ?? new Date().toISOString();
-	const next: JobRecord = { ...record, ...patch, updatedAt };
-	const delta = { ...patch, updatedAt };
+	const next: JobRecord = { ...record };
+	const delta: Record<string, unknown> = {};
+	const cleared: string[] = [];
+	for (const [key, value] of Object.entries(patch)) {
+		if (value === undefined) {
+			delete (next as unknown as Record<string, unknown>)[key];
+			cleared.push(key);
+		} else {
+			(next as unknown as Record<string, unknown>)[key] = value;
+			delta[key] = value;
+		}
+	}
+	next.updatedAt = updatedAt;
+	delta.updatedAt = updatedAt;
 	const seq = forest.getEntries(jobPathFor(id), LIFECYCLE_EVENT).length;
 	forest.noteStoreEmittedEvent("jobs-changed");
 	writeJobNodeMetadata(forest, next);
+	const meta = cleared.length > 0
+		? { step: "patch", status: next.status, cleared }
+		: { step: "patch", status: next.status };
 	forest.appendEntries(
 		jobPathFor(id),
 		LIFECYCLE_EVENT,
-		[{ id: `${id}:${seq}`, content: delta, metadata: { step: "patch", status: next.status } }],
+		[{ id: `${id}:${seq}`, content: delta, metadata: meta }],
 		{ endEvent: isTerminalStatus(next.status) },
 	);
 	emit("jobs-changed", { chatId: next.chatId });

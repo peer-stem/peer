@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { parseHTML } from "linkedom";
-import { createCiteAction } from "../components/citation-actions.ts";
-import { INSERT_CITATION_EVENT } from "../components/path-input.tsx";
+import { createCiteAction, INSERT_CITATION_EVENT } from "../src/client/engine/index.ts";
 import { parseCitationHref } from "../src/core/citations.ts";
-import type { CapturedSelection } from "../components/selection-text.ts";
+import type { CapturedSelection } from "../src/client/engine/index.ts";
 
 const capture = (text: string): CapturedSelection => ({ messageId: "m9", range: {} as Range, selector: { text, start: 0, end: text.length, prefix: "", suffix: "" } });
 

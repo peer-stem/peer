@@ -1,48 +1,61 @@
 /**
- * Tests for the settings STORE (settings-storage wave, 2026-09-19):
- * src/store/settings.ts — the record's fs adapter. Uses a fresh isolated
- * HOME/data/auth before importing any store or config; never touches the
- * repo's data or shares a recovery/store directory with another process.
- *
- * (The legacy default-settings.json fold and the chat-section facade died
- * with per-session models, owner 2026-09-28 — sessions own their model
- * from birth, stamped from the strong slot server-side.)
+ * Tests for the settings STORE on the default LumberJack DAG substrate:
+ * isolated HOME/data/auth before importing any store or config; never touches
+ * the repo's data or shares a store directory with another process.
  */
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import path from "node:path";
 import os from "node:os";
+import path from "node:path";
 import { after, afterEach, describe, it } from "node:test";
 
-const directory = fs.mkdtempSync(path.join(os.tmpdir(), "lh-settings-store-"));
+const directory = fs.mkdtempSync(path.join(os.tmpdir(), "peer-settings-store-"));
 process.env.HOME = path.join(directory, "home");
 process.env.LH_DATA_DIR = path.join(directory, "data");
 process.env.LH_AUTH_FILE = path.join(directory, "auth.json");
 fs.mkdirSync(process.env.HOME, { recursive: true });
 fs.mkdirSync(process.env.LH_DATA_DIR, { recursive: true });
 fs.writeFileSync(process.env.LH_AUTH_FILE, "{}");
-const { SETTINGS_FILE } = await import("../config.ts");
-const { readSettings, writeSettings } = await import("../src/store/settings.ts");
+
+const { ensureActiveLumberJackBundle, readSettings, resetActiveLumberJackForTests, writeSettings } = await import(
+	"../src/server/stores.ts"
+);
 const { resolveSettings } = await import("../src/core/settings-resolution.ts");
 const { parseCompactionSettingsBody, parseAppearanceSettingsBody } = await import("../src/server/settings-body.ts");
 
-after(() => fs.rmSync(directory, { recursive: true, force: true }));
+function writeRawSettingsSlot(raw: unknown): void {
+	ensureActiveLumberJackBundle().forest.upsertNode({
+		path: "config/settings",
+		type: "leaf",
+		kind: "config",
+		slot: raw,
+	});
+}
+
+function readRawSettingsSlot(): Record<string, unknown> {
+	return (ensureActiveLumberJackBundle().forest.getNode("config/settings")?.slot ?? {}) as Record<string, unknown>;
+}
+
+after(async () => {
+	await resetActiveLumberJackForTests();
+	fs.rmSync(directory, { recursive: true, force: true });
+});
 
 afterEach(() => {
-	fs.rmSync(SETTINGS_FILE, { force: true });
+	ensureActiveLumberJackBundle().forest.deleteNode("config/settings");
 });
 
 describe("the settings store", () => {
-	it("persists worker concurrency, drops invalid disk values, and resets to 8 when unset", () => {
+	it("persists worker concurrency, drops invalid stored values, and resets to 8 when unset", () => {
 		writeSettings({ version: 1, agent: { workerRequestConcurrency: 29, tools: { research: false } } });
 		assert.deepEqual(readSettings()?.agent, { workerRequestConcurrency: 29, tools: { research: false } });
-		assert.equal(JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf-8")).agent.workerRequestConcurrency, 29);
-		fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ version: 1, agent: { workerRequestConcurrency: 1.5, tools: { research: false } } }));
+		assert.equal((readRawSettingsSlot().agent as Record<string, unknown>).workerRequestConcurrency, 29);
+		writeRawSettingsSlot({ version: 1, agent: { workerRequestConcurrency: 1.5, tools: { research: false } } });
 		assert.deepEqual(readSettings()?.agent, { tools: { research: false } });
 		assert.equal(resolveSettings(readSettings()).agent.workerRequestConcurrency, 8);
 		writeSettings({ version: 1, agent: { tools: { research: false } } });
-		assert.equal("workerRequestConcurrency" in JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf-8")).agent, false);
+		assert.equal("workerRequestConcurrency" in (readRawSettingsSlot().agent as Record<string, unknown>), false);
 		assert.equal(resolveSettings(readSettings()).agent.workerRequestConcurrency, 8);
 	});
 
@@ -53,11 +66,11 @@ describe("the settings store", () => {
 			assert.ok(parsed.ok);
 			writeSettings({ version: 1, appearance: parsed.settings });
 			assert.deepEqual(readSettings()?.appearance, { codeLigatures, proseFontSize: 20 });
-			assert.equal(JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")).appearance.codeLigatures, codeLigatures);
+			assert.equal((readRawSettingsSlot().appearance as Record<string, unknown>).codeLigatures, codeLigatures);
 			assert.equal(resolveSettings(readSettings()).appearance.codeLigatures, codeLigatures);
 		}
 		for (const appearance of [{ proseFontSize: 20 }, { proseFontSize: 20, codeLigatures: "true" }]) {
-			fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ version: 1, appearance }));
+			writeRawSettingsSlot({ version: 1, appearance });
 			assert.deepEqual(readSettings()?.appearance, { proseFontSize: 20 });
 			assert.equal(resolveSettings(readSettings()).appearance.codeLigatures, false);
 		}
@@ -74,12 +87,12 @@ describe("the settings store", () => {
 			assert.equal(resolveSettings(readSettings()).appearance.compactSessionList, compactSessionList);
 		}
 		assert.equal(parseAppearanceSettingsBody({ compactSessionList: "true" }).ok, false);
-		fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ version: 1, appearance: { compactSessionList: "true" } }));
+		writeRawSettingsSlot({ version: 1, appearance: { compactSessionList: "true" } });
 		assert.equal(resolveSettings(readSettings()).appearance.compactSessionList, false);
 	});
 
 	it("reads null on first boot (no record)", () => {
-		fs.rmSync(SETTINGS_FILE, { force: true });
+		ensureActiveLumberJackBundle().forest.deleteNode("config/settings");
 		assert.equal(readSettings(), null);
 	});
 
@@ -101,33 +114,25 @@ describe("the settings store", () => {
 			assert.deepEqual(readSettings()?.compaction, { thresholdTokens: 120_000, includeReasoning });
 			assert.equal(resolveSettings(readSettings()).compaction.includeReasoning, includeReasoning);
 		}
-		writeSettings({ version: 1, compaction: { thresholdTokens: 120_000, includeReasoning: "true" } });
-		assert.deepEqual(readSettings()?.compaction, { thresholdTokens: 120_000 }, "invalid disk values are dropped");
+		writeSettings({ version: 1, compaction: { thresholdTokens: 120_000, includeReasoning: "true" } } as never);
+		assert.deepEqual(readSettings()?.compaction, { thresholdTokens: 120_000 }, "invalid stored values are dropped");
 		assert.equal(resolveSettings(readSettings()).compaction.includeReasoning, false);
 	});
 
-	it("a chat section on disk is IGNORED — the field died with per-session models (owner, 2026-09-28)", () => {
-		fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
-		// A fossil `chat` section (the old default-settings record) must not
-		// resurrect through the sanitizer — the key is simply gone.
-		fs.writeFileSync(
-			SETTINGS_FILE,
-			JSON.stringify({
-				version: 1,
-				chat: { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" }, thinkingLevel: "low" },
-				graph: { enabled: true },
-			}),
-			"utf-8",
-		);
+	it("a chat section in storage is IGNORED — the field died with per-session models", () => {
+		writeRawSettingsSlot({
+			version: 1,
+			chat: { model: { provider: "openrouter", id: "z-ai/glm-5.3-flash" }, thinkingLevel: "low" },
+			graph: { enabled: true },
+		});
 		const out = readSettings();
 		assert.ok(out);
 		assert.equal("chat" in out, false, "the chat section never surfaces");
-		assert.deepEqual(out.graph, { enabled: true }); // siblings survive
+		assert.deepEqual(out.graph, { enabled: true });
 	});
 
-	it("corrupt settings.json → null (first-boot semantics), never throws", () => {
-		fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
-		fs.writeFileSync(SETTINGS_FILE, "{not json", "utf-8");
+	it("corrupt settings slot → null (first-boot semantics), never throws", () => {
+		writeRawSettingsSlot("{not an object");
 		assert.equal(readSettings(), null);
 	});
 });

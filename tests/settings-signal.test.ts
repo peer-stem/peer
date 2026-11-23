@@ -18,7 +18,7 @@ const {
 	SETTINGS_SAVED_EVENT,
 	notifySettingsSaved,
 	onSettingsSaved,
-} = await import("../components/settings-signal.ts");
+} = await import("../src/client/engine/index.ts");
 
 afterEach(() => {
 	(globalThis as { window: unknown }).window = realWindow ?? new EventTarget();

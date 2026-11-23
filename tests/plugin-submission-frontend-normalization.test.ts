@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createCanvas } from "@napi-rs/canvas";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { SessionModel } from "../components/session-core.ts";
+import { SessionModel } from "../src/client/engine/index.ts";
 import { newThinkingMessage, newUserMessage, type ChatInput, type LhMessage } from "../src/core/index.ts";
 
 const deferred = <T>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(yes => { resolve = yes; }); return { promise, resolve }; };

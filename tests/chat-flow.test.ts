@@ -31,11 +31,11 @@ import { handleChatInput, handleChatRequest } from "../src/server/chat-handler.t
 import { effectiveSettings } from "../src/server/stores.ts";
 import { isTurnRunning } from "../src/server/turn-liveness.ts";
 import { deliverJobResult, registerLiveAgent, setTurnRunner, steerLiveChat, unregisterLiveAgent } from "../src/server/jobs.ts";
-import { SessionModel } from "../components/session-core.ts";
+import { SessionModel } from "../src/client/engine/index.ts";
 import { buildSubagentSteer } from "../src/core/contracts.ts";
 import { abortTurn, runningTurn, settledTurnResponse } from "../src/server/turn-runs.ts";
-import { chatStore } from "../src/store/chats.ts";
-import { jobStore } from "../src/store/jobs.ts";
+import { chatStore } from "../src/server/stores.ts";
+import { jobStore } from "../src/server/stores.ts";
 import { buildAnswer, dismissedAnswer, normalizeOptions, resolveCorrect, type QuestionData } from "../src/core/question-core.ts";
 import { danglingQuestionOf, endsInDismissal, needsContinuation, newAnswerResult, newUserMessage } from "../src/core/native-messages.ts";
 import { projectView } from "../src/core/view.ts";
@@ -45,10 +45,10 @@ import type { LhMessage } from "../src/core/native-messages.ts";
 // Route-level pin (the chat-birth-stamp pattern): the dismiss route's
 // handler, driven directly. Env is the runner's (the same the static
 // store imports already resolved under).
-const dismissRoute = await import("../app/api/chats/[id]/dismiss/route.ts");
-const steerRoute = await import("../app/api/chats/[id]/steer/route.ts");
-const streamRoute = await import("../app/api/chats/[id]/stream/route.ts");
-const recordRoute = await import("../app/api/chats/[id]/route.ts");
+const dismissRoute = await import("../src/api/handlers/chats/[id]/dismiss/route.ts");
+const steerRoute = await import("../src/api/handlers/chats/[id]/steer/route.ts");
+const streamRoute = await import("../src/api/handlers/chats/[id]/stream/route.ts");
+const recordRoute = await import("../src/api/handlers/chats/[id]/route.ts");
 import { PATHS } from "../config.ts";
 
 // The key-presence turn gate (provider-key interlude, 2026-09-25): scripted
@@ -267,7 +267,7 @@ const createdChats: string[] = [];
 after(() => {
 	for (const id of createdChats) {
 		try {
-			fs.unlinkSync(path.join(PATHS.chats, `${id}.json`));
+			chatStore.deleteChat(id);
 		} catch {
 			/* already gone */
 		}

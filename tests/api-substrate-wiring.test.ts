@@ -383,11 +383,16 @@ test("startApiServer tears down LumberJack substrate if HTTP bind fails and supp
 	const fixtureDir = path.join(scratch.rootDir, "legacy-lh-fixture");
 	seedFixtureDirectory(fixtureDir);
 	const freePort = await findSparePort();
-	fallbackSrv = await startApiServer({ PORT: String(freePort), HOSTNAME: "127.0.0.1" }, { logger });
+	fallbackSrv = await startApiServer(
+		{ PORT: String(freePort), HOSTNAME: "127.0.0.1", PEER_STATE_ROOT: scratch.dataDir },
+		{ logger },
+	);
+	assert.notEqual(getActiveLumberJackBundle(), null, "LumberJack activates by default without PEER_FOREST_DIR");
+	assert.equal(getActiveMfnRuntime(), null, "LLM compaction stays default until MFN is explicitly enabled");
 	const res = await postImport(`http://127.0.0.1:${fallbackSrv.port}`, JSON.stringify({ sourceDirectory: fixtureDir }));
 	assert.equal(res.status, 200);
 	const report = (await res.json()) as { chatsImported?: number };
 	assert.equal(report.chatsImported, 1);
-	assert.equal(getActiveLumberJackBundle(), null);
-	assert.equal(fs.existsSync(path.join(scratch.dataDir, "forest")), true);
+	assert.equal(fs.existsSync(path.join(scratch.dataDir, "lumberjack")), true);
+	assert.equal(fs.existsSync(path.join(scratch.dataDir, "boot-appearance.json")), true);
 });

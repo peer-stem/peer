@@ -12,7 +12,7 @@ process.env.LH_AUTH_FILE = path.join(dir, "auth.json");
 for (const name of ["TAVILY_API_KEY", "BRAVE_API_KEY", "EXA_API_KEY", "FIRECRAWL_API_KEY", "OLLAMA_API_KEY"]) delete process.env[name];
 
 const { saveKey, keyStatuses } = await import("../src/server/keys.ts");
-const { writeSettings } = await import("../src/store/settings.ts");
+const { writeSettings } = await import("../src/server/stores.ts");
 const { searchStatus, searchProvider } = await import("../src/server/search.ts");
 const realFetch = globalThis.fetch;
 

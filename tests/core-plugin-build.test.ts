@@ -68,6 +68,6 @@ test("all supported development/build entry points stage core packages", () => {
 	const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 	assert.equal(pkg.scripts["plugins:build-core"], "node scripts/build-core-plugins.mjs");
 	assert.equal(pkg.scripts["plugins:build-authoring"], "node scripts/build-plugin-authoring.mjs");
-	for (const command of ["dev", "build"]) assert.match(pkg.scripts[command], /npm run plugins:build-core && npm run plugins:build-authoring && next /);
+	for (const command of ["dev", "build"]) assert.match(pkg.scripts[command], /npm run plugins:build-core && npm run plugins:build-authoring && npm run client:build/);
 	assert.match(pkg.scripts["desktop:dev"], /npm run dev/); assert.match(pkg.scripts["desktop:dist"], /npm run build/);
 });

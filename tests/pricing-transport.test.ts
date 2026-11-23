@@ -7,8 +7,8 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "lh-pricing-transport-"));
 process.env.LH_DATA_DIR = scratch;
 process.env.LH_AUTH_FILE = path.join(scratch, "empty-auth.json");
 fs.writeFileSync(process.env.LH_AUTH_FILE, "{}", { mode: 0o600 });
-const { chatStore } = await import("../src/store/chats.ts");
-const { GET } = await import("../app/api/chats/[id]/route.ts");
+const { chatStore, ensureActiveLumberJackBundle } = await import("../src/server/stores.ts");
+const { GET } = await import("../src/api/handlers/chats/[id]/route.ts");
 const { sessionCost } = await import("../src/server/pricing.ts");
 after(() => fs.rmSync(scratch, { recursive: true, force: true }));
 
@@ -19,8 +19,8 @@ test("chat GET supplies derived Pi costs without persisting dollars or changing 
 	for (const [id, model] of [["api", "openrouter:openai/gpt-6.1-sol"], ["plan", "chatgpt:fixture"], ["unknown", "missing:fixture"]]) {
 		chatStore.appendTurnUsage(record.id, { id: id!, model: model!, messageId: "fixture-input", at: "fixture", steps: [step] });
 	}
-	const file = path.join(scratch, "chats", `${record.id}.json`);
-	const before = fs.readFileSync(file, "utf8");
+	const usageLog = () => JSON.stringify(ensureActiveLumberJackBundle().forest.getEntries(`sessions/${record.id}`, "turn_usage"));
+	const before = JSON.stringify({ record: chatStore.getChat(record.id), usage: usageLog() });
 	const response = await GET(new Request(`http://localhost/api/chats/${record.id}`), { params: Promise.resolve({ id: record.id }) });
 	assert.equal(response.status, 200);
 	const body = await response.json();
@@ -34,7 +34,7 @@ test("chat GET supplies derived Pi costs without persisting dollars or changing 
 	const stats = await GET(new Request(`http://localhost/api/chats/${record.id}?view=stats`), { params: Promise.resolve({ id: record.id }) });
 	assert.equal(stats.status, 200);
 	assert.deepEqual(await stats.json(), { turns: body.turns, pricing: body.pricing }, "the stats-only response must not contain transcript data");
-	assert.equal(fs.readFileSync(file, "utf8"), before, "read-time estimates must never rewrite the usage log");
+	assert.equal(JSON.stringify({ record: chatStore.getChat(record.id), usage: usageLog() }), before, "read-time estimates must never rewrite the usage log");
 });
 
 test("a stats-only read preserves the missing-session contract", async () => {

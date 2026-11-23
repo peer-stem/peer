@@ -9,7 +9,7 @@ import { preparePluginProblemSubmission, pluginProblemAvailabilityOf } from "../
 import { activeProblemOf, toLlmMessages, type LhMessage } from "../src/core/native-messages.ts";
 import { inputAppends, parseChatInput } from "../src/core/input-events.ts";
 import { preparePluginSubmission, type PluginSubmissionTarget } from "../src/core/plugin-submissions.ts";
-import { SessionModel } from "../components/session-core.ts";
+import { SessionModel } from "../src/client/engine/index.ts";
 
 const image = { type: "image" as const, mimeType: "image/png", data: "YQ==" };
 const input = { statement: "Code", mode: "composition", modelSolution: "solution", payload: {} };

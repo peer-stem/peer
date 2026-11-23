@@ -43,17 +43,24 @@ const path = require("node:path");
 // renderer owns the number; this is the IPC widen target).
 const SIDEBAR_AUTOCLOSE = 928;
 
-const PRODUCT_NAME = "LearnHarness";
+const PRODUCT_NAME = "peer";
 
-// APP NAME → userData (owner, 2026-10-10): the Application Support dir is
-// exactly "LearnHarness" in dev AND packaged. Packaged Electron would
-// otherwise derive it from package.json "name" (now lowercase
-// "learnharness"), and productName metadata alone doesn't reach app.name.
-// Must run before the LH_DEV_URL suffix below — dev becomes
-// "LearnHarness-dev".
+const resolveDevUrl = () => process.env.PEER_DEV_URL || process.env.LH_DEV_URL;
+
 app.setName(PRODUCT_NAME);
-const AUTH_FILE = () => path.join(app.getPath("userData"), "auth.json");
-const DATA_DIR = () => path.join(app.getPath("userData"), "data");
+const STATE_ROOT = () => (process.env.PEER_STATE_ROOT ? path.resolve(process.env.PEER_STATE_ROOT) : app.getPath("userData"));
+const AUTH_FILE = () => path.join(STATE_ROOT(), "auth.json");
+const DATA_DIR = () => path.join(STATE_ROOT(), "data");
+const FOREST_DIR = () => path.join(STATE_ROOT(), "lumberjack");
+
+const FORBIDDEN_GPU_ENV_RE = /^(?:CUDA_|ROCR_|HIP_|HSA_|ROCM_|NVCC_|CUBLAS_|CUDNN_|NCCL_)/i;
+function scrubServerEnv(sourceEnv) {
+	const out = {};
+	for (const [key, value] of Object.entries(sourceEnv || {})) {
+		if (!FORBIDDEN_GPU_ENV_RE.test(key)) out[key] = value;
+	}
+	return out;
+}
 
 // Resolve the saved palette before window creation; renderer reports keep
 // it current after live saves. This helper needs no compiled server bundle.
@@ -126,7 +133,7 @@ if (process.argv.includes("--browser-service")) {
 	// its own userData so (a) the single-instance lock — checked below — doesn't
 	// silently kill it, and (b) it never reads/writes the real app's
 	// localStorage, auth.json, or logs. Must run before the lock check.
-	if (process.env.LH_DEV_URL) {
+	if (resolveDevUrl()) {
 		app.setPath("userData", `${app.getPath("userData")}-dev`);
 	}
 
@@ -223,15 +230,14 @@ function startServer(port) {
 			{
 				cwd: path.dirname(serverEntry()),
 				env: {
-					...process.env,
+					...scrubServerEnv(process.env),
 					ELECTRON_RUN_AS_NODE: "1",
 					NODE_ENV: "production",
 					PORT: String(port),
 					HOSTNAME: "127.0.0.1", // the server defaults to 0.0.0.0 — never
+					PEER_STATE_ROOT: STATE_ROOT(),
+					PEER_FOREST_DIR: FOREST_DIR(),
 					LH_DATA_DIR: DATA_DIR(),
-					// The auth/keys store — the child reads AND writes this file itself
-					// (no env injection anymore: a spawn-time copy would shadow every
-					// settings-page key change until restart; env wins over file).
 					LH_AUTH_FILE: AUTH_FILE(),
 					LH_DESKTOP_SERVER: "1",
 					LH_DESKTOP_API_SECRET: desktopAPISecret,
@@ -347,7 +353,7 @@ function createWindow(url, beforeLoad) {
 			contextIsolation: true,
 			sandbox: true,
 			nodeIntegration: false,
-			...(process.env.LH_DEV_URL ? { additionalArguments: ["--lh-web-subscriptions"] } : {}),
+			...(resolveDevUrl() ? { additionalArguments: ["--lh-web-subscriptions"] } : {}),
 			preload: path.join(__dirname, "preload.cjs"),
 		},
 		// Live-resize + first-paint flash (owner, 2026-09-17): during a resize
@@ -498,6 +504,11 @@ function reportUpdateStatus(status, version = null) {
  * Re-read for each automatic check so saving the toggle needs no restart. */
 function automaticUpdatesEnabled() {
 	try {
+		const bootFile = path.join(STATE_ROOT(), "boot-appearance.json");
+		if (typeof fs.existsSync === "function" && fs.existsSync(bootFile)) {
+			const boot = JSON.parse(fs.readFileSync(bootFile, "utf8"));
+			return boot?.autoUpdate !== false;
+		}
 		const settings = JSON.parse(fs.readFileSync(path.join(DATA_DIR(), "settings.json"), "utf8"));
 		return settings?.general?.autoUpdate !== false;
 	} catch {
@@ -679,18 +690,13 @@ async function main() {
 
 	await app.whenReady();
 
-	// Read the same record/custom theme the server uses before constructing
-	// any native window, including the external development shell.
+	const devUrl = resolveDevUrl();
 	appearance = readAppearance(serverDataDir({
-		devUrl: process.env.LH_DEV_URL, env: process.env,
+		devUrl, env: process.env,
 		packagedDataDir: DATA_DIR(), repoRoot: path.join(__dirname, ".."),
 	}));
 	nativeTheme.themeSource = themeSourceFor(appearance.mode);
 
-	// Dev mode: point at a running `next dev` server (LH_DEV_URL) — no
-	// spawn, no packaging, full HMR. The rest of this shell still applies
-	// (guards, menu, single instance).
-	const devUrl = process.env.LH_DEV_URL;
 	const url = devUrl ?? `http://127.0.0.1:${await freePort()}`;
 	if (!devUrl) {
 		desktopAPISecret = randomBytes(32).toString("hex");

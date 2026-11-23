@@ -27,8 +27,7 @@ import { DEFAULT_THINKING_ORDER } from "../src/core/settings.ts";
 const { piEngineForSpec, piModels } = await import("../src/agent/models.ts");
 import { BACKGROUND_MODEL_ROLES } from "../src/core/settings.ts";
 import { resolveSettings } from "../src/core/settings-resolution.ts";
-const { readSettings, writeSettings } = await import("../src/store/settings.ts");
-const { SETTINGS_FILE } = await import("../config.ts");
+const { ensureActiveLumberJackBundle, readSettings, writeSettings } = await import("../src/server/stores.ts");
 const { effectiveSettings } = await import("../src/server/stores.ts");
 const { providerKeyPresent } = await import("../src/server/keys.ts");
 
@@ -360,7 +359,7 @@ function withClaudeInstalled(installed: boolean, fn: () => void, enabled = true)
 			else process.env[name] = value;
 		}
 		if (settings) writeSettings(settings);
-		else fs.rmSync(SETTINGS_FILE, { force: true });
+		else ensureActiveLumberJackBundle().forest.deleteNode("config/settings");
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
 }

@@ -23,8 +23,8 @@ Object.defineProperty(process, "connected", { configurable: true, value: true })
 const { piModels, piEngineForSpec } = await import("../src/agent/models.ts");
 const { refreshSubscriptionModels } = await import("../src/agent/subscription-bridge.ts");
 const { modelCatalog, validateModelsSettings } = await import("../src/server/model-catalog.ts");
-const { readSettings: readSettingsRecord, writeSettings: writeSettingsRecord } = await import("../src/store/settings.ts");
-const { PUT } = await import("../app/api/settings/[section]/route.ts");
+const { ensureActiveLumberJackBundle, readSettings: readSettingsRecord, writeSettings: writeSettingsRecord } = await import("../src/server/stores.ts");
+const { PUT } = await import("../src/api/handlers/settings/[section]/route.ts");
 const { clampThinkingLevel, normalizeContext } = await import("@earendil-works/pi-ai");
 const native = piModels().getModels("github-copilot")[0]!;
 const copilot = { provider: "github-copilot-subscription", id: native.id };
@@ -111,7 +111,7 @@ test("introduced or replaced unknown models still reject, without writing any se
 });
 
 test("a first models write cannot introduce disconnected selections", async () => {
-	fs.unlinkSync(path.join(directory, "settings.json"));
+	ensureActiveLumberJackBundle().forest.deleteNode("config/settings");
 	assert.equal((await put(initial)).status, 400);
 	assert.equal(readSettingsRecord(), null);
 });

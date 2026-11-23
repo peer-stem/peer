@@ -5,9 +5,11 @@ import type {
 	CoverageEntry,
 	GraphChain,
 	GraphNode,
+	JobRecord,
 	LearnHarnessImportReport,
 	SessionCheckpoint,
 } from "../core/contracts.ts";
+import { sanitizeRenderSettings } from "../core/render-settings.ts";
 import {
 	applyRecordIfPresent,
 	dedupeByKey,
@@ -52,12 +54,15 @@ function importGraphLedgersAndPositions(
 	const inCoverage = readJsonlIfPresent<CoverageEntry>(root, ["graph", "coverage.jsonl"], isCoverageEntry, report);
 	const nodesRes = dedupeByKey(stores.graphStore.readNodes(), inNodes, (n) => `${n.id}:${JSON.stringify(n)}`);
 	const chainsRes = dedupeByKey(stores.graphStore.readChains(), inChains, (c) => `${c.id}:${JSON.stringify(c)}`);
-	const sessRes = dedupeByKey(stores.graphStore.readCheckpoints(), inSessions, (s) => `${s.chatId}:${s.foldedAt}`);
+	const existingSessions = stores.graphStore.readCheckpoints();
+	const sessMerged = existingSessions.length === 0
+		? inSessions
+		: dedupeByKey(existingSessions, inSessions, (s) => `${s.chatId}:${s.foldedAt}`).merged;
 	const covRes = dedupeByKey(stores.graphStore.readCoverage(), inCoverage, (c) => `${c.chatId}:${c.fp}`);
 	stores.graphStore.rewriteLedgers({
 		nodes: nodesRes.merged,
 		chains: chainsRes.merged,
-		checkpoints: sessRes.merged,
+		checkpoints: sessMerged,
 		coverage: covRes.merged,
 	});
 	report.nodesImported = nodesRes.added;
@@ -85,7 +90,47 @@ function importSourcesAndGraph(root: string, stores: LumberJackStoreBundle, repo
 	}
 	const rawOrg = readJsonIfPresent(root, ["graph", "source-organization.json"], report);
 	applyRecordIfPresent(rawOrg, (rec) => stores.sourceOrganizationStore.write(rec as never), report);
+	const rawRender = readJsonIfPresent(root, ["graph", "render-settings.json"], report);
+	applyRecordIfPresent(
+		rawRender,
+		(rec) => stores.forest.upsertNode({ path: "config/render-settings", type: "leaf", kind: "config", slot: sanitizeRenderSettings(rec) }),
+		report,
+	);
 	importGraphLedgersAndPositions(root, stores, report);
+}
+
+const SAFE_JOB_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+function importOneJobFile(root: string, entry: fs.Dirent, stores: LumberJackStoreBundle, report: LearnHarnessImportReport): void {
+	if (!isSafeEntry(entry, report) || !entry.name.endsWith(".json")) return;
+	const raw = readJsonIfPresent(root, ["jobs", entry.name], report);
+	if (raw === undefined) return;
+	if (!isRecord(raw) || !SAFE_JOB_ID_RE.test(String(raw.id ?? "")) || typeof raw.chatId !== "string" || typeof raw.toolCallId !== "string") {
+		report.corruptFilesSkipped++;
+		return;
+	}
+	const job = raw as unknown as JobRecord;
+	tryRun(() => {
+		const nodePath = `jobs/${job.id}`;
+		if (stores.forest.getNode(nodePath)) return;
+		const parentPaths = SAFE_JOB_ID_RE.test(job.chatId) ? [`sessions/${job.chatId}`] : [];
+		stores.forest.upsertNode({
+			path: nodePath,
+			type: "leaf",
+			kind: "job",
+			parent_paths: parentPaths,
+			clear_slot: true,
+			metadata: { jobId: job.id, chatId: job.chatId, toolCallId: job.toolCallId, status: job.status, kind: job.kind, updatedAt: job.updatedAt },
+		});
+		const terminal = job.status === "done" || job.status === "error";
+		stores.forest.appendEntries(nodePath, "lifecycle", [{ id: `${job.id}:0`, content: job, metadata: { step: "create", status: job.status } }], { endEvent: terminal });
+	}, report);
+}
+
+function importJobsDirectory(root: string, stores: LumberJackStoreBundle, report: LearnHarnessImportReport): void {
+	const jobsDir = resolveSafePath(root, ["jobs"], true, report);
+	if (!jobsDir) return;
+	for (const entry of safeReaddir(jobsDir, report)) importOneJobFile(root, entry, stores, report);
 }
 
 function importOneChatFile(
@@ -166,6 +211,7 @@ export function importLearnHarnessData(sourceDir: string, stores: LumberJackStor
 	importPromptDirectory(resolved, stores, report);
 	importSourcesAndGraph(resolved, stores, report);
 	importChatsAndLooseImages(resolved, stores, report);
+	importJobsDirectory(resolved, stores, report);
 	importFlashcardFiles(resolved, stores, report);
 	return report;
 }

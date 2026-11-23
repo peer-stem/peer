@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PluginSubmissionRunner, type SubmissionAttempt, type SubmissionInterceptorRegistration } from "../components/plugin-submission-runner.ts";
-import { SessionModel } from "../components/session-core.ts";
+import { PluginSubmissionRunner, type SubmissionAttempt, type SubmissionInterceptorRegistration } from "../src/client/engine/index.ts";
+import { SessionModel } from "../src/client/engine/index.ts";
 import type { PluginSubmission, PluginSubmissionTarget, PluginSurfaceTarget, LhMessage } from "../src/core/index.ts";
 
 const target: PluginSubmissionTarget = { type: "text", sessionId: "chat", sessionKind: "teaching", channels: ["content"], surfaceTarget: {} as PluginSurfaceTarget };

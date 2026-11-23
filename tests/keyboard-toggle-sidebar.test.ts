@@ -8,7 +8,6 @@ import {
 	kbdEventForAction,
 	KEYBOARD_ACTIONS,
 } from "../src/core/keyboard.ts";
-import { kbdEventForAction as kbdEventForActionFromUi } from "../components/keyboard-shortcuts.tsx";
 
 /**
  * The ⌘B sidebar bug interlude (owner, 2026-09-25): ⌘B did nothing because
@@ -24,10 +23,6 @@ describe("kbdEventForAction — the one spelling for action events", () => {
 	it("dispatch and listen names are the helper's output", () => {
 		assert.equal(kbdEventForAction("toggle-sidebar"), "lh:kbd-toggle-sidebar");
 		assert.equal(kbdEventForAction("sessions-search"), "lh:kbd-sessions-search");
-	});
-
-	it("the dispatcher imports the same helper (no second spelling exists)", () => {
-		assert.equal(kbdEventForActionFromUi, kbdEventForAction);
 	});
 });
 

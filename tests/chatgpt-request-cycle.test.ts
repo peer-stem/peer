@@ -192,7 +192,7 @@ for (const phase of ["first", "internal"] as const) test(`actual ${phase}-cycle 
 for (const admission of ["accepted", "denied"] as const) test(`handler publishes side delivery only after native admission: ${admission}`, async () => {
  epoch++; revision++; background = true; cut = admission === "denied" ? "lease" : "none"; leases = []; fetches = 0; toolFirst = false;
  await refreshChatGPTModels([model]);
- const { chatStore } = await import("../src/store/chats.ts");
+ const { chatStore } = await import("../src/server/stores.ts");
  const { handleChatInput } = await import("../src/server/chat-handler.ts");
  const { runningTurn } = await import("../src/server/turn-runs.ts");
  const { sideConversationEntries } = await import("../src/core/side-chat.ts");

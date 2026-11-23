@@ -22,7 +22,7 @@ import {
 	wrapRegionLabel,
 	zoomRatioOf,
 	LABELS_FADE_RATIO,
-} from "../components/graph-canvas.ts";
+} from "../src/client/engine/index.ts";
 import {
 	sanitizePhysicsTuning,
 	sanitizeRegionTuning,

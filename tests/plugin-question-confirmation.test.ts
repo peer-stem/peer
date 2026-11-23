@@ -1,21 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { capturePluginQuestionDismissal, confirmPluginQuestionDismissal } from "../components/plugin-question-dismissal.ts";
-import { SessionModel } from "../components/session-core.ts";
-import { escAbortTarget } from "../components/chat.tsx";
+import {
+	capturePluginQuestionDismissal,
+	confirmPluginQuestionDismissal,
+	SessionModel,
+} from "../src/client/engine/index.ts";
 import type { LhMessage, PluginQuestionSnapshot } from "../src/core/index.ts";
 
 const snapshot: PluginQuestionSnapshot = { protocolVersion: 2, requiresGrading: true, pluginId: "fixture", typeId: "code", label: "Code", variant: "probe", questionId: "q1", contractVersion: 1, occurrence: { messageId: "a", contentIndex: 0, toolCallId: "call", toolName: "plugin_code" }, input: { question: "Code?", payload: {} }, questionSchema: { type: "object" }, answerSchema: { type: "string" }, showThinking: true, requiresAnswerRefinement: false };
 const record = (saved = snapshot): LhMessage[] => [{ role: "assistant", id: saved.occurrence.messageId, content: [{ type: "toolCall", id: saved.occurrence.toolCallId, name: saved.occurrence.toolName, arguments: saved.input }], lhQuestions: { "0": saved }, stopReason: "toolUse", timestamp: 0 }] as unknown as LhMessage[];
-const none = { abortAsk: false, mermaidFocus: false, planOpen: false, setupOpen: false, pending: false, problem: false, busy: false };
 
-test("canonical plugin questions use the existing question confirmation without outranking layers", () => {
+test("canonical plugin questions capture frozen occurrence identity", () => {
 	const messages = record(); const target = capturePluginQuestionDismissal(messages)!;
 	assert.deepEqual(target, { questionId: "q1", occurrence: snapshot.occurrence });
 	assert.notEqual(target.occurrence, snapshot.occurrence); assert.ok(Object.isFrozen(target)); assert.ok(Object.isFrozen(target.occurrence));
-	assert.equal(escAbortTarget({ ...none, pending: !!target, busy: true }), "question");
-	for (const layer of ["mermaidFocus", "planOpen", "setupOpen"] as const) assert.notEqual(escAbortTarget({ ...none, pending: !!target, [layer]: true }), "question");
-	assert.equal(escAbortTarget({ ...none, pending: true, abortAsk: true }), null);
 });
 
 test("confirmation uses its captured identity, detaches locally BEFORE dismissal and never stops a successor", () => {

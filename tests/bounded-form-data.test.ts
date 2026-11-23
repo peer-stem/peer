@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import { FormBodyLimitError, readBoundedFormData } from "../lib/bounded-form-data.ts";
+import { FormBodyLimitError, readBoundedFormData } from "../src/server/bounded-form-data.ts";
 
 function request(body: BodyInit, contentType: string, contentLength?: string) {
 	return new Request("http://localhost/upload", { method: "POST", body, headers: {

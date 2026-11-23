@@ -8,7 +8,7 @@ import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-s
 import { createPluginHost, isPluginHostError } from "../src/server/plugin-host.ts";
 import { createPluginInference, type PluginInferenceDeps } from "../src/server/plugin-inference.ts";
 import { createPluginAgentService } from "../src/agent/plugin-agents.ts";
-import { createPluginAgentRecordStore } from "../src/store/plugin-agent-records.ts";
+import { createPluginAgentRecordStore } from "../src/server/stores.ts";
 import { createPluginLearningData } from "../src/server/plugin-learning.ts";
 import type { PluginAgentRecord, PluginAgentSnapshot } from "../src/core/plugin-agents.ts";
 import type { PluginNotification } from "../src/core/plugins.ts";
@@ -201,8 +201,8 @@ test("external native backend composes host, inference, persistent managed input
 	assert.deepEqual(waiting.messages.at(-1), { ...asked, thinkingLevel: "off" });
 	assert.equal(calls.length, 1);
 	assert.equal(fs.existsSync(path.join(dataDirectory, "publication.json")), false);
-	const recordFile = path.join(dataDirectory, "agents", `${created.id}.json`);
-	const persistedWaiting = fs.readFileSync(recordFile, "utf8");
+	const agentStore = createPluginAgentRecordStore(path.join(dataDirectory, "agents"));
+	const persistedWaiting = JSON.stringify(agentStore.get(created.id));
 	const usageFile = path.join(dataDirectory, "usage.jsonl");
 	assert.equal(fs.readFileSync(usageFile, "utf8").trim().split("\n").length, 1);
 
@@ -211,7 +211,7 @@ test("external native backend composes host, inference, persistent managed input
 	assert.equal(events.size, 0, "backend host-event listener detaches on disable");
 	await assert.rejects(call("get", { id: created.id }), disabled);
 	await assert.rejects(call("answer", { id: created.id, toolCallId: "ask_fixture", value: "ignored while disabled", requestId: "disabled_answer" }), disabled);
-	assert.equal(fs.readFileSync(recordFile, "utf8"), persistedWaiting);
+	assert.equal(JSON.stringify(agentStore.get(created.id)), persistedWaiting);
 	const reattached = checkpoint("session-state", data => (data as { id: string; status: string }).id === created.id && (data as { status: string }).status === "waiting");
 	await host.setEnabled("integration-fixture", true);
 	await reattached;
@@ -219,7 +219,7 @@ test("external native backend composes host, inference, persistent managed input
 	assert.equal(activationSignals.length, 2);
 	assert.equal((await call("native") as { activations: number }).activations, 2, "native module is cached while context activation is fresh");
 	assert.equal(calls.length, 1, "reactivation must not replay inference or tools");
-	assert.equal(fs.readFileSync(recordFile, "utf8"), persistedWaiting);
+	assert.equal(JSON.stringify(agentStore.get(created.id)), persistedWaiting);
 	assert.equal((await call("list") as PluginAgentSnapshot[]).length, 1);
 	assert.deepEqual((await call("get", { id: created.id }) as PluginAgentSnapshot).pending, waiting.pending);
 	await assert.rejects(call("answer", { id: created.id, toolCallId: "ask_fixture", value: 42, requestId: "invalid_answer" }), /Invalid answer/);
@@ -236,7 +236,7 @@ test("external native backend composes host, inference, persistent managed input
 	assert.deepEqual(final.pending, []);
 	assert.deepEqual(final.acceptedInputs, ["send_first", "answer_once"]);
 	assert.equal(final.messages.filter(message => message.role === "toolResult").length, 2);
-	assert.deepEqual(fs.readdirSync(path.join(dataDirectory, "agents")), [`${created.id}.json`]);
+	assert.deepEqual(agentStore.list().map(r => r.id), [created.id]);
 	const artifact = { body: "Fixture artifact body", sourceTitles: [learningRecord.title] };
 	assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dataDirectory, "publication.json"), "utf8")), artifact);
 	assert.equal(fs.readFileSync(path.join(dataDirectory, "publications.jsonl"), "utf8"), `${JSON.stringify(artifact)}\n`);
@@ -245,7 +245,7 @@ test("external native backend composes host, inference, persistent managed input
 	assert.deepEqual(rows.map(row => row.usage), [usage, usage]);
 	assert.deepEqual(calls.map(entry => entry.background), [true, false]);
 	assert.equal(calls.length, 2, "publish endRun prevents an automatic third model call");
-	const checkpointed = JSON.parse(fs.readFileSync(recordFile, "utf8")) as PluginAgentRecord;
+	const checkpointed = agentStore.get(created.id)!;
 	assert.equal(checkpointed.status, "idle");
 	assert(checkpointed.messages.some(message => message.role === "toolResult" && message.toolCallId === "publish_fixture" && !message.isError));
 	await call("answer", { id: created.id, toolCallId: "ask_fixture", value: "retry ignored", requestId: "answer_once" });

@@ -3,15 +3,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, beforeEach, describe, it } from "node:test";
-import React from "react";
-import { renderWithInteractionLayers as renderToStaticMarkup } from "./interaction-layer-render.tsx";
 import { createCanvas } from "@napi-rs/canvas";
 import { createFauxCore } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ChatStore, JobStore } from "../src/core/ports.ts";
 import type { FileAccessPolicy } from "../src/agent/tools/file-access.ts";
 
-(globalThis as Record<string, unknown>).React = React;
 const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "lh-folder-access-")));
 const home = path.join(root, "home");
 const a = path.join(home, "StudyA");
@@ -59,7 +56,6 @@ const { practiceTools } = await import("../src/agent/tools/practice.ts");
 const { parseAgentSettingsBody } = await import("../src/server/settings-body.ts");
 const { sanitizeUserSettings } = await import("../src/core/settings.ts");
 const { expandFolder } = await import("../src/server/file-access.ts");
-const { AgentSection, composeAddFolder, composeRemoveFolder, composeFileRestriction, isFolderEntry } = await import("../components/settings/agent-section.tsx");
 let policy: FileAccessPolicy = { restricted: false, folders: [] };
 beforeEach(() => { policy = { restricted: false, folders: [] }; setFileAccessPolicy(() => policy); });
 after(async () => {
@@ -240,8 +236,8 @@ describe("live policy and all learner-source surfaces", () => {
 		assert.equal((await readTool.execute!("x", { path: path.join(a, "image.png") })).content[1]?.type, "image");
 	});
 	it("queued PDF/annotation starts use fresh permissions, preserving raw inputs and replay IDs", async () => {
-		const { chatStore } = await import("../src/store/chats.ts");
-		const { jobStore } = await import("../src/store/jobs.ts");
+		const { chatStore } = await import("../src/server/stores.ts");
+		const { jobStore } = await import("../src/server/stores.ts");
 		const { jobTools } = await import("../src/agent/tools/jobs.ts");
 		const { createJobRunner } = await import("../src/agent/subagents/runner.ts");
 		const faux = createFauxCore({ tokenSize: { min: 64, max: 64 } });
@@ -296,35 +292,5 @@ describe("settings parsing and UI", () => {
 		assert.equal(expandFolder("~", home), home);
 		assert.equal(expandFolder("~/StudyA", home), a);
 		assert.throws(() => expandFolder("relative"), /Invalid file-access/);
-	});
-	it("UI composition preserves the switch, saved roots and unrelated agent preferences", () => {
-		assert.ok(isFolderEntry("~/Study")); assert.ok(isFolderEntry("C:\\Users\\learner")); assert.ok(!isFolderEntry("relative"));
-		const one = composeAddFolder({ tools: { pdf: false }, graphTools: { enabled: false } }, " ~/Study ");
-		assert.deepEqual(one.fileAccess, { restricted: false, folders: ["~/Study"] });
-		const on = composeFileRestriction(one, true);
-		assert.deepEqual(composeAddFolder(on, "~/Study"), on);
-		assert.deepEqual(composeAddFolder(on, "relative"), on);
-		const empty = composeRemoveFolder(on, "~/Study");
-		assert.deepEqual(empty.fileAccess, { restricted: true, folders: [] });
-		assert.deepEqual(empty.tools, one.tools);
-		assert.deepEqual(empty.graphTools, one.graphTools);
-		assert.deepEqual(composeFileRestriction(on, false).fileAccess, { restricted: false, folders: ["~/Study"] });
-	});
-	it("SSR makes OFF, empty ON, editable folders and fail-closed errors explicit", () => {
-		const render = (agent?: Parameters<typeof AgentSection>[0]["agent"], fileAccessError?: string) => renderToStaticMarkup(React.createElement(AgentSection, { agent, fileAccessError, models: undefined, graph: undefined, compaction: undefined, onSectionChange: () => true, onModelsChange: () => {}, onCompactionChange: () => true }));
-		const off = render();
-		assert.match(off, /Broad local source access/);
-		assert.match(off, /aria-checked="false"[^>]*aria-label="Restrict to listed folders"/);
-		const empty = render({ fileAccess: { restricted: true, folders: [] } });
-		assert.match(empty, /Restricted: no folders allowed/);
-		assert.match(empty, /aria-checked="true"[^>]*aria-label="Restrict to listed folders"/);
-		const populated = render({ fileAccess: { restricted: true, folders: [a] } });
-		assert.match(populated, />Only listed folders and subfolders\.<\/span>/);
-		assert.doesNotMatch(populated, /Protected locations remain blocked/);
-		assert.match(populated, /aria-checked="true"[^>]*aria-label="Restrict to listed folders"/);
-		assert.match(render({ fileAccess: { restricted: false, folders: [a] } }), /file-access-remove/);
-		const failed = render(undefined, "File-access configuration error: blocked");
-		assert.match(failed, /file-access-config-error/);
-		assert.match(failed, /aria-checked="true"[^>]*aria-label="Restrict to listed folders"/);
 	});
 });

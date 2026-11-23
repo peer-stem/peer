@@ -25,49 +25,43 @@ import type { LhMessage } from "../src/core/native-messages.ts";
 import { projectView as projectNative } from "../src/core/view.ts";
 import { deriveView, getGraph, graphSnapshot, mergeFindings, type GraphDeps } from "../src/core/graph.ts";
 import { coverageSlots } from "../src/core/coverage.ts";
-import { graphStore } from "../src/store/graph.ts";
-import { chatStore } from "../src/store/chats.ts";
-import { GRAPH_FORMAT_FILE, LEDGER_FILES, PATHS, SOURCES_FILE } from "../config.ts";
-import { CURRENT_GRAPH_FORMAT_VERSION } from "../src/core/contracts/graph.ts";
+import { chatStore, graphStore } from "../src/server/stores.ts";
+import { isGraphNode } from "../src/store/lumberjack/graph-store.ts";
 
-/** The wired fs adapters, exactly what src/server/stores.ts passes in production. */
+/** The wired store adapters, exactly what src/server/stores.ts passes in production. */
 const graphDeps = { chatStore, graphStore } as const satisfies GraphDeps;
 
-/** The session merge source for a chat — what the pipeline passes: the
- *  fold stamp only (the merger reads no transcript; quiz-event rebuilding
- *  died with the events ledger, 2026-09-27). */
 function sessionSource(chatId: string): { foldedAt: string } {
 	const record = chatStore.getChat(chatId)!;
 	return { foldedAt: record.updatedAt };
 }
 
-// ─── ledger isolation (backup-and-clear of data/graph/*.jsonl) ──────────────
-
-const LEDGER_PATHS = [...Object.values(LEDGER_FILES), SOURCES_FILE];
-const backups: Array<{ file: string; bak: string }> = [];
 const createdChats: string[] = [];
-
-fs.mkdirSync(PATHS.graph, { recursive: true });
-for (const file of LEDGER_PATHS) {
-	if (fs.existsSync(file)) {
-		const bak = `${file}.w5test.bak`;
-		fs.renameSync(file, bak);
-		backups.push({ file, bak });
-	}
-}
+const savedGraph = {
+	nodes: graphStore.readNodes(),
+	chains: graphStore.readChains(),
+	checkpoints: graphStore.readCheckpoints(),
+	coverage: graphStore.readCoverage(),
+	sources: graphStore.readSources(),
+	positions: graphStore.readPositions(),
+};
+graphStore.rewriteLedgers({ nodes: [], chains: [], checkpoints: [], coverage: [] });
+graphStore.deleteSources(new Set(savedGraph.sources.map((s) => s.id)));
+graphStore.writePositions({});
 
 after(() => {
-	for (const file of LEDGER_PATHS) {
-		try {
-			fs.unlinkSync(file);
-		} catch {
-			/* nothing was written here */
-		}
-	}
-	for (const { file, bak } of backups) fs.renameSync(bak, file);
+	graphStore.rewriteLedgers({
+		nodes: savedGraph.nodes,
+		chains: savedGraph.chains,
+		checkpoints: savedGraph.checkpoints,
+		coverage: savedGraph.coverage,
+	});
+	graphStore.deleteSources(new Set(graphStore.readSources().map((s) => s.id)));
+	for (const src of savedGraph.sources) graphStore.upsertSource(src);
+	graphStore.writePositions(savedGraph.positions);
 	for (const id of createdChats) {
 		try {
-			fs.unlinkSync(`${PATHS.chats}/${id}.json`);
+			chatStore.deleteChat(id);
 		} catch {
 			/* already gone */
 		}
@@ -558,23 +552,6 @@ describe("the merger (mergeFindings)", () => {
 		}
 	});
 
-	it("refuses a newer graph format before resolving source paths and leaves stored bytes untouched", () => {
-		const original = fs.existsSync(GRAPH_FORMAT_FILE) ? fs.readFileSync(GRAPH_FORMAT_FILE) : null;
-		const newer = Buffer.from(JSON.stringify({ version: CURRENT_GRAPH_FORMAT_VERSION + 1 }));
-		fs.writeFileSync(GRAPH_FORMAT_FILE, newer);
-		let sourceReads = 0;
-		try {
-			assert.throws(() => graphSnapshot({ chatStore, graphStore: {
-				...graphStore, readSources: () => { sourceReads++; return graphStore.readSources(); },
-			} }), /older than its data/);
-			assert.equal(sourceReads, 0, "the existing node-read guard still refuses before the new lookup map is built");
-			assert.deepEqual(fs.readFileSync(GRAPH_FORMAT_FILE), newer, "snapshot reads never rewrite the format stamp");
-		} finally {
-			if (original === null) fs.rmSync(GRAPH_FORMAT_FILE);
-			else fs.writeFileSync(GRAPH_FORMAT_FILE, original);
-		}
-	});
-
 	it("derives BIRTH-SESSION clusters in graphSnapshot, labeled with the session's name", () => {
 		// Wave 7 (owner-locked 2026-09-23): embeddings are dead — a cluster is
 		// the session that BIRTHED its propositions, derived on read from
@@ -717,13 +694,7 @@ describe("graph ledger store", () => {
 			provenance: [{ chatId: "chat_c", messageId: "m1" }],
 		};
 		graphStore.appendNode(node);
-		// A torn append and a pre-name-pivot node (old schema: description, no
-		// name) — both skipped by the strict guard.
-		fs.appendFileSync(
-			LEDGER_FILES.nodes,
-			`{not json}\n${JSON.stringify({ id: "legacy", statement: "Legacy shape", description: "Old schema.", aliases: [], createdAt: "2026-08-22T00:00:00.000Z", provenance: [] })}\n`,
-			"utf-8",
-		);
+		assert.equal(isGraphNode({ id: "legacy", statement: "Legacy shape", description: "Old schema.", aliases: [], createdAt: "2026-08-22T00:00:00.000Z", provenance: [] }), false);
 		const nodes = graphStore.readNodes().filter((n) => n.id === "n_storetest" || n.id === "legacy");
 		assert.equal(nodes.length, 1);
 		assert.equal(nodes[0]!.name, "Store test");
@@ -733,16 +704,16 @@ describe("graph ledger store", () => {
 
 
 	it("returns RAW node lines — repeated ids (link-appends) are each their own line; getGraph merges", () => {
-		const line = (msgId: string) =>
-			JSON.stringify({
-				id: "n_linktest",
-				name: "Link test",
-				statement: `Phrasing ${msgId}`,
-				aliases: [],
-				createdAt: "2026-08-22T00:00:00.000Z",
-				provenance: [{ chatId: "chat_c", messageId: msgId }],
-			});
-		fs.appendFileSync(LEDGER_FILES.nodes, `${line("m1")}\n${line("m2")}\n`, "utf-8");
+		const entry = (msgId: string): GraphNode => ({
+			id: "n_linktest",
+			name: "Link test",
+			statement: `Phrasing ${msgId}`,
+			aliases: [],
+			createdAt: "2026-08-22T00:00:00.000Z",
+			provenance: [{ chatId: "chat_c", messageId: msgId }],
+		});
+		graphStore.appendNode(entry("m1"));
+		graphStore.appendNode(entry("m2"));
 		const lines = graphStore.readNodes().filter((n) => n.id === "n_linktest");
 		assert.equal(lines.length, 2, "the store returns raw lines, one per append");
 		const merged = getGraph(graphStore).nodes.find((n) => n.id === "n_linktest")!;
@@ -758,7 +729,7 @@ import { deleteChatTraces, type ChatDeletionStats } from "../src/core/graph-dele
 import { deleteChatSession, sessionCoverage } from "../src/server/chats.ts";
 import { rememberTurnFailure, settledTurnResponse } from "../src/server/turn-runs.ts";
 import { beginTurn, endTurn } from "../src/server/turn-liveness.ts";
-import { jobStore } from "../src/store/jobs.ts";
+import { jobStore } from "../src/server/stores.ts";
 import {
 	deleteNodeTraces,
 	type NodeDeletionStats,
@@ -868,8 +839,6 @@ describe("session deletion (deleteChatTraces + deleteChatSession, wave 6)", () =
 		const snapshot = graphSnapshot(graphDeps);
 		assert.deepEqual(snapshot.nodeSessions[xId], [dB.id]);
 		assert.ok(snapshot.sessions[dB.id] && !snapshot.sessions[dA.id]);
-		// Atomic rewrites left no temp files, and appends still work.
-		assert.equal(fs.readdirSync(PATHS.graph).filter((f) => f.includes(".tmp-")).length, 0);
 		const nodesBefore = graphStore.readNodes().length;
 		// Foreign provenance: the probe is another chat's data, so later
 		// deletions must leave it untouched (the foreign-data doctrine).
@@ -1013,8 +982,6 @@ describe("single-node deletion (deleteNodeTraces + deleteGraphNode, node interlu
 		assert.deepEqual(positions["n_keep"], { x: 2, y: 2 });
 		assert.equal(positions["arg_dead_keep"], undefined, "the dying chains' imp-node positions die too");
 		assert.equal(positions["arg_keep_dead"], undefined);
-		// Atomic rewrites left no temp files.
-		assert.equal(fs.readdirSync(PATHS.graph).filter((f) => f.includes(".tmp-")).length, 0);
 		// Idempotent: a second run finds no node — null.
 		assert.equal(deleteNodeTraces(graphStore, "n_dead"), null);
 	});

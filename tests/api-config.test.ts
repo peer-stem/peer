@@ -15,7 +15,6 @@ import {
 	reportServerWarn,
 	safeRequestPath,
 } from "../src/api/main.ts";
-import { RECORDED_DIFFERENCES, auditRecordedDifferences } from "./api-parity-compare.ts";
 import { WORKTREE_ROOT, createScratchDir } from "./api-test-helpers.ts";
 
 const MAIN_ENTRY = path.join(WORKTREE_ROOT, "src", "api", "main.ts");
@@ -162,31 +161,4 @@ test("typed main.ts reporters format structured events and strip URL query strin
 	assert.match(String(forced.message), /\[api\] Forced process exit after 2500ms shutdown deadline\./);
 	assert.equal("ts" in forced, false);
 	assert.equal("msg" in forced, false);
-});
-
-test("RECORDED_DIFFERENCES marks all 8 rules approved and auditRecordedDifferences flags custom unapproved rules (D4)", () => {
-	assert.equal(RECORDED_DIFFERENCES.length, 8);
-	for (const rule of RECORDED_DIFFERENCES) {
-		assert.equal(rule.approved, true, `Expected ${rule.id} to have approved: true`);
-	}
-	const observedAll = RECORDED_DIFFERENCES.map((r) => ({
-		ruleId: r.id,
-		request: "GET /api/graph",
-		nextSummary: "next",
-		apiSummary: "api",
-	}));
-	assert.deepEqual(auditRecordedDifferences(observedAll).unapprovedRuleIds, []);
-	const customRules = [
-		...RECORDED_DIFFERENCES,
-		{ id: "custom-unapproved", summary: "pending", specRef: "SPEC", approved: false },
-	];
-	const customObs = [
-		...observedAll,
-		{ ruleId: "custom-unapproved", request: "GET /api/x", nextSummary: "a", apiSummary: "b" },
-	];
-	assert.deepEqual(auditRecordedDifferences(customObs, customRules).unapprovedRuleIds, ["custom-unapproved"]);
-	assert.throws(
-		() => auditRecordedDifferences([{ ruleId: "unknown-rule", request: "GET /api/x", nextSummary: "a", apiSummary: "b" }]),
-		/Unrecorded parity difference/,
-	);
 });

@@ -17,7 +17,8 @@ delete process.env.LH_DESKTOP_SERVER;
 delete process.env.LH_DESKTOP_API_SECRET;
 fs.writeFileSync(process.env.LH_AUTH_FILE, "{}");
 
-const { PUT } = await import("../app/api/settings/[section]/route.ts");
+const { PUT } = await import("../src/api/handlers/settings/[section]/route.ts");
+const { readSettings } = await import("../src/server/stores.ts");
 
 after(() => fs.rmSync(directory, { recursive: true, force: true }));
 
@@ -35,7 +36,7 @@ function put(section: string, body: unknown, headers: Record<string, string> = {
 test("a speech write with no Origin is refused and stores nothing", async () => {
 	const response = await put("speech", SPEECH);
 	assert.equal(response.status, 403);
-	assert.equal(fs.existsSync(path.join(directory, "settings.json")), false);
+	assert.equal(readSettings(), null);
 });
 
 test("a speech write from another origin is refused", async () => {
@@ -46,8 +47,8 @@ test("a speech write from another origin is refused", async () => {
 test("the app's own same-origin speech write is stored", async () => {
 	const response = await put("speech", SPEECH, { Origin: "http://localhost:3000" });
 	assert.equal(response.status, 200);
-	const stored = JSON.parse(fs.readFileSync(path.join(directory, "settings.json"), "utf-8")) as { speech?: { endpoint?: string } };
-	assert.equal(stored.speech?.endpoint, SPEECH.endpoint);
+	const stored = readSettings();
+	assert.equal(stored?.speech?.endpoint, SPEECH.endpoint);
 });
 
 test("other sections keep their own gate: no Origin is still accepted", async () => {

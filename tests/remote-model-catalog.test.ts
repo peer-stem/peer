@@ -18,7 +18,11 @@ after(() => fs.rmSync(scratch, { recursive: true, force: true }));
 const { modelCatalog, validateModelsSettings } = await import("../src/server/model-catalog.ts");
 const { initializeModelCatalog, refreshModelCatalog } = await import("../src/server/remote-model-catalog.ts");
 const { piEngineForSpec, piModels } = await import("../src/agent/models.ts");
-const { writeSettings, readSettings } = await import("../src/store/settings.ts");
+const { closeFallbackLumberJackBundle, ensureActiveLumberJackBundle, writeSettings, readSettings } = await import("../src/server/stores.ts");
+const readCatalogSnapshotText = (): string | null => {
+	const snap = ensureActiveLumberJackBundle().forest.getNode("config/model-catalog");
+	return snap && snap.slot !== undefined ? JSON.stringify(snap.slot) : null;
+};
 const row = {
 	id: "test-new-vision", name: "Test vision", api: "openai-responses", provider: "openai", baseUrl: "https://api.openai.com/v1",
 	input: ["text", "image"], reasoning: true, thinkingLevelMap: { minimal: null, high: "high" },
@@ -39,6 +43,7 @@ const xai = {
 };
 
 function startupModels(snapshotPath: string) {
+	closeFallbackLumberJackBundle();
 	const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
 		let fetches = 0;
 		globalThis.fetch = () => { fetches++; throw new Error("startup must not fetch"); };
@@ -73,7 +78,7 @@ test("manual catalog refresh extends picker and engine, keeps routes and survive
 	initializeModelCatalog();
 	assert.equal(await refreshModelCatalog(), "no-providers");
 	assert.equal(fetchMock.mock.callCount(), 0);
-	assert.equal(fs.existsSync(snapshot), false);
+	assert.equal(readCatalogSnapshotText(), null);
 
 	process.env.OPENAI_API_KEY = "synthetic-openai-test-key";
 	process.env.RADIUS_API_KEY = "synthetic-radius-test-key";
@@ -108,8 +113,8 @@ test("manual catalog refresh extends picker and engine, keeps routes and survive
 	assert.equal(model.thinkingLevelMap?.minimal, null);
 	assert.deepEqual(validateModelsSettings({ vision: { model: { provider: "openai", id: row.id } } }), { ok: true });
 	assert.deepEqual(readSettings(), settings);
-	const good = fs.readFileSync(snapshot, "utf-8");
-	assert.ok(!good.includes("never-retain") && !good.includes("synthetic-openai"));
+	const good = readCatalogSnapshotText()!;
+	assert.ok(good && !good.includes("never-retain") && !good.includes("synthetic-openai"));
 
 	for (const fail of [
 		() => new Response(null, { status: 503 }),
@@ -123,7 +128,7 @@ test("manual catalog refresh extends picker and engine, keeps routes and survive
 	]) {
 		pending.push(fail);
 		await assert.rejects(refreshModelCatalog());
-		assert.equal(fs.readFileSync(snapshot, "utf-8"), good);
+		assert.equal(readCatalogSnapshotText(), good);
 		assert.equal(collection.getModel("openai", row.id), model);
 	}
 	pending.push(() => new Response(null, { status: 404 }));
@@ -151,7 +156,7 @@ test("wire behavior survives validated refresh and offline restore; mixed shard 
 	});
 	assert.equal(await refreshModelCatalog(), "updated");
 	assert.deepEqual(requests.sort(), ["baseten", "xai"]);
-	const good = fs.readFileSync(snapshot, "utf-8");
+	const good = readCatalogSnapshotText()!;
 	const live = [baseten, xai].map(({ provider, id }) => piModels().getModel(provider, id));
 	const [, restoredBaseten, restoredXai] = startupModels(scratch);
 	assert.deepEqual(restoredBaseten.compat, baseten.compat);
@@ -165,7 +170,7 @@ test("wire behavior survives validated refresh and offline restore; mixed shard 
 	requests.length = 0;
 	await assert.rejects(refreshModelCatalog(), /Unsupported pi.dev model template/);
 	assert.deepEqual(requests.sort(), ["baseten", "xai"]);
-	assert.equal(fs.readFileSync(snapshot, "utf-8"), good);
+	assert.equal(readCatalogSnapshotText(), good);
 	assert.deepEqual([baseten, xai].map(({ provider, id }) => piModels().getModel(provider, id)), live);
 	assert.equal(piModels().getModel("xai", "test-xai-pending"), undefined);
 
@@ -203,6 +208,6 @@ test("wire behavior survives validated refresh and offline restore; mixed shard 
 		}
 	}
 
-	fs.writeFileSync(snapshot, "invalid json");
+	ensureActiveLumberJackBundle().forest.upsertNode({ path: "config/model-catalog", type: "leaf", kind: "config", slot: "invalid json" });
 	assert.deepEqual(startupModels(scratch), [null, null, null]);
 });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, it } from "node:test";
-import { POST } from "../app/api/graph/import/route.ts";
+import { POST } from "../src/api/handlers/graph/import/route.ts";
 import { extraction, sourceDirectory } from "../src/server/index.ts";
 import { ModelsNotConfiguredError, ProviderKeyMissingError } from "../src/core/settings.ts";
 import { createExtractionPipeline, NotesImportError } from "../src/agent/subagents/extraction.ts";
@@ -9,7 +9,7 @@ import { stores } from "../src/server/stores.ts";
 import type { GraphStore } from "../src/core/ports.ts";
 import type { GraphNode, GraphChain, NotesSource, SessionCheckpoint } from "../src/core/contracts.ts";
 import { tinyPdf } from "./helpers/tiny-pdf.ts";
-import { MAX_IMPORT_BODY_BYTES, MAX_IMPORT_BYTES } from "../lib/notes-import-limits.ts";
+import { MAX_IMPORT_BODY_BYTES, MAX_IMPORT_BYTES } from "../src/core/notes-import-limits.ts";
 
 const original = extraction.importNotes;
 after(() => { extraction.importNotes = original; });
@@ -22,17 +22,27 @@ function request(names: string[]) {
 it("route keeps three-worker batching, request positions and mixed per-file outcomes/config details", async () => {
 	let active = 0;
 	let peak = 0;
+	let releaseSlow!: () => void;
+	const firstFastDone = new Promise<void>((resolve) => { releaseSlow = resolve; });
 	const outcomeOf: Record<string, NotesImportError["outcome"]> = { "failed.md": "failed", "partial.md": "partial", "aborted.md": "aborted", "busy.md": "busy" };
 	extraction.importNotes = async ({ filePath }) => {
 		active++; peak = Math.max(peak, active);
 		try {
-			await new Promise((resolve) => setTimeout(resolve, filePath === "slow.md" ? 25 : 1));
+			if (filePath === "slow.md") {
+				await firstFastDone;
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			} else {
+				await new Promise((resolve) => setTimeout(resolve, 1));
+			}
 			if (filePath === "models.md") throw new ModelsNotConfiguredError(["cheap"]);
 			if (filePath === "key.md") throw new ProviderKeyMissingError("openai", ["cheap"]);
 			if (filePath in outcomeOf) throw new NotesImportError(outcomeOf[filePath]!, { nodes: 2, chains: 1 }, `synthetic ${filePath}`);
 			if (filePath === "unknown.md") throw new Error("synthetic unknown error");
 			return { nodes: 0, chains: 0 };
-		} finally { active--; }
+		} finally {
+			active--;
+			if (filePath !== "slow.md") releaseSlow();
+		}
 	};
 	const names = ["slow.md", "same.md", "same.md", "failed.md", "partial.md", "aborted.md", "busy.md", "models.md", "key.md", "unknown.md"];
 	const response = await POST(request(names));

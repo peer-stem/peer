@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { Format } from "typebox/format";
 import { Settings } from "typebox/system";
 import { Type } from "typebox";
-import { SessionModel } from "../components/session-core.ts";
+import { SessionModel } from "../src/client/engine/index.ts";
 import { copyImmutableData, ImmutableReadCache } from "../src/core/immutable-data.ts";
 import { pluginQuestionCallsOf, pendingPluginQuestionOf, type LhMessage } from "../src/core/native-messages.ts";
 import { projectView } from "../src/core/view.ts";

@@ -22,9 +22,8 @@ import { after, describe, it } from "node:test";
 const TMP_DATA = fs.mkdtempSync(path.join(os.tmpdir(), "lh-birth-stamp-"));
 process.env.LH_DATA_DIR = TMP_DATA;
 
-const { POST } = await import("../app/api/chats/route.ts");
-const { readSettings, writeSettings } = await import("../src/store/settings.ts");
-const { chatStore } = await import("../src/store/chats.ts");
+const { POST } = await import("../src/api/handlers/chats/route.ts");
+const { ensureActiveLumberJackBundle, readSettings, writeSettings, chatStore } = await import("../src/server/stores.ts");
 
 after(() => {
 	fs.rmSync(TMP_DATA, { recursive: true, force: true });
@@ -61,7 +60,7 @@ describe("POST /api/chats — the birth stamp", () => {
 	});
 
 	it("no strong slot configured (fresh BYOK boot) → NO stamp; the turn gate refuses downstream", async () => {
-		fs.rmSync(path.join(TMP_DATA, "settings.json"), { force: true });
+		ensureActiveLumberJackBundle().forest.deleteNode("config/settings");
 		assert.equal(readSettings(), null);
 		const res = await post();
 		assert.equal(res.status, 200);

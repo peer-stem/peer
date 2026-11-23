@@ -22,7 +22,7 @@ fs.writeFileSync(path.join(location, "backend.cjs"), "exports.activate = ctx => 
 const { getPluginHost } = await import("../src/server/plugins.ts");
 const { handleChatRequest } = await import("../src/server/chat-handler.ts");
 const { createTeacherAgent } = await import("../src/agent/teacher-agent.ts");
-const { chatStore } = await import("../src/store/chats.ts");
+const { chatStore } = await import("../src/server/stores.ts");
 const { isTurnRunning } = await import("../src/server/turn-liveness.ts");
 const { abortTurn, runningTurn, turnFailure } = await import("../src/server/turn-runs.ts");
 const { pendingPluginQuestionOf, newUserMessage } = await import("../src/core/native-messages.ts");

@@ -865,7 +865,8 @@ export function questionCallsOf(messages: readonly LhMessage[]): QuestionCall[] 
 		if (assistant.role !== "assistant") continue;
 		const answered = resultIdsFrom(messages.slice(mi + 1));
 		const calls: QuestionCall[] = [];
-		for (const [contentIndex, block] of assistant.content.entries()) {
+		const blocks = Array.isArray(assistant.content) ? assistant.content : [];
+		for (const [contentIndex, block] of blocks.entries()) {
 			if (block.type !== "toolCall" || !(QUESTION_TOOLS as readonly string[]).includes(block.name) || answered.has(block.id)) continue;
 			if (readPluginQuestionMessageAnnotation(assistant, contentIndex).status !== "absent") continue;
 			const status = assistant.stopReason === "error" || assistant.stopReason === "aborted" ? "failed"
@@ -901,7 +902,7 @@ export function probeDoneResultIds(messages: readonly LhMessage[]): Set<string> 
 	const results = new Set<string>();
 	for (const m of messages) {
 		if (m.role === "assistant") {
-			if (m.stopReason === "error" || m.stopReason === "aborted") continue;
+			if (m.stopReason === "error" || m.stopReason === "aborted" || !Array.isArray(m.content)) continue;
 			for (const block of m.content) {
 				if (block.type === "toolCall" && block.name === "probe_done") calls.add(block.id);
 			}

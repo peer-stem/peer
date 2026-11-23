@@ -7,15 +7,22 @@ import type { GraphNode, SourceDirectory } from "../src/core/index.ts";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "lh-source-deletion-"));
 process.env.LH_DATA_DIR = root; process.env.LH_AUTH_FILE = path.join(root, "auth.json");
 fs.writeFileSync(process.env.LH_AUTH_FILE, "{}\n");
-const { DELETE } = await import("../app/api/graph/sources/route.ts");
-const { stores } = await import("../src/server/stores.ts");
+const { DELETE } = await import("../src/api/handlers/graph/sources/route.ts");
+const { ensureActiveLumberJackBundle, resetActiveLumberJackForTests, stores } = await import("../src/server/stores.ts");
 const { sourceDirectory } = await import("../src/server/source-organization.ts");
-const { SOURCE_ORGANIZATION_FILE } = await import("../config.ts");
 const { beginTurn, endTurn } = await import("../src/server/turn-liveness.ts");
 const { sessionCoverage } = await import("../src/server/chats.ts");
 const { coverageSlots } = await import("../src/core/coverage.ts");
-beforeEach(() => { fs.rmSync(root, { recursive: true, force: true }); fs.mkdirSync(root); fs.writeFileSync(process.env.LH_AUTH_FILE!, "{}\n"); });
-after(() => fs.rmSync(root, { recursive: true, force: true }));
+beforeEach(async () => {
+	await resetActiveLumberJackForTests();
+	fs.rmSync(root, { recursive: true, force: true });
+	fs.mkdirSync(root);
+	fs.writeFileSync(process.env.LH_AUTH_FILE!, "{}\n");
+});
+after(async () => {
+	await resetActiveLumberJackForTests();
+	fs.rmSync(root, { recursive: true, force: true });
+});
 const remove = (sourceIds: string[], folderIds: string[] = [], deleteSessions = false) => DELETE(new Request("http://localhost/api/graph/sources", { method: "DELETE", body: JSON.stringify({ sourceIds, folderIds, deleteSessions }) }));
 function book(id: string) { stores.graphStore.upsertSource({ id, filePath: `${id}.md`, importedAt: "2026-10-30" }); }
 function node(id: string, sources: string[], aliases: string[] = []): GraphNode {
@@ -109,7 +116,7 @@ it("a swallowed session-unlink failure retains placement and folders, reports pa
 	const before = stores.chatStore.getChat(chat.id);
 	stores.graphStore.appendNode(node("chat_unique", [chat.id])); book("zero");
 	folders({ [chat.id]: { folderId: "inner" }, zero: { folderId: "inner" } });
-	const organization = fs.readFileSync(SOURCE_ORGANIZATION_FILE, "utf8");
+	const organization = JSON.stringify(ensureActiveLumberJackBundle().forest.getNode("config/source-organization")?.slot);
 	const deleteChat = stores.chatStore.deleteChat;
 	try {
 		stores.chatStore.deleteChat = () => false; // the store swallows unlink/I/O errors
@@ -117,7 +124,7 @@ it("a swallowed session-unlink failure retains placement and folders, reports pa
 		assert.equal(response.status, 500);
 		assert.match((await response.json()).error, /Some entries may already have been removed/);
 		assert.deepEqual(stores.chatStore.getChat(chat.id), before);
-		assert.equal(fs.readFileSync(SOURCE_ORGANIZATION_FILE, "utf8"), organization, "no placement or selected folder is discarded on failed record removal");
+		assert.equal(JSON.stringify(ensureActiveLumberJackBundle().forest.getNode("config/source-organization")?.slot), organization, "no placement or selected folder is discarded on failed record removal");
 		assert.deepEqual(stores.graphStore.readNodes(), [], "earlier graph writes are honest partial progress");
 		assert.deepEqual(stores.graphStore.readSources(), [], "earlier imported-record removal is also partial progress");
 	} finally { stores.chatStore.deleteChat = deleteChat; }
@@ -152,8 +159,9 @@ it("invalid and oversized bodies and corrupt organization refuse before destruct
 		assert.equal((await DELETE(new Request("http://localhost/api/graph/sources", { method: "DELETE", body }))).status, 400);
 		assert.equal(stores.graphStore.readSources().length, 1);
 	}
-	fs.writeFileSync(SOURCE_ORGANIZATION_FILE, "{"); assert.equal((await remove(["a"])).status, 500);
-	assert.equal(fs.readFileSync(SOURCE_ORGANIZATION_FILE, "utf8"), "{"); assert.equal(stores.graphStore.readSources().length, 1);
+	ensureActiveLumberJackBundle().forest.upsertNode({ path: "config/source-organization", type: "leaf", kind: "config", slot: "{" });
+	assert.equal((await remove(["a"])).status, 500);
+	assert.equal(ensureActiveLumberJackBundle().forest.getNode("config/source-organization")?.slot, "{"); assert.equal(stores.graphStore.readSources().length, 1);
 });
 it("a batch rewrites graph ledgers and source metadata once, including opted-in sessions, with shared support evaluated across the full selection", async () => {
 	const ids = Array.from({ length: 40 }, (_, i) => `book_${i}`); for (const id of [...ids, "keeper"]) book(id);

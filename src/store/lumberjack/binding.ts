@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createLumberJackObjectsClient, type LumberJackObjectsClient } from "./objects-client.ts";
 
 export const LJ_STATUS = {
@@ -128,14 +129,27 @@ export interface LumberJackForestMethods {
 const DEFAULT_PERSIST_ROOT = process.env.PEER_PERSIST_ROOT ?? "/usr/lib/persist/peer";
 export const DEFAULT_ADDON_PATH = path.join(DEFAULT_PERSIST_ROOT, "build", "lumberjack", "lumberjack_peer.node");
 
-let cachedAddon: RawLumberJackAddon | null = null;
+function resolveRuntimeAddonPath(): string {
+	const envOverride = process.env.PEER_LUMBERJACK_ADDON_PATH?.trim();
+	if (envOverride) return path.resolve(envOverride);
+	const localBundled = path.join(path.dirname(fileURLToPath(import.meta.url)), "native", "lumberjack_peer.node");
+	if (fs.existsSync(localBundled)) return localBundled;
+	return DEFAULT_ADDON_PATH;
+}
 
-export function loadLumberJackAddon(addonPath = DEFAULT_ADDON_PATH): RawLumberJackAddon {
-	if (cachedAddon && addonPath === DEFAULT_ADDON_PATH) return cachedAddon;
+let cachedAddon: RawLumberJackAddon | null = null;
+let cachedAddonKey = "";
+
+export function loadLumberJackAddon(addonPath?: string): RawLumberJackAddon {
+	const targetPath = addonPath ?? resolveRuntimeAddonPath();
+	if (cachedAddon && cachedAddonKey === targetPath) return cachedAddon;
 	const req = createRequire(import.meta.url);
-	const loaded = req(/* turbopackIgnore: true */ addonPath) as RawLumberJackAddon;
+	const loaded = req(/* turbopackIgnore: true */ targetPath) as RawLumberJackAddon;
 	if (loaded.abiVersion() !== 2) throw new Error(`Unexpected LumberJack ABI version: ${loaded.abiVersion()}`);
-	if (addonPath === DEFAULT_ADDON_PATH) cachedAddon = loaded;
+	if (!addonPath) {
+		cachedAddon = loaded;
+		cachedAddonKey = targetPath;
+	}
 	return loaded;
 }
 

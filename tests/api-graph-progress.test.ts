@@ -12,7 +12,7 @@ after(() => {
 });
 
 const serverMod = await import("../src/server/index.ts");
-const graphRoute = await import("../app/api/graph/route.ts");
+const graphRoute = await import("../src/api/handlers/graph/route.ts");
 
 const HAS_ADDON = fs.existsSync(DEFAULT_ADDON_PATH);
 const REQUIRE_SUBSTRATE = process.env.PEER_REQUIRE_SUBSTRATE === "1";
@@ -109,7 +109,8 @@ test("graphView omits learnerProgress in flat-file mode and preserves sourceOrga
 		assert.equal("learnerProgress" in populatedSnap, false);
 		assert.equal(populatedSnap.learnerProgress, undefined);
 	} finally {
-		fs.rmSync(path.join(scratchEnv.dataDir, "graph"), { recursive: true, force: true });
+		serverMod.stores.graphStore.rewriteLedgers({ nodes: [], chains: [], checkpoints: [], coverage: [] });
+		serverMod.stores.graphStore.deleteSources(new Set(["src_notes_1"]));
 	}
 });
 

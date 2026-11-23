@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as fs from "node:fs";
-import { chatStore } from "../src/store/chats.ts";
-import { graphStore } from "../src/store/graph.ts";
+import { chatStore } from "../src/server/stores.ts";
+import { graphStore } from "../src/server/stores.ts";
 import { PATHS, SOURCES_FILE } from "../config.ts";
 import { callCost, jobCost, sessionCost, turnCost } from "../src/server/pricing.ts";
 import { sumSteps } from "../src/core/prices.ts";
@@ -70,7 +70,7 @@ test("appendTurnUsage: idempotent per turn; continuations survive saveMessages; 
 		assert.deepEqual(chatStore.getChat(record.id)?.turns?.[0]?.steps, JSON.parse(JSON.stringify(entry.steps)));
 		assert.equal(chatStore.getChat(record.id)?.turns?.length, 2);
 		assert.equal("turns" in chatStore.listChats().find((c) => c.id === record.id)!, false);
-	} finally { fs.unlinkSync(`${PATHS.chats}/${record.id}.json`); }
+	} finally { chatStore.deleteChat(record.id); }
 });
 
 const runEntry = (startedAt: number): ExtractionRunUsage => ({
@@ -91,14 +91,12 @@ test("appendExtractionUsage: idempotent; failed runs persist; list omits log", (
 		assert.equal(chatStore.getChat(record.id)?.extractions?.length, 3);
 		assert.equal(chatStore.getChat(record.id)?.extractions?.at(-1)?.stats, undefined);
 		assert.equal("extractions" in chatStore.listChats().find((c) => c.id === record.id)!, false);
-	} finally { fs.unlinkSync(`${PATHS.chats}/${record.id}.json`); }
+	} finally { chatStore.deleteChat(record.id); }
 });
 
 test("appendSourceUsage: idempotent; reimport keeps history; absent source is a no-op", () => {
-	fs.mkdirSync(PATHS.graph, { recursive: true });
-	const backup = fs.existsSync(SOURCES_FILE) ? fs.readFileSync(SOURCES_FILE) : undefined;
+	const id = "src_usagetest01";
 	try {
-		const id = "src_usagetest01";
 		graphStore.upsertSource({ id, filePath: "/fixture/notes.md", importedAt: "2026-09-13T00:00:00Z" });
 		graphStore.appendSourceUsage(id, runEntry(1));
 		graphStore.appendSourceUsage(id, runEntry(1));
@@ -108,7 +106,6 @@ test("appendSourceUsage: idempotent; reimport keeps history; absent source is a 
 		assert.equal(graphStore.readSources().find((s) => s.id === id)?.extractions?.length, 2);
 		graphStore.appendSourceUsage("src_missing", runEntry(1));
 	} finally {
-		if (backup) fs.writeFileSync(SOURCES_FILE, backup);
-		else fs.rmSync(SOURCES_FILE, { force: true });
+		graphStore.deleteSources(new Set([id]));
 	}
 });

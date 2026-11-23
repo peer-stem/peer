@@ -16,7 +16,7 @@ import { runSubagent } from "../src/agent/subagents/pi-run.ts";
 import { healToolRecord } from "../src/agent/tools/heal.ts";
 import type { ModelCatalogResponse } from "../src/core/contracts/models.ts";
 import { createPluginInference } from "../src/server/plugin-inference.ts";
-import { createPluginTaskRecordStore } from "../src/store/plugin-task-records.ts";
+import { createPluginTaskRecordStore } from "../src/server/stores.ts";
 import metadata from "../package.json" with { type: "json" };
 
 // Pin the published routes rather than deriving expectations from the same SDK.

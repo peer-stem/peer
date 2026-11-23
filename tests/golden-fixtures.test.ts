@@ -32,14 +32,16 @@ const GOLDEN = path.join(HERE, "fixtures", "golden-data");
 
 // ── the seam, BEFORE any config-loading import ──────────────────────────────
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "lh-golden-"));
+const TMP_FOREST = fs.mkdtempSync(path.join(os.tmpdir(), "lh-golden-forest-"));
 fs.cpSync(GOLDEN, TMP, { recursive: true });
 process.env.LH_DATA_DIR = TMP;
+process.env.PEER_FOREST_DIR = TMP_FOREST;
 
-const { chatStore } = await import("../src/store/chats.ts");
-const { graphStore } = await import("../src/store/graph.ts");
-const { jobStore } = await import("../src/store/jobs.ts");
-const { settingsStore } = await import("../src/store/settings.ts");
-const { readRenderSettings } = await import("../src/store/render-settings.ts");
+const { chatStore } = await import("../src/server/stores.ts");
+const { graphStore } = await import("../src/server/stores.ts");
+const { jobStore } = await import("../src/server/stores.ts");
+const { settingsStore } = await import("../src/server/stores.ts");
+const { readRenderSettings } = await import("../src/server/stores.ts");
 const { getGraph, deriveView } = await import("../src/core/graph.ts");
 const { sanitizeRenderSettings } = await import("../src/core/render-settings.ts");
 const { toLlmMessages } = await import("../src/core/native-messages.ts");
@@ -62,7 +64,9 @@ function snapshotTree(dir: string): Map<string, Buffer> {
 const BEFORE = snapshotTree(TMP);
 
 test.after(() => {
+	delete process.env.PEER_FOREST_DIR;
 	fs.rmSync(TMP, { recursive: true, force: true });
+	fs.rmSync(TMP_FOREST, { recursive: true, force: true });
 });
 
 // ── chats: records, folds, and the wire ─────────────────────────────────────
@@ -188,6 +192,7 @@ test("graph: render-settings sanitize and positions parse", () => {
 	assert.ok(raw, "render-settings.json reads");
 	const clean = sanitizeRenderSettings(raw);
 	assert.ok(clean.nodeSize > 0 && typeof clean.labelZoom === "number", "sanitizes to concrete knobs");
+	assert.ok(Object.keys(graphStore.readPositions()).length >= 300, "positions parse through graphStore");
 	const positionsFile = JSON.parse(fs.readFileSync(path.join(TMP, "graph", "positions.json"), "utf8")) as {
 		positions: Record<string, unknown>;
 	};

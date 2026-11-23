@@ -84,6 +84,8 @@ else
 fi
 mkdir -p "$DATA_DIR"
 
+export PEER_STATE_ROOT="$DATA_DIR"
+export PEER_FOREST_DIR="$DATA_DIR/lumberjack"
 export LH_DATA_DIR="$DATA_DIR"
 export LH_AUTH_FILE="$DATA_DIR/auth.json"
 export LH_IGNORE_ENV_KEYS=1

@@ -11,7 +11,7 @@ import {
 	twoColumnTriggered,
 	widthGrid,
 	type ColumnSpec,
-} from "../components/question-layout.ts";
+} from "../src/client/engine/index.ts";
 
 /** A text-like column: a fixed amount of "area" wrapped at the width. */
 function textColumn(area: number, opts: Partial<ColumnSpec> = {}): ColumnSpec {

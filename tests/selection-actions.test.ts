@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { isSelectionRectVisible, resolveSelectionActionPosition } from "../components/selection-actions.ts";
+import { isSelectionRectVisible, resolveSelectionActionPosition } from "../src/client/engine/index.ts";
 
 const bounds = { left: 100, top: 50, right: 700, bottom: 650 };
 const viewport = { width: 1000, height: 800 };

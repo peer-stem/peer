@@ -1,4 +1,4 @@
-import { MAX_IMPORT_BODY_BYTES } from "@/lib/notes-import-limits.ts";
+import { MAX_IMPORT_BODY_BYTES } from "@/src/core/notes-import-limits.ts";
 import { apiRequestRefusal } from "@/src/server/desktop-access.ts";
 import type { Dispatch, Method, Params, RouteHandler, RouteRecord } from "./types.ts";
 

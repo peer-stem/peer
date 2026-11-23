@@ -23,9 +23,11 @@ import type { PiEngine } from "../src/agent/models.ts";
 // Opt-in writes must not race another test process's settings record.
 const testData = mkdtempSync(join(tmpdir(), "lh-cli-harness-data-"));
 process.env.LH_DATA_DIR = testData;
-after(() => rmSync(testData, { recursive: true, force: true }));
-const { PATHS, SETTINGS_FILE } = await import("../config.ts");
-const { readSettings, writeSettings } = await import("../src/store/settings.ts");
+const { ensureActiveLumberJackBundle, readSettings, resetActiveLumberJackForTests, writeSettings } = await import("../src/server/stores.ts");
+after(async () => {
+	await resetActiveLumberJackForTests();
+	rmSync(testData, { recursive: true, force: true });
+});
 const { LIVE_PROCESS_IDLE_TIMEOUT_MS, liveProcessIdleTimeoutMs } = await import("../src/agent/claude-code/live-processes.ts");
 const { CLAUDE_CODE_MODELS } = await import("../src/agent/claude-code/provider.ts");
 const { createClaudeCodeStreamFunction } = await import("../src/agent/claude-code/stream.ts");
@@ -34,7 +36,7 @@ const { cliContextWindowOf, danglingQuestionOf } = await import("../src/core/nat
 const { handleChatRequest } = await import("../src/server/chat-handler.ts");
 const { isTurnRunning } = await import("../src/server/turn-liveness.ts");
 const { runningTurn } = await import("../src/server/turn-runs.ts");
-const { chatStore } = await import("../src/store/chats.ts");
+const { chatStore } = await import("../src/server/stores.ts");
 
 const FAKE_CLAUDE = fileURLToPath(new URL("./fixtures/claude-code/fake-claude.mjs", import.meta.url));
 const TEXT_FIXTURE = fileURLToPath(new URL("./fixtures/claude-code/text.jsonl", import.meta.url));
@@ -70,7 +72,10 @@ function toAskScenario(): string[] {
 function createFakeRun(t: TestContext, scenarios: string[][]): FakeRun {
 	const settings = readSettings();
 	writeSettings({ ...(settings ?? { version: 1 }), claudeCode: { enabled: true } });
-	t.after(() => { if (settings) writeSettings(settings); else rmSync(SETTINGS_FILE, { force: true }); });
+	t.after(() => {
+		if (settings) writeSettings(settings);
+		else ensureActiveLumberJackBundle().forest.deleteNode("config/settings");
+	});
 	const dir = mkdtempSync(join(tmpdir(), "claude-code-harness-"));
 	t.after(() => rmSync(dir, { recursive: true, force: true }));
 	// Satisfy the real presence gate; this marker is NEVER executed. All work
@@ -109,7 +114,7 @@ function createFakeRun(t: TestContext, scenarios: string[][]): FakeRun {
 function createClaudeCodeChat(t: TestContext): string {
 	const chat = chatStore.createChat("Claude Code: question answered later");
 	chatStore.saveSettings(chat.id, { model: { provider: "claude-code", id: "sonnet" } });
-	t.after(() => unlinkSync(join(PATHS.chats, `${chat.id}.json`)));
+	t.after(() => chatStore.deleteChat(chat.id));
 
 	return chat.id;
 }
@@ -224,7 +229,7 @@ test("a question answered before the idle timeout continues the waiting CLI proc
 
 	assert.equal(fakeRun.children.length, 1);
 	assert.deepEqual(cliContextWindowOf(chatStore.getChat(chatId)!.messages), { model: "claude-code:sonnet", tokens: 200000 });
-	assert.deepEqual(cliContextWindowOf(JSON.parse(readFileSync(join(PATHS.chats, `${chatId}.json`), "utf8")).messages), { model: "claude-code:sonnet", tokens: 200000 });
+	assert.deepEqual(cliContextWindowOf(ensureActiveLumberJackBundle().chatStore.getChat(chatId)!.messages), { model: "claude-code:sonnet", tokens: 200000 });
 	assert.ok(getLastAssistantText(chatId).includes(ANSWER_TEXT), getLastAssistantText(chatId));
 	await waitForExit(waiting);
 });

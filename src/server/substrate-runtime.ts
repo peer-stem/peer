@@ -1,17 +1,12 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { GRAPH_FORMAT_FILE, PATHS, RENDER_SETTINGS_FILE, ROOT } from "../../config.ts";
-import { listSourceSegments } from "../agent/prompt-segments.ts";
+import { ROOT } from "../../config.ts";
 import { emit } from "../core/events.ts";
 import type { PluginTaskRecord } from "../core/plugin-workers.ts";
-import type { PromptAgent, PromptSegmentInfo } from "../core/prompt-segments.ts";
 import { sanitizeRenderSettings, type GraphRenderSettings } from "../core/render-settings.ts";
-import type {
-	MfnActiveRuntime,
-	MfnClient,
-	MfnSupervisor,
-} from "../memory/mfn/index.ts";
-import { assertGraphFormat } from "../store/graph-format.ts";
+import type { UserSettings } from "../core/settings.ts";
+import { effectiveColors, isBuiltinThemeId, resolveTheme } from "../core/themes.ts";
 import { writeFileAtomicSync } from "../store/atomic-write.ts";
 import { importLearnHarnessData, type LearnHarnessImportReport } from "../store/import-learnharness.ts";
 import {
@@ -20,40 +15,29 @@ import {
 	type LumberJackStoreBundle,
 } from "../store/lumberjack/index.ts";
 import type { ParsedMutationBatch } from "../store/lumberjack/stream-events.ts";
-import type { CorePluginDataLocation } from "../store/plugin-data-paths.ts";
-import { readPluginTaskRecord, recoverPluginTaskRecords } from "../store/plugin-task-records.ts";
 import {
-	readRenderSettings as flatReadRenderSettings,
-	writeRenderSettings as flatWriteRenderSettings,
-} from "../store/render-settings.ts";
-import { readSettings as flatReadSettings } from "../store/settings.ts";
-import type { UserSettings } from "../core/settings.ts";
-import { resolveComputeBackend, sanitizeComputeEnv, type ComputeBackend } from "../substrate/hardware-guard.ts";
+	startMfnBinding,
+	stopMfnBinding,
+	type StartedMfnBinding,
+	type SubstrateMfnOptions,
+} from "./substrate-mfn.ts";
+import {
+	effectiveLumberJackPromptSegments,
+	readPluginTaskFromBundle,
+	recoverPluginTasksInBundle,
+	type CorePluginDataLocation,
+} from "./substrate-plugin-tasks.ts";
 
+export { effectiveLumberJackPromptSegments, type CorePluginDataLocation };
 export type { ParsedMutationBatch } from "../store/lumberjack/stream-events.ts";
 export type { LearnHarnessImportReport } from "../store/import-learnharness.ts";
 export type { LumberJackStoreBundle } from "../store/lumberjack/index.ts";
 
-export interface ActivateLumberJackOptions {
+export interface ActivateLumberJackOptions extends SubstrateMfnOptions {
 	forestDir: string;
+	stateRoot?: string;
+	legacyDataDir?: string;
 	streamIntervalMs?: number;
-	repoRoot?: string;
-	mfnStateRoot?: string;
-	mfnBinDir?: string;
-	mfnPort?: number;
-	mfnEndpoint?: string;
-	mfnToken?: string;
-	mfnClient?: MfnClient;
-	mfnBackend?: ComputeBackend;
-	mfnEmbeddersFile?: string;
-	mfnAlmConfigFile?: string;
-	mfnStartupTimeoutMs?: number;
-	mfnShutdownTimeoutMs?: number;
-	mfnEnv?: NodeJS.ProcessEnv;
-	mainPoolId?: string;
-	lexicalPoolId?: string;
-	liveTailTokens?: number;
-	autoFlushMs?: number;
 	onChange?: () => void;
 }
 
@@ -63,25 +47,35 @@ export interface ActiveLumberJackSubstrate {
 	close(): Promise<void>;
 }
 
-interface StartedMfnBinding {
-	runtime: MfnActiveRuntime;
-	stopAutoFlush: () => void;
-	supervisor?: MfnSupervisor;
+interface FallbackBundleState {
+	key: string;
+	stateRoot: string | null;
+	bundle: LumberJackStoreBundle;
 }
 
 const ACTIVE_LJ_BUNDLE_KEY = Symbol.for("peer.lumberjack.activeBundle");
+const ACTIVE_LJ_STATE_ROOT_KEY = Symbol.for("peer.lumberjack.activeStateRoot");
 const ACTIVE_LJ_SUBSTRATE_KEY = Symbol.for("peer.lumberjack.activeSubstrate");
+const FALLBACK_LJ_STATE_KEY = Symbol.for("peer.lumberjack.fallbackState");
 const SUBSTRATE_LISTENERS_KEY = Symbol.for("peer.lumberjack.listeners");
-const SAFE_TASK_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 type GlobalWithSubstrate = typeof globalThis & {
 	[ACTIVE_LJ_BUNDLE_KEY]?: LumberJackStoreBundle | null;
+	[ACTIVE_LJ_STATE_ROOT_KEY]?: string | null;
 	[ACTIVE_LJ_SUBSTRATE_KEY]?: ActiveLumberJackSubstrate | null;
+	[FALLBACK_LJ_STATE_KEY]?: FallbackBundleState | null;
 	[SUBSTRATE_LISTENERS_KEY]?: Set<() => void>;
 };
 
+let ephemeralTestRoot: string | null = null;
+let exitHookRegistered = false;
+
+function holderOf(): GlobalWithSubstrate {
+	return globalThis as GlobalWithSubstrate;
+}
+
 function substrateListeners(): Set<() => void> {
-	const holder = globalThis as GlobalWithSubstrate;
+	const holder = holderOf();
 	return (holder[SUBSTRATE_LISTENERS_KEY] ??= new Set());
 }
 
@@ -95,78 +89,203 @@ function notifySubstrateChanged(onChange?: () => void): void {
 }
 
 export function getActiveLumberJackBundle(): LumberJackStoreBundle | null {
-	return (globalThis as GlobalWithSubstrate)[ACTIVE_LJ_BUNDLE_KEY] ?? null;
+	return holderOf()[ACTIVE_LJ_BUNDLE_KEY] ?? null;
 }
 
-function setActiveLumberJackBundle(bundle: LumberJackStoreBundle | null): void {
-	(globalThis as GlobalWithSubstrate)[ACTIVE_LJ_BUNDLE_KEY] = bundle;
+export function peekOpenLumberJackBundle(): LumberJackStoreBundle | null {
+	const holder = holderOf();
+	return holder[ACTIVE_LJ_BUNDLE_KEY] ?? holder[FALLBACK_LJ_STATE_KEY]?.bundle ?? null;
 }
 
-function defaultMfnBinDir(sourceEnv?: NodeJS.ProcessEnv): string {
-	const persistRoot = sourceEnv?.PEER_PERSIST_ROOT?.trim() || process.env.PEER_PERSIST_ROOT?.trim() || "/usr/lib/persist/peer";
-	return path.join(persistRoot, "build", "mfn", "bin");
+function setActiveLumberJackBundle(bundle: LumberJackStoreBundle | null, stateRoot: string | null = null): void {
+	const holder = holderOf();
+	holder[ACTIVE_LJ_BUNDLE_KEY] = bundle;
+	holder[ACTIVE_LJ_STATE_ROOT_KEY] = stateRoot;
 }
 
-async function loadMfnRuntimeModule(): Promise<typeof import("../memory/mfn/index.ts")> {
-	const spec = "../memory/mfn/index.ts";
-	return import(/* turbopackIgnore: true */ spec) as Promise<typeof import("../memory/mfn/index.ts")>;
+export function resolveStateRoot(
+	env: Record<string, string | undefined> = process.env,
+	repoRoot: string = ROOT,
+): string {
+	const explicit = env.PEER_STATE_ROOT?.trim() || env.PEER_STATE_DIR?.trim() || env.LH_DATA_DIR?.trim();
+	if (explicit) return path.resolve(explicit);
+	return path.join(path.resolve(repoRoot), "data", "peer-state");
 }
 
-async function resolveMfnClientAndSupervisor(
-	mfnMod: typeof import("../memory/mfn/index.ts"),
-	options: ActivateLumberJackOptions,
-): Promise<{ client: MfnClient; supervisor?: MfnSupervisor } | null> {
-	if (options.mfnClient) return { client: options.mfnClient };
-	if (options.mfnEndpoint && options.mfnToken) {
-		return { client: new mfnMod.MfnClient({ endpoint: options.mfnEndpoint, token: options.mfnToken }) };
+function ensureEphemeralTestStateRoot(repoRoot: string = ROOT): string {
+	if (ephemeralTestRoot) return ephemeralTestRoot;
+	const base = process.env.PEER_SCRATCH_DIR?.trim()
+		? path.resolve(process.env.PEER_SCRATCH_DIR.trim())
+		: path.join(path.resolve(repoRoot), ".test-scratch");
+	fs.mkdirSync(base, { recursive: true, mode: 0o700 });
+	ephemeralTestRoot = path.join(base, `unit-state-${process.pid}-${randomUUID().slice(0, 8)}`);
+	fs.mkdirSync(ephemeralTestRoot, { recursive: true, mode: 0o700 });
+	return ephemeralTestRoot;
+}
+
+export function resolveDefaultForestDir(
+	env: Record<string, string | undefined> = process.env,
+	repoRoot: string = ROOT,
+): { forestDir: string; stateRoot: string; isEphemeralTest: boolean } {
+	const explicitForest = env.PEER_FOREST_DIR?.trim();
+	const hasExplicitPeerState = Boolean(env.PEER_STATE_ROOT?.trim() || env.PEER_STATE_DIR?.trim());
+	const hasExplicitState = hasExplicitPeerState || Boolean(env.LH_DATA_DIR?.trim());
+	if (explicitForest) {
+		const forestDir = path.resolve(explicitForest);
+		const stateRoot = hasExplicitPeerState ? resolveStateRoot(env, repoRoot) : path.dirname(forestDir);
+		return { forestDir, stateRoot, isEphemeralTest: false };
 	}
-	if (!options.mfnStateRoot || options.mfnPort === undefined) return null;
-	const backend = resolveComputeBackend(options.mfnBackend ?? "cpu");
-	const env = sanitizeComputeEnv(options.mfnEnv ?? process.env, backend);
-	const supervisor = new mfnMod.MfnSupervisor({
-		repoRoot: options.repoRoot ?? ROOT,
-		stateRoot: options.mfnStateRoot,
-		binDir: options.mfnBinDir ?? defaultMfnBinDir(options.mfnEnv),
-		port: options.mfnPort,
-		backend,
-		embeddersFile: options.mfnEmbeddersFile,
-		almConfigFile: options.mfnAlmConfigFile,
-		startupTimeoutMs: options.mfnStartupTimeoutMs,
-		shutdownTimeoutMs: options.mfnShutdownTimeoutMs,
-		env,
-	});
-	await supervisor.start();
-	return { client: supervisor.createClient(), supervisor };
+	const isTestRun = env.NODE_ENV === "test" || Boolean(env.NODE_TEST_CONTEXT);
+	if (isTestRun && !hasExplicitState) {
+		const stateRoot = ensureEphemeralTestStateRoot(repoRoot);
+		return { forestDir: path.join(stateRoot, "lumberjack"), stateRoot, isEphemeralTest: true };
+	}
+	const stateRoot = resolveStateRoot(env, repoRoot);
+	return { forestDir: path.join(stateRoot, "lumberjack"), stateRoot, isEphemeralTest: false };
 }
 
-async function startMfnBinding(
-	bundle: LumberJackStoreBundle,
-	options: ActivateLumberJackOptions,
-): Promise<StartedMfnBinding | null> {
-	const hasMfnOpts = Boolean(
-		options.mfnClient || (options.mfnEndpoint && options.mfnToken) || (options.mfnStateRoot && options.mfnPort !== undefined),
-	);
-	if (!hasMfnOpts) return null;
-	const mfnMod = await loadMfnRuntimeModule();
-	const resolved = await resolveMfnClientAndSupervisor(mfnMod, options);
-	if (!resolved) return null;
+function hasLegacyFlatFiles(dir: string): boolean {
 	try {
-		const outbox = new mfnMod.MfnIngestOutbox({ persistence: mfnMod.createLumberJackOutboxPersistence(bundle.forest) });
-		const stopAutoFlush = outbox.startAutoFlush(resolved.client, options.autoFlushMs ?? 5_000);
-		const runtime: MfnActiveRuntime = {
-			client: resolved.client,
-			outbox,
-			mainPoolId: options.mainPoolId ?? "peer-main",
-			lexicalPoolId: options.lexicalPoolId ?? "peer-lexical",
-			...(options.liveTailTokens !== undefined ? { liveTailTokens: options.liveTailTokens } : {}),
-			...(resolved.supervisor ? { supervisor: resolved.supervisor } : {}),
-		};
-		mfnMod.setActiveMfnRuntime(runtime);
-		return { runtime, stopAutoFlush, supervisor: resolved.supervisor };
-	} catch (err) {
-		await resolved.supervisor?.stop();
-		throw err;
+		const st = fs.lstatSync(dir);
+		if (st.isSymbolicLink() || !st.isDirectory()) return false;
+	} catch {
+		return false;
 	}
+	for (const rel of ["settings.json", "chats", "graph", "themes", "prompts"]) {
+		if (fs.existsSync(path.join(dir, rel))) return true;
+	}
+	return false;
+}
+
+function isFreshEmptyForest(bundle: LumberJackStoreBundle): boolean {
+	if (bundle.forest.getNode("config/migrated-lh")) return false;
+	if (bundle.settingsStore.readSettings() !== null) return false;
+	if (bundle.chatStore.listChats().length > 0) return false;
+	if (bundle.graphStore.readNodes().length > 0) return false;
+	return true;
+}
+
+function maybeAutoMigrateLegacyData(bundle: LumberJackStoreBundle, candidateDirs: readonly (string | undefined)[]): void {
+	if (!isFreshEmptyForest(bundle)) return;
+	for (const raw of candidateDirs) {
+		const dir = raw?.trim() ? path.resolve(raw.trim()) : "";
+		if (!dir || !hasLegacyFlatFiles(dir)) continue;
+		try {
+			importLearnHarnessData(dir, bundle);
+			bundle.forest.upsertNode({
+				path: "config/migrated-lh",
+				type: "leaf",
+				kind: "config",
+				slot: { sourceDirectory: dir, migratedAt: new Date().toISOString() },
+			});
+		} catch {
+			/* ignore partial/unreadable legacy dir during auto-migration */
+		}
+		return;
+	}
+}
+
+export function syncBootAppearanceSidecar(
+	bundle: LumberJackStoreBundle | null = getActiveLumberJackBundle() ?? holderOf()[FALLBACK_LJ_STATE_KEY]?.bundle ?? null,
+	explicitStateRoot?: string | null,
+): void {
+	if (!bundle) return;
+	const stateRoot =
+		explicitStateRoot ??
+		holderOf()[ACTIVE_LJ_STATE_ROOT_KEY] ??
+		holderOf()[FALLBACK_LJ_STATE_KEY]?.stateRoot ??
+		null;
+	if (!stateRoot) return;
+	try {
+		const settings = bundle.settingsStore.readSettings();
+		const appearance = settings?.appearance;
+		const themeId = appearance?.theme;
+		const custom = themeId && !isBuiltinThemeId(themeId) ? bundle.themeStore.readTheme(themeId) : null;
+		const resolved = resolveTheme(themeId, custom ? [custom] : []);
+		const background = effectiveColors(resolved, appearance).background;
+		const autoUpdate = settings?.general?.autoUpdate !== false;
+		fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+		writeFileAtomicSync(
+			path.join(stateRoot, "boot-appearance.json"),
+			`${JSON.stringify({ mode: resolved.mode, background, autoUpdate })}\n`,
+		);
+	} catch {
+		/* best-effort sidecar write */
+	}
+}
+
+function cleanupExitState(): void {
+	const fb = holderOf()[FALLBACK_LJ_STATE_KEY];
+	if (fb) {
+		holderOf()[FALLBACK_LJ_STATE_KEY] = null;
+		try {
+			fb.bundle.close();
+		} catch {
+			/* ignore exit close error */
+		}
+	}
+	if (!ephemeralTestRoot) return;
+	try {
+		fs.rmSync(ephemeralTestRoot, { recursive: true, force: true });
+	} catch {
+		/* ignore exit cleanup error */
+	}
+	ephemeralTestRoot = null;
+}
+
+function registerFallbackExitCleanup(): void {
+	if (exitHookRegistered) return;
+	exitHookRegistered = true;
+	process.once("exit", cleanupExitState);
+}
+
+export function ensureActiveLumberJackBundle(): LumberJackStoreBundle {
+	const active = getActiveLumberJackBundle();
+	if (active) return active;
+	const explicitDataDir = process.env.LH_DATA_DIR?.trim();
+	if (explicitDataDir) {
+		const st = fs.lstatSync(path.resolve(explicitDataDir), { throwIfNoEntry: false });
+		if (st?.isSymbolicLink()) fs.statSync(path.resolve(explicitDataDir));
+	}
+	const resolved = resolveDefaultForestDir(process.env, ROOT);
+	const key = resolved.forestDir;
+	const holder = holderOf();
+	const existing = holder[FALLBACK_LJ_STATE_KEY];
+	const dirExists = fs.existsSync(key);
+	if (existing && existing.key === key && dirExists) return existing.bundle;
+	if (existing) {
+		const wipedWhileOpen = existing.key === key && !dirExists;
+		holder[FALLBACK_LJ_STATE_KEY] = null;
+		existing.bundle.close();
+		if (wipedWhileOpen) fs.rmSync(key, { recursive: true, force: true });
+	}
+	registerFallbackExitCleanup();
+	const bundle = createLumberJackStores(resolved.forestDir);
+	maybeAutoMigrateLegacyData(bundle, [process.env.LH_DATA_DIR, resolved.isEphemeralTest ? undefined : resolved.stateRoot]);
+	holder[FALLBACK_LJ_STATE_KEY] = {
+		key,
+		stateRoot: resolved.isEphemeralTest ? null : resolved.stateRoot,
+		bundle,
+	};
+	if (!resolved.isEphemeralTest) syncBootAppearanceSidecar(bundle, resolved.stateRoot);
+	if (bundle.settingsStore.readSettings() !== null) notifySubstrateChanged();
+	return bundle;
+}
+
+export function closeFallbackLumberJackBundle(): void {
+	const holder = holderOf();
+	const fb = holder[FALLBACK_LJ_STATE_KEY];
+	if (!fb) return;
+	holder[FALLBACK_LJ_STATE_KEY] = null;
+	fb.bundle.close();
+}
+
+export async function resetActiveLumberJackForTests(): Promise<void> {
+	const holder = holderOf();
+	if (holder[ACTIVE_LJ_SUBSTRATE_KEY]) {
+		await holder[ACTIVE_LJ_SUBSTRATE_KEY].close();
+	}
+	closeFallbackLumberJackBundle();
 }
 
 async function teardownSubstrateResources(
@@ -175,14 +294,9 @@ async function teardownSubstrateResources(
 	mfn: StartedMfnBinding | null,
 	onChange?: () => void,
 ): Promise<void> {
-	mfn?.stopAutoFlush();
-	if (mfn) {
-		const mfnMod = await loadMfnRuntimeModule();
-		if (mfnMod.getActiveMfnRuntime() === mfn.runtime) mfnMod.setActiveMfnRuntime(null);
-		if (mfn.supervisor) await mfn.supervisor.stop();
-	}
+	await stopMfnBinding(mfn);
 	stopBridge();
-	if (getActiveLumberJackBundle() === bundle) setActiveLumberJackBundle(null);
+	if (getActiveLumberJackBundle() === bundle) setActiveLumberJackBundle(null, null);
 	bundle.close();
 	notifySubstrateChanged(onChange);
 }
@@ -190,11 +304,14 @@ async function teardownSubstrateResources(
 export async function activateLumberJackSubstrate(
 	options: ActivateLumberJackOptions,
 ): Promise<ActiveLumberJackSubstrate> {
-	const holder = globalThis as GlobalWithSubstrate;
+	const holder = holderOf();
 	if (holder[ACTIVE_LJ_SUBSTRATE_KEY]) {
 		await holder[ACTIVE_LJ_SUBSTRATE_KEY].close();
 	}
+	closeFallbackLumberJackBundle();
+	const stateRoot = options.stateRoot ?? path.dirname(path.resolve(options.forestDir));
 	const bundle = createLumberJackStores(options.forestDir);
+	maybeAutoMigrateLegacyData(bundle, [options.legacyDataDir, stateRoot]);
 	const bridge = startLumberJackStreamBridge(bundle.forest, options.streamIntervalMs);
 	let mfn: StartedMfnBinding | null = null;
 	try {
@@ -204,7 +321,8 @@ export async function activateLumberJackSubstrate(
 		bundle.close();
 		throw err;
 	}
-	setActiveLumberJackBundle(bundle);
+	setActiveLumberJackBundle(bundle, stateRoot);
+	syncBootAppearanceSidecar(bundle, stateRoot);
 	notifySubstrateChanged(options.onChange);
 	let closing: Promise<void> | null = null;
 	const handle: ActiveLumberJackSubstrate = {
@@ -222,167 +340,64 @@ export async function activateLumberJackSubstrate(
 }
 
 export function runLearnHarnessImportWithStores(sourceDirectory: string): LearnHarnessImportReport {
-	const active = getActiveLumberJackBundle();
-	if (active) {
-		const report = importLearnHarnessData(sourceDirectory, active);
-		active.forest.noteStoreEmittedEvent("sources-changed");
-		emit("chats-changed", {});
-		emit("sources-changed", {});
-		return report;
-	}
-	const dataDir = process.env.LH_DATA_DIR ? path.resolve(process.env.LH_DATA_DIR) : PATHS.data;
-	const tempBundle = createLumberJackStores(path.join(dataDir, "forest"));
-	try {
-		const report = importLearnHarnessData(sourceDirectory, tempBundle);
-		emit("chats-changed", {});
-		emit("sources-changed", {});
-		return report;
-	} finally {
-		tempBundle.close();
-	}
+	const bundle = ensureActiveLumberJackBundle();
+	const report = importLearnHarnessData(sourceDirectory, bundle);
+	bundle.forest.noteStoreEmittedEvent("sources-changed");
+	syncBootAppearanceSidecar(bundle);
+	emit("chats-changed", {});
+	emit("sources-changed", {});
+	return report;
 }
 
 export function readRenderSettingsFromActiveStore(): GraphRenderSettings | null {
-	const bundle = getActiveLumberJackBundle();
-	if (!bundle) return flatReadRenderSettings();
+	const bundle = ensureActiveLumberJackBundle();
 	const snap = bundle.forest.getNode("config/render-settings");
 	if (!snap || snap.slot === undefined) return null;
 	return sanitizeRenderSettings(snap.slot);
 }
 
 export function readSettingsRecordFromActiveStore(): UserSettings | null {
-	const bundle = getActiveLumberJackBundle();
-	return bundle ? bundle.settingsStore.readSettings() : flatReadSettings();
+	return ensureActiveLumberJackBundle().settingsStore.readSettings();
 }
 
 export function writeRenderSettingsToActiveStore(raw: unknown): GraphRenderSettings {
-	const bundle = getActiveLumberJackBundle();
-	if (!bundle) return flatWriteRenderSettings(raw);
+	const bundle = ensureActiveLumberJackBundle();
 	const settings = sanitizeRenderSettings(raw);
 	bundle.forest.upsertNode({ path: "config/render-settings", type: "leaf", kind: "config", slot: settings });
 	return settings;
 }
 
 export function readModelCatalogFromActiveStore(maxBytes: number): unknown {
-	const bundle = getActiveLumberJackBundle();
-	if (bundle) {
-		const snap = bundle.forest.getNode("config/model-catalog");
-		return snap && snap.slot !== undefined ? snap.slot : null;
-	}
-	const file = path.join(PATHS.data, "model-catalog.json");
-	if (fs.statSync(file).size > maxBytes) return null;
-	return JSON.parse(fs.readFileSync(file, "utf-8"));
+	const bundle = ensureActiveLumberJackBundle();
+	const snap = bundle.forest.getNode("config/model-catalog");
+	if (!snap || snap.slot === undefined) return null;
+	if (Buffer.byteLength(JSON.stringify(snap.slot), "utf8") > maxBytes) return null;
+	return snap.slot;
 }
 
-export function writeModelCatalogToActiveStore(payload: unknown, text: string): void {
-	const bundle = getActiveLumberJackBundle();
-	if (bundle) {
-		bundle.forest.upsertNode({ path: "config/model-catalog", type: "leaf", kind: "config", slot: payload });
-		return;
-	}
-	fs.mkdirSync(PATHS.data, { recursive: true });
-	writeFileAtomicSync(path.join(PATHS.data, "model-catalog.json"), text);
+export function writeModelCatalogToActiveStore(payload: unknown, _text: string): void {
+	const bundle = ensureActiveLumberJackBundle();
+	bundle.forest.upsertNode({ path: "config/model-catalog", type: "leaf", kind: "config", slot: payload });
 }
 
 export function readActivePluginMetadata(name: "render-settings.json" | "format.json"): unknown {
-	const bundle = getActiveLumberJackBundle();
-	if (bundle) {
-		return name === "format.json" ? { version: 1 } : readRenderSettingsFromActiveStore();
-	}
-	assertGraphFormat();
-	try {
-		return JSON.parse(fs.readFileSync(name === "format.json" ? GRAPH_FORMAT_FILE : RENDER_SETTINGS_FILE, "utf8"));
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-		throw error;
-	}
+	ensureActiveLumberJackBundle();
+	return name === "format.json" ? { version: 1 } : readRenderSettingsFromActiveStore();
 }
 
 export function readActivePluginTask(
-	rootPluginsDirectory: string,
+	_rootPluginsDirectory: string,
 	pluginId: string,
 	taskId?: string,
 	requestId?: string,
-	core?: CorePluginDataLocation,
+	_core?: CorePluginDataLocation,
 ): PluginTaskRecord | null {
-	const bundle = getActiveLumberJackBundle();
-	if (!bundle) return readPluginTaskRecord(rootPluginsDirectory, pluginId, taskId, requestId, core);
-	if (taskId !== undefined && !SAFE_TASK_ID_RE.test(taskId)) throw new Error("Invalid plugin task id");
-	if (requestId !== undefined && (typeof requestId !== "string" || !requestId.length)) {
-		throw new Error("Invalid plugin task request id");
-	}
-	if (taskId === undefined && requestId === undefined) throw new Error("A task id or request id is required");
-	const store = bundle.pluginTaskStore(pluginId);
-	if (taskId !== undefined) {
-		const record = store.get(taskId);
-		if (record && requestId !== undefined && record.requestId !== requestId) {
-			throw new Error("Plugin task/request identity mismatch");
-		}
-		return record;
-	}
-	const matching = store.list().filter((record) => record.requestId === requestId);
-	if (matching.length > 1) throw new Error("Duplicate plugin task request identity");
-	return matching[0] ?? null;
-}
-
-function recoverOneLumberJackPluginScope(bundle: LumberJackStoreBundle, pluginId: string): void {
-	const store = bundle.pluginTaskStore(pluginId);
-	const records = store.list();
-	const requests = new Set<string>();
-	for (const record of records) {
-		if (requests.has(record.requestId)) throw new Error("Duplicate plugin task request identity");
-		requests.add(record.requestId);
-	}
-	for (const record of records) {
-		if (record.status !== "queued" && record.status !== "running") continue;
-		const now = new Date().toISOString();
-		store.save({
-			...record,
-			status: "interrupted",
-			completedAt: now,
-			updatedAt: now,
-			error: { code: "interrupted", message: "Task interrupted by server restart; no work was replayed" },
-		});
-	}
+	return readPluginTaskFromBundle(ensureActiveLumberJackBundle(), pluginId, taskId, requestId);
 }
 
 export function recoverActivePluginTasks(
-	rootPluginsDirectory: string,
-	core?: CorePluginDataLocation,
+	_rootPluginsDirectory: string,
+	_core?: CorePluginDataLocation,
 ): Record<string, string> {
-	const bundle = getActiveLumberJackBundle();
-	if (!bundle) return recoverPluginTaskRecords(rootPluginsDirectory, core);
-	const errors: Record<string, string> = Object.create(null);
-	for (const node of bundle.forest.listChildren("config/plugins")) {
-		const pluginId = Buffer.from(node.name, "hex").toString("utf8");
-		try {
-			recoverOneLumberJackPluginScope(bundle, pluginId);
-		} catch (error) {
-			errors[pluginId] = error instanceof Error ? error.message : String(error);
-		}
-	}
-	return { ...errors };
-}
-
-export function effectiveLumberJackPromptSegments(
-	bundle: LumberJackStoreBundle,
-	agent: PromptAgent,
-	switches: Record<string, boolean>,
-): PromptSegmentInfo[] {
-	return listSourceSegments(agent).map((segment) => {
-		let sourceText = "";
-		try {
-			sourceText = fs.readFileSync(segment.file, "utf8");
-		} catch {
-			sourceText = "";
-		}
-		const overrideText = bundle.promptOverrides.readOverride(segment.path);
-		return {
-			path: segment.path,
-			sourceText,
-			overrideText,
-			enabled: switches[segment.path] === true && overrideText !== null,
-			shared: segment.shared,
-		};
-	});
+	return recoverPluginTasksInBundle(ensureActiveLumberJackBundle());
 }

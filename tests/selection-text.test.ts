@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { parseHTML } from "linkedom";
 import {
 	chunkPoint, rawRangeFor, readSourceText, selectorFromBoundaries, sourceElements,
-} from "../components/selection-text.ts";
+} from "../src/client/engine/index.ts";
 
 function viewport(html: string) {
 	const { document } = parseHTML(`<html><body><div id="v">${html}</div></body></html>`);
