@@ -42,6 +42,7 @@ export interface DesktopStartupMessageOffer {
 
 export interface DesktopBridge {
 	platform?: string;
+	getPathForFile?: (file: File) => string;
 	chooseAttachmentFolder?: () => Promise<string | null>;
 	pickDirectory?: () => Promise<string | null>;
 	pickFiles?: () => Promise<readonly string[] | null>;
@@ -169,14 +170,54 @@ async function invokePickDirectory(bridge: DesktopBridge | null): Promise<string
 	}
 }
 
-async function invokePickFiles(bridge: DesktopBridge | null): Promise<readonly string[]> {
-	if (typeof bridge?.pickFiles !== "function") return [];
-	try {
-		const res = await bridge.pickFiles();
-		return Array.isArray(res) ? res.filter((p): p is string => typeof p === "string" && p.length > 0) : [];
-	} catch {
-		return [];
+function collectSelectedFilePaths(el: HTMLInputElement, resolvePath: (file: File) => string): readonly string[] {
+	const out: string[] = [];
+	for (const file of Array.from(el.files ?? [])) {
+		try {
+			const p = resolvePath(file);
+			if (typeof p === "string" && p.length > 0) out.push(p);
+		} catch {
+			/* skip non-OS-backed file */
+		}
 	}
+	return out;
+}
+
+function pickPathsViaDomInput(resolvePath: (file: File) => string): Promise<readonly string[]> {
+	const doc = globalThis.document;
+	if (!doc || typeof doc.createElement !== "function") return Promise.resolve([]);
+	return new Promise<readonly string[]>((resolve) => {
+		const el = doc.createElement("input");
+		el.type = "file";
+		el.multiple = true;
+		el.hidden = true;
+		let settled = false;
+		const finish = (paths: readonly string[]) => {
+			if (settled) return;
+			settled = true;
+			el.remove();
+			resolve(paths);
+		};
+		el.addEventListener("change", () => finish(collectSelectedFilePaths(el, resolvePath)), { once: true });
+		el.addEventListener("cancel", () => finish([]), { once: true });
+		doc.body?.append(el);
+		el.click();
+	});
+}
+
+async function invokePickFiles(bridge: DesktopBridge | null): Promise<readonly string[]> {
+	if (typeof bridge?.pickFiles === "function") {
+		try {
+			const res = await bridge.pickFiles();
+			return Array.isArray(res) ? res.filter((p): p is string => typeof p === "string" && p.length > 0) : [];
+		} catch {
+			return [];
+		}
+	}
+	if (typeof bridge?.getPathForFile === "function") {
+		return pickPathsViaDomInput((file) => bridge.getPathForFile!(file));
+	}
+	return [];
 }
 
 async function invokeDismissStartupMessage(

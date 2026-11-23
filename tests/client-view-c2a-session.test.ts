@@ -115,6 +115,12 @@ test("createSessionView handles sticky scroll, transcript width, composer picker
 		assert.notEqual(host.querySelector("[data-peer-transcript].cloudcanvas-ui-sticky-scroll"), null);
 		assert.notEqual(host.querySelector("[data-peer-action='pick-directory']"), null);
 
+		(host.querySelector("[data-peer-action='pick-directory']") as HTMLButtonElement).click();
+		(host.querySelector("[data-peer-action='pick-files']") as HTMLButtonElement).click();
+		await new Promise((r) => setTimeout(r, 15));
+		assert.notEqual(host.querySelector("[data-peer-path-chip='/workspace/notes/']"), null);
+		assert.notEqual(host.querySelector("[data-peer-path-chip='/workspace/svd.tex']"), null);
+
 		fillControl(dom, host.querySelector("[data-peer-composer-input]"), "Derive @notes/svd.md");
 		assert.notEqual(host.querySelector("[data-peer-path-chip='notes/svd.md']"), null);
 		(host.querySelector("[data-peer-action='send-turn']") as HTMLButtonElement).click();

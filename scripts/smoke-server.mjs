@@ -10,6 +10,7 @@ import * as net from "node:net";
 import * as path from "node:path";
 import { verifyCorePlugins } from "./smoke-core-plugins.mjs";
 import { probeEnv, resolveSmokeScratchBase, resolveStandaloneRoot, verifyDemoRuntime } from "./smoke-demo-runtime.mjs";
+import { verifyImageRuntime } from "./smoke-image-runtime.mjs";
 import { createPluginSmokeFixture, verifyPluginServer } from "./smoke-plugin-runtime.mjs";
 import { verifyProviderRuntime } from "./smoke-provider-runtime.mjs";
 
@@ -101,6 +102,7 @@ async function main() {
 	const standalone = isolatedRoot ? path.join(isolatedRoot, "standalone") : SOURCE_STANDALONE;
 	const server = path.join(standalone, "server.js");
 	verifyDemoRuntime(standalone, RUNTIME);
+	verifyImageRuntime(standalone, RUNTIME);
 	verifyProviderRuntime(standalone, RUNTIME);
 	const port = await freePort();
 	const url = `http://127.0.0.1:${port}`;

@@ -1,19 +1,19 @@
 # Architecture
 
-LearnHarness is a Next.js application with an Electron desktop host. The server owns agent runs, conversation records, background work, and filesystem persistence; the browser projects those records into a lesson/practice UI and knowledge graph.
+**peer** (evolved from LearnHarness) is a CloudCanvas client application paired with a standalone Node HTTP/SSE server (`src/api/`) and an Electron desktop host (`electron/`). The server owns agent runs, conversation records, background work, and embedded LumberJack C-ABI v2 DAG persistence (`src/store/lumberjack/`); the browser (`src/client/`) projects those records into a lesson/practice UI and knowledge graph.
 
-This reference describes the [repository source](README.md#about-these-docs). See [Development](development.md) for commands and [the teaching theory](teaching-methodology.md) for pedagogical intent.
+This reference describes the [repository source](README.md#about-these-docs). See [ARCHITECTURE.md](../ARCHITECTURE.md) for the high-level system topology, [Development](development.md) for commands, and [the teaching theory](teaching-methodology.md) for pedagogical intent.
 
 ## Code boundaries
 
 | Area | Responsibility / starting points |
 | --- | --- |
-| `app/` | Pages and HTTP transport; `api/chat/route.ts`, `api/chats/` |
-| `components/` | Browser state and presentation; `session-core.ts`, `chat.tsx`, `graph-view.tsx` |
-| `src/server/` | Composition, admission, liveness, HTTP-facing services; `chat-handler.ts`, `jobs.ts`, `stores.ts` |
+| `src/api/` | Standalone `node:http` + Web `Request -> Response` router (`52` routes), SSE streams, static client/vendor delivery; `main.ts`, `routes.ts`, `handlers/` |
+| `src/client/` | CloudCanvas browser host (`main.js`), `kit/` (`peer-kit`), `engine/` (`peer-engine`), `state/` (`peer-state`), `blocks/`, `theme/`, and `views/` |
+| `src/server/` | Composition, admission, liveness, HTTP-facing services, default LLM compaction (`compaction.ts`), opt-in MFN bridge (`substrate-mfn.ts`); `chat-handler.ts`, `jobs.ts`, `stores.ts` |
 | `src/agent/` | Agent construction, tools, provider streams, workers; `teacher-agent.ts`, `models.ts`, `tools.ts`, `subagents/` |
 | `src/core/` | Contracts, record/view projections, domain algorithms; `input-events.ts`, `native-messages.ts`, `view.ts`, `graph.ts` |
-| `src/store/` | Filesystem adapters for chats, jobs, graph, settings, and credentials |
+| `src/store/lumberjack/` | Embedded LumberJack C-ABI v2 N-API binding (`binding.ts`), DAG stores for chats/jobs/graph/settings/prompts/objects, SSE stream bridge, and legacy `LH_DATA_DIR` auto-importer (`src/store/import-learnharness.ts`) |
 | `electron/` | Desktop launch, navigation/permission guards, credential transport, browser helper, updater |
 
 [`eslint.config.mjs`](../eslint.config.mjs) restricts shell imports into `src/` to the core/server barrels, prevents core imports from IO layers, and prevents agents importing server/store adapters. Dependencies arrive through injected contexts/ports. These rules are not a proof of pure core, one composition root, or one writer per store: some core modules are Node-bound and excluded from the browser barrel; server modules can import adapters. Scripts, Electron, and tests are outside these zones.
@@ -51,7 +51,7 @@ Settlement persists new native messages, plan snapshots, and usage, including pa
 
 [`pi/ui-stream.ts`](../src/server/pi/ui-stream.ts) emits native agent events. Partial-message updates replace a slot; they are not accumulated text deltas. Replay retains settled events and the latest in-flight updates, with coalesced live fan-out. Tool IDs are uniquified against history so persistence, answer routing, and provider context agree.
 
-Disconnecting a browser detaches a view, not the agent. Explicit abort is separate. [`session-core.ts`](../components/session-core.ts) owns reattachment, bounded 409 recovery, and adoption of canonical state. One recovery attachment is allowed after premature EOF/read failure; repeated transport failure shows an error.
+Disconnecting a browser detaches a view, not the agent. Explicit abort is separate. [`session-core.ts`](../src/client/engine/session/session-core.ts) owns reattachment, bounded 409 recovery, and adoption of canonical state. One recovery attachment is allowed after premature EOF/read failure; repeated transport failure shows an error.
 
 Question drafts survive optimistic unmount in memory. Uncertain submissions reconcile the saved record and running state before resending, scoped to the same question occurrence. Provider-response retry is explicit: it preserves failed attempts on disk while omitting the eligible failed tail from temporary model context. It is not mount-time replay or automatic retry of arbitrary failures.
 
@@ -146,28 +146,26 @@ Extraction is the construction writer, not the only mutation: source/session/nod
 
 ## Storage and notifications
 
-[`config.ts`](../config.ts) anchors immutable prompt assets to the application root and mutable state to `LH_DATA_DIR` (default repo `data/`). Storage ports are semantic interfaces in [`ports.ts`](../src/core/ports.ts).
+[`config.ts`](../config.ts) and [`substrate-runtime.ts`](../src/server/substrate-runtime.ts) anchor immutable prompt assets to the application root and mutable state to the embedded LumberJack DAG forest (`PEER_FOREST_DIR`, defaulting to `<PEER_STATE_ROOT>/lumberjack`). Storage ports are semantic interfaces in [`ports.ts`](../src/core/ports.ts). When a legacy LearnHarness flat-file directory (`LH_DATA_DIR`) is present beside an empty LumberJack forest, startup imports it losslessly via [`import-learnharness.ts`](../src/store/import-learnharness.ts) without mutating or deleting the original files.
 
-| Data | Files |
+| Data | Location |
 | --- | --- |
-| Conversations, plans, usage, image snapshots, side questions | `chats/*.json` |
-| Worker computation and delivery obligations | `jobs/*.json` |
-| Propositions, chains, checkpoints, coverage | `graph/{nodes,chains,sessions,coverage}.jsonl` |
-| Sources, organization, positions, render preferences | JSON maps under `graph/` |
-| Preferences and prompt overrides | `settings.json`, `prompts/` |
-| Core plugin writable records | `core-plugin-data/<id>/` |
-| Community plugin code and writable records | `plugins/<id>/{dist,data}/` |
-| Keys and custom-endpoint binding | Separate `auth.json`, selected by `LH_AUTH_FILE` |
+| Conversations, plans, usage, side questions | LumberJack `sessions/<chat_id>` (`Events["main"]`, `Events["turn:*"]`) & `plans/<chat_id>/*` |
+| Worker computation and delivery obligations | LumberJack `sessions/<chat_id>` (`Events["job:*"]`) & job index nodes |
+| Propositions, multi-parent chains, checkpoints, coverage | LumberJack `knowledge/{sources,propositions,chains}/*` |
+| Learner image snapshots | LumberJack content-addressed `/objects` store |
+| Preferences, themes, model catalog, prompt overrides | LumberJack `config/{settings,themes/*,model-catalog,prompts/*}` + `<stateRoot>/boot-appearance.json` |
+| Core plugin writable records | `<dataRoot>/core-plugin-data/<id>/` |
+| Community plugin code and writable records | `<dataRoot>/plugins/<id>/{dist,data}/` |
+| Keys and custom-endpoint binding | Separate `0600` `auth.json`, selected by `LH_AUTH_FILE` / `<PEER_STATE_ROOT>/auth.json` |
 
-Adapters use synchronous filesystem operations. JSONL reads skip corrupt/invalid lines; graph derivation merges repeated assertions. Some replacements use temp-file rename, but ordinary whole-file writes are not database transactions. Same-event-loop serialization is not cross-process locking or crash atomicity. Use **one server owner per data/auth profile**.
+LumberJack enforces single-writer sidecar `flock` locking (`<state>.lock`) across processes and in-process handle reference counting. Use **one server owner per forest/auth profile**.
 
-Chats and graph-family files have separate version guards; absent stamps read as v1, and newer versions are refused. Positions are rebuildable and unstamped. Settings have their own version/sanitization policy. Format counters are not app versions. Golden fixtures exercise compatibility. Graph-store initialization removes retired ledgers, so importing stores is not a universally read-only inspection method.
-
-`/api/chats/:id/stream` is a turn/view stream. `/api/events` is a separate window-level notification stream: an ephemeral, process-local signal to fetch canonical data. [`SERVER_EVENT_TYPES`](../src/core/events.ts) is the event vocabulary. Consumers debounce and refetch on reconnect; notifications have no durable replay. A live turn's terminal controls settlement adoption so a notification fetch does not overwrite partial state. Settlement signals the end of work, not proof of a successful disk write.
+`/api/chats/:id/stream` is a turn/view stream. `/api/events` is a window-level SSE notification stream backed by LumberJack's `ic_lj_stream_poll` bridge (`src/server/stores.ts`). [`SERVER_EVENT_TYPES`](../src/core/events.ts) is the event vocabulary. Consumers debounce and refetch on reconnect. A live turn's terminal controls settlement adoption so a notification fetch does not overwrite partial state.
 
 ## Host and providers
 
-Packaged Electron launches a private standalone Next child on loopback, sets data/auth paths, and loads a sandboxed renderer. Its navigation/permission and credential transport guards are desktop boundaries, not web multi-user authentication. [Desktop releases](desktop-release.md) covers tracing/packaging checks.
+Packaged Electron launches the curated standalone Node server (`dist/server-payload/standalone/server.js`) on loopback, sets `PEER_STATE_ROOT` / `PEER_FOREST_DIR` / `LH_AUTH_FILE`, and loads a sandboxed CloudCanvas renderer. Its navigation/permission and credential transport guards are desktop boundaries, not web multi-user authentication. [Desktop releases](desktop-release.md) covers packaging and smoke gates.
 
 [`models.ts`](../src/agent/models.ts) composes Pi providers and app bridges. Strong/Cheap/Vision slots have no factory model pins. Sessions retain explicit choices; background roles resolve independently. Missing configuration/readiness refuses rather than silently choosing another provider.
 
@@ -197,7 +195,7 @@ The [session-extension contract](plugin-session-extension-contract.md) specifies
 
 ## Shared dialog and interaction foundation
 
-Native and plugin dialogs, anchored popups and page surfaces share [`interaction-layers.tsx`](../components/interaction-layers.tsx). Escape belongs to one eligible topmost owner; covered scopes cannot submit, dictate, or steal focus. Dialogs use the shared host frame, while plugins mount content through controlled HTMLElement/cleanup contracts. Settings has a single host-owned instance. Focus entry/return respects newer owners; visual stacking alone does not make one plugin the lifetime owner of another plugin's surface. See [plugin UI contracts](plugin-authoring.md#controlled-host-ui) and [plugin architecture](plugin-architecture.md).
+Native and plugin dialogs, anchored popups and page surfaces share [`interaction-scope.ts`](../src/client/engine/dom/interaction-scope.ts) and [`layers.js`](../src/client/kit/layers.js). Escape belongs to one eligible topmost owner; covered scopes cannot submit, dictate, or steal focus. Dialogs use the shared CloudCanvas host frame, while plugins mount content through controlled HTMLElement/cleanup contracts (`src/client/views/plugins/`). Settings has a single host-owned instance. Focus entry/return respects newer owners; visual stacking alone does not make one plugin the lifetime owner of another plugin's surface. See [plugin UI contracts](plugin-authoring.md#controlled-host-ui) and [plugin architecture](plugin-architecture.md).
 
 ## Verification starting points
 

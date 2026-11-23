@@ -1,18 +1,22 @@
 /**
- * Pure `@path` token extraction, clipboard image extraction, and `FileReader`
- * PNG/JPEG attachment helpers shared by the session composer, practice dock,
- * and new-session draft input.
+ * Pure `@path` & backtick-quoted path token extraction, Electron `getPathForFile`
+ * resolution, clipboard image extraction, and `FileReader` PNG/JPEG attachment
+ * helpers shared by the session composer, practice dock, and new-session draft input.
  */
+import { directoryReferencePath, filePathLabel, parseFilePaths, quoteFilePath } from "peer-engine";
 
 const AT_PATH_RE = /(?:^|(?<=\s))@([^\s`]+)/g;
-const BACKTICK_PATH_RE = /`(\/[^`\n]+|~\/[^`\n]+|[a-zA-Z]:[\\/][^`\n]+)`/g;
 const DATA_URL_PREFIX_RE = /^data:([^;]+);base64,/;
 
+function isRootedSyntax(rawPath) {
+	return rawPath.startsWith("/")
+		|| rawPath.startsWith("~/")
+		|| /^[a-z]:[\\/]/i.test(rawPath)
+		|| /^\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/u.test(rawPath);
+}
+
 export function basenameOfPath(rawPath) {
-	const clean = String(rawPath ?? "").replace(/[\\/]+$/, "");
-	if (!clean) return String(rawPath ?? "");
-	const parts = clean.split(/[\\/]/);
-	return parts[parts.length - 1] || clean;
+	return filePathLabel(String(rawPath ?? ""));
 }
 
 export function extractPathTokens(text) {
@@ -27,12 +31,10 @@ export function extractPathTokens(text) {
 		seen.add(raw);
 		tokens.push({ id: raw, raw, path, label: `@${basenameOfPath(path)}` });
 	}
-	for (const match of source.matchAll(BACKTICK_PATH_RE)) {
-		const raw = match[0];
-		const path = match[1].trim();
-		if (!path || seen.has(raw)) continue;
-		seen.add(raw);
-		tokens.push({ id: raw, raw, path, label: `@${basenameOfPath(path)}` });
+	for (const part of parseFilePaths(source)) {
+		if (part.kind !== "path" || seen.has(part.text)) continue;
+		seen.add(part.text);
+		tokens.push({ id: part.text, raw: part.text, path: part.path, label: basenameOfPath(part.path) });
 	}
 	return tokens;
 }
@@ -51,10 +53,16 @@ export function removePathTokenFromText(text, rawToken) {
 	return `${before}${after}`.replace(/^ +/, "");
 }
 
-export function appendPathTokenToText(text, filePath) {
+export function appendPathTokenToText(text, filePath, options = {}) {
 	const clean = String(filePath ?? "").trim();
 	if (!clean) return String(text ?? "");
-	const token = /\s/.test(clean) ? `\`${clean}\`` : `@${clean}`;
+	let token;
+	if (isRootedSyntax(clean)) {
+		const normalized = options.directory ? directoryReferencePath(clean) : clean;
+		token = quoteFilePath(normalized);
+	} else {
+		token = /\s/.test(clean) ? `\`${clean}\`` : `@${clean}`;
+	}
 	const current = String(text ?? "");
 	if (!current || /\s$/.test(current)) return `${current}${token} `;
 	return `${current} ${token} `;
@@ -112,6 +120,19 @@ function readSingleImageBase64(file, mimeType, seq) {
 	});
 }
 
+function resolveOsBackedFilePath(file) {
+	try {
+		const resolver = globalThis.window?.lh?.getPathForFile ?? globalThis.lh?.getPathForFile;
+		if (typeof resolver === "function") {
+			const resolved = resolver(file);
+			if (typeof resolved === "string" && resolved.trim().length > 0) return resolved.trim();
+		}
+	} catch {
+		/* non-OS-backed File in Electron webUtils */
+	}
+	return typeof file?.path === "string" ? file.path.trim() : "";
+}
+
 let attachSeq = 0;
 
 export async function readDroppedOrPickedFiles(fileList) {
@@ -119,15 +140,17 @@ export async function readDroppedOrPickedFiles(fileList) {
 	const images = [];
 	const paths = [];
 	for (const file of files) {
+		const nativePath = resolveOsBackedFilePath(file);
+		if (nativePath) {
+			paths.push(nativePath);
+			continue;
+		}
 		const mimeType = normalizeImageMime(file);
 		if (mimeType) {
 			attachSeq += 1;
 			const loaded = await readSingleImageBase64(file, mimeType, attachSeq);
 			if (loaded) images.push(loaded);
-			continue;
 		}
-		const nativePath = typeof file?.path === "string" ? file.path.trim() : "";
-		if (nativePath) paths.push(nativePath);
 	}
 	return { images, paths };
 }

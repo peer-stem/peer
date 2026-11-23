@@ -126,7 +126,7 @@ does not destroy Settings.
 ### Plugin menu repeated-anchor toggle
 
 Within one plugin UI owner, repeated `openMenu` calls for the exact same anchor element
-toggle the existing menu closed, synchronously even before React mounts it. Closing calls
+toggle the existing menu closed synchronously. Closing calls
 the existing menu's latest `onClose` once and returns an inert handle for the repeated call.
 The incoming props/callback do not create another menu. Different owners and anchors
 retain independent behavior.
@@ -159,15 +159,16 @@ plugin, not the picker.
 
 ## Host implementation
 
-Private implementation modules are `components/interaction-layers.tsx`,
-`components/host-dialog.tsx`, `components/menu-shell.tsx` and
-`components/popover-dismiss.ts`. They coordinate ownership and paint without owning domain
+Private implementation modules live in `src/client/engine/dom/interaction-scope.ts`,
+`src/client/engine/dom/popover-dismiss.ts`, `src/client/kit/layers.js`,
+`src/client/kit/dialog.js`, `src/client/kit/popover-menu.js`, and
+`src/client/views/plugins/plugin-overlays.js`. They coordinate ownership and paint without owning domain
 validation, authentication cancellation, source mutations or plugin business logic.
 
-Modal composition uses non-looping Radix FocusScope containment, outside-content
-accessibility isolation, nested scroll isolation and host-owned portals/backdrops.
-Leaf-first dismissal replaces stock capture-phase Escape dismissal. Passive tooltips use
-Popper/Presence without registering an interaction owner.
+Modal composition uses CloudCanvas layer stacks, outside-content
+accessibility isolation, nested scroll isolation and host-owned backdrops.
+Leaf-first dismissal handles Escape before containing surfaces. Passive tooltips render
+without registering an interaction owner.
 
 Escape ownership is observed before routing unconsumed events after leaf handlers. Native
 Tab defaults are prevented without stopping propagation. Find, Enter submission,
@@ -179,8 +180,8 @@ Settings commits distinguish acceptance, validation rejection, blocked writes an
 persistence failure. Revision tickets protect newer drafts; native number inputs retain
 steppers and `badInput` handling so incomplete tokens are not mistaken for empty values.
 Disposed or superseded opening requests cannot activate after late responses. Covering a
-parent does not dispose its content. Portaled popup ownership keeps focus, accessibility,
-scrolling and paint aligned without manual React DOM relocation or unrelated z-index jumps.
+parent does not dispose its content. Layer-owned popup ownership keeps focus, accessibility,
+scrolling and paint aligned without unrelated z-index jumps.
 
-Interaction providers live in the client AppShell. Module initialization/server rendering
-does not access browser globals or import private server/store code into the client graph.
+Interaction layers are initialized in `src/client/views/shell/shell.js`. Module initialization
+does not access private server/store code from the client graph.
