@@ -10,7 +10,7 @@ import { createPluginSmokeFixture } from "../scripts/smoke-plugin-runtime.mjs";
 import { seedAuthoringReferenceFixture } from "./helpers/plugin-authoring-fixture.ts";
 
 const source = fs.readFileSync(new URL("../scripts/build-server.mjs", import.meta.url), "utf8");
-const STANDALONE = path.join(".next", "standalone");
+const STANDALONE = path.join("dist", "server-payload", "standalone");
 const PROMPT = path.join("src", "agent", "system-prompt.md");
 const AUTHORING_DOCS = [
 	"plugin-authoring.md", "plugin-architecture.md", "plugin-question-contract.md",
@@ -60,7 +60,7 @@ function withPayload(test: (fixture: {
 		}
 		for (const file of ["SKILL.md", "README.md"]) write(`skills/learnharness-plugins/${file}`, fs.readFileSync(new URL(`../skills/learnharness-plugins/${file}`, import.meta.url), "utf8"));
 		write(path.join(STANDALONE, "server.js"));
-		write(path.join(".next", "static", "runtime.js"));
+		write(path.join("public", "client", "build", "state.js"), "export {};\n");
 		write(path.join("public", "asset.txt"));
 		write(path.join(STANDALONE, PROMPT));
 		write(path.join(STANDALONE, "src", "agent", "prompts", "teacher", "20-teaching.md"));
@@ -130,7 +130,7 @@ describe("desktop standalone payload", () => {
 			assert.ok(fs.existsSync(path.join(root, "dist", "old.app", "nested.dmg")));
 			assert.ok(fs.existsSync(path.join(root, "node_modules", "electron", "dist", "electron.exe")));
 			for (const file of runtime) assert.ok(fs.existsSync(path.join(root, STANDALONE, file)), file);
-			assert.ok(fs.existsSync(path.join(root, STANDALONE, ".next", "static", "runtime.js")));
+			assert.ok(fs.existsSync(path.join(root, STANDALONE, "public", "client", "build", "state.js")));
 			assert.ok(fs.existsSync(path.join(root, STANDALONE, "public", "asset.txt")));
 			for (const asset of ["scripts/plugin-loader.cjs", "public/plugin-loader.js", "plugin-authoring/docs/plugin-authoring.md", "plugin-authoring/docs/plugin-question-contract.md", "plugin-authoring/docs/plugin-session-extension-contract.md", "plugin-authoring/docs/plugin-tree-contract.md", "plugin-authoring/types/index.d.ts", "plugin-authoring/examples/plugins/hello-plugin/dist/manifest.json", "plugin-authoring/examples/plugins/hello-plugin/dist/main.js", "plugin-authoring/SKILL.md", "plugin-authoring/README.md", "plugin-authoring/bundle.json", "plugin-authoring/tools/install-plugin-local.mjs", "plugin-authoring/docs/plugin-api/README.md", "plugin-authoring/plugins/flashcards/src/backend.cjs", "plugin-authoring/plugins/ui-showcase/src/gallery.ts", "public/plugin-authoring/learnharness-plugins.zip"]) {
 				assert.ok(fs.existsSync(path.join(root, STANDALONE, asset)), asset);

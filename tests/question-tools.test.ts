@@ -27,9 +27,9 @@ import {
 	type TeacherToolContext,
 } from "../src/agent/tools.ts";
 import { TOGGLEABLE_TOOLS } from "../src/core/pending.ts";
-import { jobStore } from "../src/store/jobs.ts";
+import { jobStore } from "../src/server/stores.ts";
 import { probeQuizInputSchema, quizInputObject, quizInputProblems } from "../src/core/question-core.ts";
-import { chatStore } from "../src/store/chats.ts";
+import { chatStore } from "../src/server/stores.ts";
 import { PATHS } from "../config.ts";
 
 const dataDir = path.join(PATHS.root, "data");
@@ -39,7 +39,7 @@ const createdChats: string[] = [];
 after(() => {
 	for (const id of createdChats) {
 		try {
-			fs.unlinkSync(path.join(PATHS.chats, `${id}.json`));
+			chatStore.deleteChat(id);
 		} catch {
 			/* scratch cleanup, best effort */
 		}

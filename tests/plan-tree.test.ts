@@ -16,7 +16,7 @@ import { derivePlanStatuses, derivedNodeStatus, type PlanTree, type PlanToolResu
 import { createTree, emptyTree, PlanTreeError } from "../src/core/plan-tree.ts";
 import { planTools } from "../src/agent/tools/plan.ts";
 import { parseMermaidPlan } from "../src/agent/tools/mermaid-plan.ts";
-import { chatStore } from "../src/store/chats.ts";
+import { chatStore } from "../src/server/stores.ts";
 import { PATHS } from "../config.ts";
 
 const N = (id: string, title = id, summary?: string) => ({ id, title, ...(summary ? { summary } : {}) });
@@ -90,7 +90,7 @@ const createdChats: string[] = [];
 after(() => {
 	for (const id of createdChats) {
 		try {
-			fs.unlinkSync(path.join(PATHS.chats, `${id}.json`));
+			chatStore.deleteChat(id);
 		} catch {
 			/* already gone */
 		}

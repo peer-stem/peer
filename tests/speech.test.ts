@@ -5,8 +5,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { LocalTranscriber, toWav } from "../components/dictation-local.ts";
-import { splitForSpeech, toSpeakable } from "../components/speech-playback.ts";
+import { LocalTranscriber, toWav } from "../src/client/engine/index.ts";
+import { splitForSpeech, toSpeakable } from "../src/client/engine/index.ts";
 import { normalizeSpeechEndpoint, resolveSpeech, sanitizeSpeechSettings, SPEECH_TEXT_LIMIT, type SpeechSettings } from "../src/core/contracts/speech.ts";
 import { parseSpeechSettingsBody } from "../src/server/settings-body.ts";
 import { speakResponse, transcribeResponse, voicesResponse } from "../src/server/speech.ts";

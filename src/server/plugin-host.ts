@@ -14,7 +14,7 @@ import type { PluginAgentKind, PluginBackendContext, PluginBackendModule, Plugin
 import type { PluginAgentService } from "../core/plugin-agents.ts";
 import type { PluginWorkerService } from "../core/plugin-workers.ts";
 import type { ServerEvent } from "../core/events.ts";
-import { safePluginDataDirectory } from "../store/plugin-data-paths.ts";
+import { safePluginDataDirectory } from "./plugin-data-paths.ts";
 
 /** Expected host/transport failure. Exceptions thrown by plugin handlers stay ordinary 500 errors. */
 export class PluginHostError extends Error {

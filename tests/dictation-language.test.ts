@@ -61,10 +61,10 @@ describe("Nova-3 dictation language contract", () => {
 const testData = mkdtempSync(path.join(tmpdir(), "lh-dictation-settings-"));
 process.env.LH_DATA_DIR = testData;
 after(() => { rmSync(testData, { recursive: true, force: true }); });
-const { readSettings, writeSettings } = await import("../src/store/settings.ts");
+const { readSettings, writeSettings } = await import("../src/server/stores.ts");
 
 it("the section route persists language independently and rejects unsupported values without writing", async () => {
-	const { PUT } = await import("../app/api/settings/[section]/route.ts");
+	const { PUT } = await import("../src/api/handlers/settings/[section]/route.ts");
 	writeSettings({ version: 1, general: { autoUpdate: false } });
 	const put = (language: string) => PUT(new Request("http://localhost/api/settings/dictation", {
 		method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ language }),

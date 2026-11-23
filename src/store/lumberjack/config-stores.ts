@@ -41,22 +41,30 @@ export function createLumberJackSettingsStore(forest: LumberJackForest): Setting
 	readFileAccessSettings(): FileAccessSettingsResult;
 } {
 	const readFileAccessSettings = (): FileAccessSettingsResult => {
-		const snap = forest.getNode("config/settings");
-		if (!snap || snap.slot === undefined) {
-			return { ok: true, settings: { restricted: false, folders: [] } };
+		try {
+			const snap = forest.getNode("config/settings");
+			if (!snap || snap.slot === undefined) {
+				return { ok: true, settings: { restricted: false, folders: [] } };
+			}
+			return fileAccessFromRaw(snap.slot);
+		} catch {
+			return { ok: false, error: FILE_ACCESS_ERROR };
 		}
-		return fileAccessFromRaw(snap.slot);
 	};
 
 	const readSettings = (): UserSettings | null => {
-		const snap = forest.getNode("config/settings");
-		if (!snap || snap.slot === undefined) return null;
-		const record = sanitizeUserSettings(snap.slot);
-		if (!record) return null;
-		if (!fileAccessFromRaw(snap.slot).ok) {
-			record.agent = { ...record.agent, fileAccess: { restricted: true, folders: [] } };
+		try {
+			const snap = forest.getNode("config/settings");
+			if (!snap || snap.slot === undefined) return null;
+			const record = sanitizeUserSettings(snap.slot);
+			if (!record) return null;
+			if (!fileAccessFromRaw(snap.slot).ok) {
+				record.agent = { ...record.agent, fileAccess: { restricted: true, folders: [] } };
+			}
+			return record;
+		} catch {
+			return null;
 		}
-		return record;
 	};
 
 	const writeSettings = (raw: unknown): UserSettings => {

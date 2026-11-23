@@ -16,6 +16,7 @@ import {
 	parseThemeFile,
 	resolveTheme,
 	sanitizeThemeFile,
+	shiftHex,
 	THEME_COLOR_KEYS,
 	themeIdFromName,
 	themeVars,
@@ -92,10 +93,36 @@ function cssBlock(css: string, selector: string): Map<string, string> {
 }
 
 describe("themeVars — the adapter", () => {
-	it("Default reproduces app/globals.css's literals exactly", () => {
-		const css = fs.readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-		const block = cssBlock(css, ":root,\n.dark");
-		for (const [token, value] of Object.entries(themeVars(DEFAULT_THEME.colors, "dark"))) {
+	it("Default reproduces public/client/peer.css's :root literals exactly", () => {
+		const css = fs.readFileSync(new URL("../public/client/peer.css", import.meta.url), "utf8");
+		const block = cssBlock(css, ":root");
+		const c = DEFAULT_THEME.colors;
+		const hover = shiftHex(c.surface, 14);
+		const expected: Record<string, string> = {
+			"--cc-bg": c.background,
+			"--cc-text": c.text,
+			"--cc-text-muted": c.textMuted,
+			"--cc-accent": c.accent,
+			"--cc-focus-ring": c.accent,
+			"--cc-card-bg": c.surface,
+			"--cc-card-border": c.border,
+			"--cc-card-border-hover": hover,
+			"--cc-ui-surface": c.surface,
+			"--cc-ui-selected": hover,
+			"--cc-border": c.border,
+			"--cc-btn-bg": c.surface,
+			"--cc-btn-bg-hover": hover,
+			"--cc-btn-border": c.border,
+			"--cc-btn-text": c.text,
+			"--cc-tone-danger": c.error,
+			"--cc-tone-success": c.success,
+			"--cc-tone-warning": c.warning,
+			"--cc-tone-info": c.accent,
+			"--cc-ink-strong": c.bold,
+			"--cc-ink-em": c.italic,
+			"--cc-ink-code": c.code,
+		};
+		for (const [token, value] of Object.entries(expected)) {
 			assert.equal(block.get(token), value, token);
 		}
 	});
@@ -147,8 +174,8 @@ describe("graph edges", () => {
 		for (const t of BUILTIN_THEMES) {
 			assert.equal(themeVars(t.colors, t.mode)["--muted-foreground"], t.colors.textMuted, t.id);
 		}
-		const view = fs.readFileSync(new URL("../components/graph-view.tsx", import.meta.url), "utf8");
-		assert.match(view, /edge: tokenHex\("--muted-foreground"\)/);
+		const homeScreen = fs.readFileSync(new URL("../src/client/state/screens/home.ts", import.meta.url), "utf8");
+		assert.match(homeScreen, /edge:\s*c\.textMuted/);
 	});
 });
 

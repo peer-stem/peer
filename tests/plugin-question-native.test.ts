@@ -210,8 +210,8 @@ test("chat-handler saves the genuine native answer before teacher construction, 
 	const { runningTurn } = await import("../src/server/turn-runs.ts");
 	const { isTurnRunning, beginTurn, endTurn } = await import("../src/server/turn-liveness.ts");
 	const { createTeacherAgent } = await import("../src/agent/teacher-agent.ts");
-	const dismiss = await import("../app/api/chats/[id]/dismiss/route.ts");
-	const recordRoute = await import("../app/api/chats/[id]/route.ts");
+	const dismiss = await import("../src/api/handlers/chats/[id]/dismiss/route.ts");
+	const recordRoute = await import("../src/api/handlers/chats/[id]/route.ts");
 	process.env.OPENROUTER_API_KEY = "isolated-test-fixture-only";
 	const global = globalThis as typeof globalThis & { __lhPlugins?: unknown };
 	const previous = global.__lhPlugins;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import { navigateChainRows, type ChainNavigationRow } from "../components/chain-navigation.ts";
-import { navigateTreeRows, type TreeNavigationRow } from "../components/tree-navigation.ts";
+import { navigateChainRows, type ChainNavigationRow } from "../src/client/engine/index.ts";
+import { navigateTreeRows, type TreeNavigationRow } from "../src/client/engine/index.ts";
 const rows: ChainNavigationRow[] = [
 	{ key: "folder", depth: 0, expanded: true }, { key: "nested", depth: 1, expanded: true },
 	{ key: "book", depth: 2, expanded: true }, { key: "chain", depth: 3, expanded: true },

@@ -7,7 +7,7 @@ import { Type } from "typebox";
 import type { AssistantMessage, JsonObject, TranscriptContext } from "@earendil-works/pi-ai";
 import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { createPluginAgentService, type PluginAgentServiceDeps } from "../src/agent/plugin-agents.ts";
-import { createPluginAgentRecordStore } from "../src/store/plugin-agent-records.ts";
+import { createPluginAgentRecordStore, ensureActiveLumberJackBundle } from "../src/server/stores.ts";
 import type { PluginAgentDefinition, PluginAgentRecord, PluginAgentService, PluginAgentSnapshot, PluginCallPurpose } from "../src/core/plugin-agents.ts";
 import type { PiEngine } from "../src/agent/models.ts";
 
@@ -387,9 +387,12 @@ test("identifier guards cover operations and store paths; corrupt records fail v
 		await assert.rejects(f.service.send(id, "Go", { requestId: invalid }), /Invalid/);
 		assert.throws(() => f.store.get(invalid), /Invalid/);
 	}
-	assert.deepEqual(readdirSync(join(f.directory, "agents")), [`${id}.json`]);
-	const saved = readFileSync(join(f.directory, "agents", `${id}.json`), "utf8");
-	writeFileSync(join(f.directory, "agents", `${id}.json`), "{broken");
-	assert.throws(() => f.store.list(), /Unable to read/);
-	writeFileSync(join(f.directory, "agents", `${id}.json`), saved);
+	const forest = ensureActiveLumberJackBundle().forest;
+	const scopeHex = Buffer.from(join(f.directory, "agents"), "utf8").toString("hex");
+	const nodePath = `config/plugins/${scopeHex}/agents/${id}`;
+	assert.deepEqual(forest.listChildren(`config/plugins/${scopeHex}/agents`).map((n) => n.name), [id]);
+	const saved = forest.getNode(nodePath)!.slot;
+	forest.upsertNode({ path: nodePath, type: "leaf", kind: "plugin_agent", slot: "{broken" });
+	assert.throws(() => f.store.list(), /Invalid plugin agent record/);
+	forest.upsertNode({ path: nodePath, type: "leaf", kind: "plugin_agent", slot: saved });
 });

@@ -16,7 +16,7 @@ import type { SteerMessage } from "../src/core/contracts.ts";
 import { hasProbeDone, type LhMessage } from "../src/core/native-messages.ts";
 import { phaseAt3Lh } from "../src/core/phases.ts";
 import { HANDOFF_TEXT } from "../src/core/contracts.ts";
-import { chatStore } from "../src/store/chats.ts";
+import { chatStore } from "../src/server/stores.ts";
 import { PATHS } from "../config.ts";
 
 const dataDir = PATHS.data;
@@ -26,7 +26,7 @@ const createdChats: string[] = [];
 after(() => {
 	for (const id of createdChats) {
 		try {
-			fs.unlinkSync(path.join(PATHS.chats, `${id}.json`));
+			chatStore.deleteChat(id);
 		} catch {
 			/* scratch cleanup, best effort */
 		}

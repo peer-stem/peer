@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { sideThreadReducer as reduce, type SideThreadState } from "../components/use-side-thread.ts";
+import { sideThreadReducer as reduce, type SideThreadState } from "../src/client/engine/index.ts";
 import type { SideChatThread } from "../src/core/contracts/chat.ts";
 
 const anchor = { kind: "composer" as const };

@@ -68,8 +68,8 @@ import {
 import { isJobLive, registerJobAbort, unregisterJobAbort } from "../src/agent/subagents/aborts.ts";
 import { beginTurn, endTurn, isTurnRunning } from "../src/server/turn-liveness.ts";
 import { persistTurn } from "../src/server/turn-service.ts";
-import { chatStore } from "../src/store/chats.ts";
-import { jobStore } from "../src/store/jobs.ts";
+import { chatStore } from "../src/server/stores.ts";
+import { jobStore } from "../src/server/stores.ts";
 import { createJobRunner, pdfModelOverride, researchModelOverride } from "../src/agent/subagents/runner.ts";
 import { providerKeyMissing, type ModelSlotName } from "../src/core/settings.ts";
 import type { PiEngine } from "../src/agent/models.ts";
@@ -160,14 +160,8 @@ afterEach(() => {
 after(() => {
 	for (const id of createdChats) {
 		try {
-			fs.unlinkSync(path.join(PATHS.chats, `${id}.json`));
-		} catch {
-			/* already gone */
-		}
-	}
-	for (const id of createdJobs) {
-		try {
-			fs.unlinkSync(path.join(JOBS_DIR, `${id}.json`));
+			jobStore.deleteJobsForChat(id);
+			chatStore.deleteChat(id);
 		} catch {
 			/* already gone */
 		}

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PluginFrontendManager } from "../components/plugin-manager.ts";
-import { PluginSubmissionRunner } from "../components/plugin-submission-runner.ts";
+import { PluginFrontendManager } from "../src/client/engine/index.ts";
+import { PluginSubmissionRunner } from "../src/client/engine/index.ts";
 import type { PluginFrontendContext, PluginInfo, PluginSubmissionTarget, PluginSurfaceTarget } from "../src/core/index.ts";
 
 const target: PluginSubmissionTarget = { type: "text", sessionId: "chat", sessionKind: "teaching", channels: ["content"], surfaceTarget: {} as PluginSurfaceTarget };

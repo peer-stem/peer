@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import { createNotesImportQueue } from "../components/notes-import-queue.ts";
-import { MAX_IMPORT_BYTES } from "../lib/notes-import-limits.ts";
-import type { NotesImportResult } from "../components/notes-import.tsx";
+import { createNotesImportQueue } from "../src/client/engine/index.ts";
+import { MAX_IMPORT_BYTES } from "../src/core/notes-import-limits.ts";
+import type { NotesImportResult } from "../src/client/engine/index.tsx";
 const tick = () => new Promise<void>((done) => setImmediate(done));
 const file = (name: string, path?: string) => { const f = new File(["notes"], name); if (path) Object.defineProperty(f, "webkitRelativePath", { value: path }); return f; };
 const success = (name: string): NotesImportResult => ({ requestIndex: 0, filePath: name, ok: true, outcome: "completed", stats: { nodes: 0 } });

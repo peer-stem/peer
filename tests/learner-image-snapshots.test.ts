@@ -9,9 +9,9 @@ import { checkImageDimensions, MAX_LEARNER_IMAGE_BYTES } from "../src/agent/tool
 import { createShowImageTool } from "../src/agent/tools/show-image.ts";
 import { annotationPlacementProblem } from "../src/agent/subagents/annotation-svg.ts";
 import { embedLearnerImage } from "../src/core/learner-image-svg.ts";
-import { chatStore } from "../src/store/chats.ts";
+import { chatStore } from "../src/server/stores.ts";
 import { jobTools } from "../src/agent/tools/jobs.ts";
-import { GET } from "../app/api/chats/[id]/images/[snapshotId]/route.ts";
+import { GET } from "../src/api/handlers/chats/[id]/images/[snapshotId]/route.ts";
 import type { JobRecord, ShowImageDetails } from "../src/core/contracts.ts";
 import type { JobStore } from "../src/core/ports.ts";
 

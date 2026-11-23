@@ -7,7 +7,7 @@ import type { AssistantMessage, JsonObject, ToolCall, TranscriptContext } from "
 import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { Type } from "typebox";
 import { createPluginWorkerService, type PluginWorkerServiceDeps } from "../src/agent/plugin-workers.ts";
-import { createPluginTaskRecordStore } from "../src/store/plugin-task-records.ts";
+import { createPluginTaskRecordStore } from "../src/server/stores.ts";
 import { runSubagent } from "../src/agent/subagents/pi-run.ts";
 import { markUnadmittedUsage } from "../src/agent/subscription-request-cycle.ts";
 import type { PluginTaskSnapshot, PluginWorkerDefinition, PluginWorkerStartOptions } from "../src/core/plugin-workers.ts";
@@ -73,7 +73,7 @@ test("acceptance is synchronous, durable and independent of subscribers; native 
 	assert(saved.messages.some(m => m.role === "toolResult" && !m.isError));
 	assert.equal(saved.usage?.steps, 1); assert.equal(f.billed.length, 1); assert(f.changes() > 0);
 	assert.deepEqual(f.bound[0], [pin, "background", { temperature: 0.2, maxTokens: 77 }]);
-	assert.deepEqual(readdirSync(f.directory), ["tasks"]);
+	assert.deepEqual(f.store.list().map(s => s.id), [initial.id]);
 });
 
 test("requestId only deduplicates identical immutable acceptances, including across service restart", async t => {
@@ -193,9 +193,9 @@ test("timeout and activation disposal persist first terminal outcomes without re
 	const active = f.service.start("worker", options({ requestId: "active" })); await tick();
 	f.activation.abort(); assert.equal((await f.service.wait(active.id)).status, "interrupted");
 	assert.throws(() => f.service.start("worker", options({ requestId: "disabled" })), /disabled|disposed/);
-	const saved = readFileSync(join(f.directory, "tasks", `${active.id}.json`), "utf8");
+	const saved = JSON.stringify(f.store.get(active.id));
 	gate.resolve(message([submit("late")])); await tick();
-	assert.equal(readFileSync(join(f.directory, "tasks", `${active.id}.json`), "utf8"), saved);
+	assert.equal(JSON.stringify(f.store.get(active.id)), saved);
 	const restarted = createPluginWorkerService({ ...f.deps, signal: undefined }); t.after(() => restarted.dispose());
 	assert.equal(restarted.get(active.id).status, "interrupted"); assert.equal(f.calls.length, priorCalls + 1);
 });

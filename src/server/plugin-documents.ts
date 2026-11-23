@@ -1,4 +1,4 @@
-import { readBoundedFormData, FormBodyLimitError } from "../../lib/bounded-form-data.ts";
+import { readBoundedFormData, FormBodyLimitError } from "./bounded-form-data.ts";
 import { convertPdf } from "../agent/subagents/pdf-ops.ts";
 import { joinPages } from "../agent/subagents/pdf-markdown.ts";
 import { PluginHostError } from "./plugin-host.ts";

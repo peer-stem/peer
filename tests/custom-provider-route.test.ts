@@ -16,20 +16,23 @@ import type { CustomProviderSettings } from "../src/core/settings.ts";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-custom-route-"));
 process.env.LH_DATA_DIR = dir;
 process.env.LH_AUTH_FILE = path.join(dir, "auth.json");
-const SETTINGS_FILE = path.join(dir, "settings.json");
 
 const realFetch = globalThis.fetch;
-after(() => {
+after(async () => {
 	globalThis.fetch = realFetch;
+	await storesMod?.resetActiveLumberJackForTests();
 	fs.rmSync(dir, { recursive: true, force: true });
 	delete process.env.LH_DATA_DIR;
 	delete process.env.LH_AUTH_FILE;
 });
 
-type Route = typeof import("../app/api/custom-provider/route.ts");
+type Route = typeof import("../src/api/handlers/custom-provider/route.ts");
+type StoresMod = typeof import("../src/server/stores.ts");
 let route: Route;
+let storesMod: StoresMod;
 before(async () => {
-	route = await import("../app/api/custom-provider/route.ts");
+	storesMod = await import("../src/server/stores.ts");
+	route = await import("../src/api/handlers/custom-provider/route.ts");
 });
 
 const BASE = "http://h/v1";
@@ -46,11 +49,11 @@ const CONNECTED = {
 };
 
 function seed(record: unknown): void {
-	fs.writeFileSync(SETTINGS_FILE, JSON.stringify(record, null, "\t"), "utf-8");
+	storesMod.writeSettingsRecord(record);
 }
 
 function stored(): { customProvider?: CustomProviderSettings } {
-	return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf-8"));
+	return storesMod.readSettingsRecord() ?? {};
 }
 
 function answerWith(status: number, statusText: string, body?: unknown): void {

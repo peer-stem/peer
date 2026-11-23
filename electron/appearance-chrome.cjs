@@ -37,11 +37,27 @@ function themeSourceFor(mode) {
 /** Mirror the server's data path in external-dev mode, not the shell's
  * separate -dev userData. Packaged uses the path given to its child. */
 function serverDataDir({ devUrl, env, packagedDataDir, repoRoot }) {
+	if (env?.PEER_STATE_ROOT) return path.resolve(env.PEER_STATE_ROOT);
 	if (!devUrl) return packagedDataDir;
 	return env.LH_DATA_DIR ? path.resolve(env.LH_DATA_DIR) : path.join(repoRoot, "data");
 }
 
 function readAppearance(dataDir) {
+	if (typeof fs.existsSync === "function") {
+		const candidates = [
+			path.join(dataDir, "boot-appearance.json"),
+			...(path.basename(dataDir) === "data" ? [path.join(path.dirname(dataDir), "boot-appearance.json")] : []),
+			path.join(dataDir, "peer-state", "boot-appearance.json"),
+		];
+		for (const bootFile of candidates) {
+			if (!fs.existsSync(bootFile)) continue;
+			try {
+				const boot = JSON.parse(fs.readFileSync(bootFile, "utf8"));
+				const norm = normalizeAppearance(boot);
+				return { mode: norm.mode, background: norm.background ?? (norm.mode === "light" ? "#f5f5f3" : "#141414") };
+			} catch { /* fall through to settings.json */ }
+		}
+	}
 	let a;
 	try { a = JSON.parse(fs.readFileSync(path.join(dataDir, "settings.json"), "utf8"))?.appearance; }
 	catch { /* absent/corrupt record = factory */ }

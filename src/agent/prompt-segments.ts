@@ -47,11 +47,22 @@ function overrideFileFor(segmentPath: string): string {
 	return path.join(PROMPTS_OVERRIDE_DIR, ...segmentPath.split("/"));
 }
 
-/** Read one override file, or null when absent/invalid — the composition
- *  side's reader (the store's readOverride is the same mirror layout,
- *  kept separate because the layers may not import each other). */
+export type PromptOverrideReader = (segmentPath: string) => string | null;
+
+const PROMPT_READER_KEY = Symbol.for("peer.agent.promptOverrideReader");
+type GlobalWithPromptReader = typeof globalThis & { [PROMPT_READER_KEY]?: PromptOverrideReader | null };
+
+export function setPromptOverrideReader(reader: PromptOverrideReader | null): void {
+	(globalThis as GlobalWithPromptReader)[PROMPT_READER_KEY] = reader;
+}
+
+/** Read one override record, or null when absent/invalid — delegates to the
+ *  composition-root LumberJack reader when registered, without importing
+ *  server/store modules from the agent layer. */
 export function readPromptOverride(segmentPath: string): string | null {
 	if (!isValidSegmentPath(segmentPath)) return null;
+	const injected = (globalThis as GlobalWithPromptReader)[PROMPT_READER_KEY];
+	if (injected) return injected(segmentPath);
 	try {
 		return fs.readFileSync(overrideFileFor(segmentPath), "utf-8");
 	} catch {

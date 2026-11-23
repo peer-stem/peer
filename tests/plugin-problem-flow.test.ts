@@ -17,7 +17,7 @@ const dist = path.join(root, "data", "plugins", "problem-fixture", "dist"); fs.m
 fs.writeFileSync(path.join(dist, "manifest.json"), JSON.stringify({ apiVersion: 1, id: "problem-fixture", name: "Fixture", version: "1.0.0", minAppVersion: "0.4.1", backend: "backend.cjs" }));
 fs.writeFileSync(path.join(dist, "backend.cjs"), "exports.activate = ctx => ctx.handle('context', () => ctx);");
 const { getPluginHost } = await import("../src/server/plugins.ts"), { handleChatRequest } = await import("../src/server/chat-handler.ts");
-const { createPracticeAgent } = await import("../src/agent/teacher-agent.ts"), { chatStore } = await import("../src/store/chats.ts");
+const { createPracticeAgent } = await import("../src/agent/teacher-agent.ts"), { chatStore } = await import("../src/server/stores.ts");
 const { isTurnRunning } = await import("../src/server/turn-liveness.ts"), { runningTurn, abortTurn } = await import("../src/server/turn-runs.ts");
 const { activeProblemOf, modelSolutionForConclude, newUserMessage } = await import("../src/core/native-messages.ts");
 const host = await getPluginHost(); await host.setEnabled("problem-fixture", true);

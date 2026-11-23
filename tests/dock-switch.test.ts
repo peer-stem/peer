@@ -16,7 +16,7 @@ Object.assign(win, {
 	getComputedStyle: (el: Element) => ({ overflowY: el.hasAttribute("data-dock-scroll-area") || el.hasAttribute("data-dock-viewport") ? "auto" : "visible" }),
 });
 Object.assign(globalThis, { window: win, document: dom.document, HTMLElement: win.HTMLElement });
-const { captureReadingPosition, holdAcrossSwitch, restoreReadingPosition, revealFocused, scrollNearest, trackReadingPosition, visibleFocused } = await import("../components/dock-switch.ts");
+const { captureReadingPosition, holdAcrossSwitch, restoreReadingPosition, revealFocused, scrollNearest, trackReadingPosition, visibleFocused } = await import("../src/client/engine/index.ts");
 
 type Box = { top: number; height: number; scrollHeight?: number };
 const boxes = new WeakMap<Element, Box>();

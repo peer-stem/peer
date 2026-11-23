@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { createQuestionEditorLease, controlledPluginAnswer } from "../components/plugin-question-editor.ts";
-import { capturePluginQuestionKey, ownPluginQuestionKeys, pluginQuestionKeySuppressed } from "../components/plugin-question-keys.ts";
-import { SessionModel } from "../components/session-core.ts";
-import { PluginFrontendManager } from "../components/plugin-manager.ts";
+import { createQuestionEditorLease, controlledPluginAnswer } from "../src/client/engine/index.ts";
+import { capturePluginQuestionKey, ownPluginQuestionKeys, pluginQuestionKeySuppressed } from "../src/client/engine/index.ts";
+import { SessionModel } from "../src/client/engine/index.ts";
+import { PluginFrontendManager } from "../src/client/engine/index.ts";
 import type { LhMessage, PluginInfo } from "../src/core/index.ts";
 import type { PluginQuestionSnapshot, PluginQuestionEditorHandle, PluginQuestionEditorProps } from "../src/core/plugin-questions.ts";
 

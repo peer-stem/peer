@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PluginFrontendManager } from "../components/plugin-manager.ts";
-import { SessionModel } from "../components/session-core.ts";
+import { PluginFrontendManager } from "../src/client/engine/index.ts";
+import { SessionModel } from "../src/client/engine/index.ts";
 import type { PluginFrontendContext, PluginInfo, PluginProblemSnapshot, PluginProblemEditorProps, LhMessage } from "../src/core/index.ts";
 
 const snapshot: PluginProblemSnapshot = { protocolVersion: 1, problemId: "p", pluginId: "fixture", typeId: "code", label: "Code", contractVersion: 1,

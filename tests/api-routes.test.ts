@@ -44,8 +44,8 @@ async function assertModuleParity(repoRoot: string, file: string, records: reado
 }
 
 it("routes-import", async () => {
-	const diskFiles = await walkRouteFiles(path.join(WORKTREE_ROOT, "app", "api"), WORKTREE_ROOT);
-	assert.equal(diskFiles.length, 52, "expected exactly 52 app/api/**/route.ts files on disk");
+	const diskFiles = await walkRouteFiles(path.join(WORKTREE_ROOT, "src", "api", "handlers"), WORKTREE_ROOT);
+	assert.equal(diskFiles.length, 52, "expected exactly 52 src/api/handlers/**/route.ts files on disk");
 
 	const listedFiles = [...new Set(routes.map((record) => record.file))].sort();
 	assert.deepEqual(listedFiles, diskFiles, "routes.ts file list must match disk files 1:1");
@@ -60,14 +60,14 @@ it("routes-import", async () => {
 });
 
 it("patternFromFile converts valid route paths and rejects malformed ones", () => {
-	assert.equal(patternFromFile("app/api/route.ts"), "/api");
-	assert.equal(patternFromFile("app/api/settings/route.ts"), "/api/settings");
-	assert.equal(patternFromFile("app/api/chats/[id]/route.ts"), "/api/chats/[id]");
+	assert.equal(patternFromFile("src/api/handlers/route.ts"), "/api");
+	assert.equal(patternFromFile("src/api/handlers/settings/route.ts"), "/api/settings");
+	assert.equal(patternFromFile("src/api/handlers/chats/[id]/route.ts"), "/api/chats/[id]");
 	assert.equal(
-		patternFromFile("app/api/plugins/[id]/assets/[...file]/route.ts"),
+		patternFromFile("src/api/handlers/plugins/[id]/assets/[...file]/route.ts"),
 		"/api/plugins/[id]/assets/[...file]",
 	);
-	for (const bad of ["", "src/api/routes.ts", "app/page.tsx", "app/api//route.ts", "app/api/x//route.ts"]) {
+	for (const bad of ["", "src/api/routes.ts", "app/api/settings/route.ts", "src/api/handlers//route.ts", "src/api/handlers/x//route.ts"]) {
 		assert.throws(() => patternFromFile(bad), /Invalid API route file path/);
 	}
 });

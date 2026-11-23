@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PluginSubmissionRunner, SubmissionModelEpoch } from "../components/plugin-submission-runner.ts";
+import { PluginSubmissionRunner, SubmissionModelEpoch } from "../src/client/engine/index.ts";
 import type { PluginSubmissionTarget, PluginSurfaceTarget } from "../src/core/index.ts";
 const target: PluginSubmissionTarget = { type: "text", channels: ["content"], sessionId: "chat", sessionKind: "teaching", surfaceTarget: {} as PluginSurfaceTarget };
 

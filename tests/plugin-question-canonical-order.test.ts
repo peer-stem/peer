@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SessionModel } from "../components/session-core.ts";
+import { SessionModel } from "../src/client/engine/index.ts";
 import { pendingPluginQuestionOf, type LhMessage, type PluginQuestionSnapshot } from "../src/core/index.ts";
 
 const deferred = <T>() => { let resolve!: (value: T) => void; let reject!: (error: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };

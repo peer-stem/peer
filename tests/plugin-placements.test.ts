@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { PluginFrontendManager } from "../components/plugin-manager.ts";
+import { PluginFrontendManager } from "../src/client/engine/index.ts";
 import type { PluginFrontendContext, PluginInfo, PluginActionContext, PluginSettingsRegistration } from "../src/core/plugins.ts";
 import type { PluginUi } from "../src/core/plugin-ui.ts";
 

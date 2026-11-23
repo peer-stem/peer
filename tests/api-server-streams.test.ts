@@ -4,7 +4,6 @@ import net, { type AddressInfo } from "node:net";
 import { test, type TestContext } from "node:test";
 import { createApiHttpServer, type ApiHttpServer, type CreateApiHttpServerOptions } from "../src/api/server.ts";
 import type { Dispatch } from "../src/api/types.ts";
-import { openWireStream } from "./api-parity-wire.ts";
 
 interface BoundTestServer {
 	api: ApiHttpServer;
@@ -246,18 +245,4 @@ test("arms shutdown deadline before in-flight handlers settle and logs when clos
 	await closeWithDeadline(srv.api, () => releaseStuck.resolve(), 1_500);
 	await pendingFetch;
 	assert.deepEqual(warnings, ["Forced HTTP connection close after 60ms shutdown deadline."]);
-});
-
-test("openWireStream waitForText rejects immediately when SSE stream ends before token arrives", async (t) => {
-	const controlled = makeControlledStream();
-	const headers = { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" };
-	const srv = await startServer(t, async () => new Response(controlled.stream, { status: 200, headers }));
-	const stream = await openWireStream(srv.port, { method: "GET", path: "/sse-early-close" });
-	assert.equal(stream.hasEnded(), false);
-	const waiting = stream.waitForText("never-sent", 2_000);
-	controlled.push("data: unrelated\n\n");
-	controlled.close();
-	await assert.rejects(waiting, /Stream ended before condition was met/);
-	assert.equal(stream.hasEnded(), true);
-	await assert.rejects(() => stream.waitForText("never-sent", 2_000), /Stream ended before condition was met/);
 });

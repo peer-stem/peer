@@ -19,7 +19,7 @@ import { after, describe, it } from "node:test";
 const TMP_DATA = fs.mkdtempSync(path.join(os.tmpdir(), "lh-chat-kind-"));
 process.env.LH_DATA_DIR = TMP_DATA;
 
-const { chatStore } = await import("../src/store/chats.ts");
+const { chatStore } = await import("../src/server/stores.ts");
 const { PRACTICE_PROBLEM_TOOL, PRACTICE_CONCLUDE_TOOL, newProblemDismissedMarker, newThinkingMessage, newUserMessage } = await import("../src/core/native-messages.ts");
 
 type LhMessage = import("../src/core/native-messages.ts").LhMessage;

@@ -22,7 +22,7 @@ import { after, describe, it, type TestContext } from "node:test";
 const TMP_DATA = fs.mkdtempSync(path.join(os.tmpdir(), "lh-compaction-"));
 process.env.LH_DATA_DIR = TMP_DATA;
 
-const { chatStore } = await import("../src/store/chats.ts");
+const { chatStore } = await import("../src/server/stores.ts");
 const {
 	ensureCompacted,
 	kickCompaction,
@@ -35,8 +35,8 @@ import type { CompactionDeps } from "../src/server/compaction.ts";
 import { createFauxCore, fauxAssistantMessage, type ToolCall } from "@earendil-works/pi-ai";
 const { subscribe } = await import("../src/core/events.ts");
 const { activeCompactionOf, newCompactionMarker, newUserMessage, measuredContextTokens, toLlmMessages, COMPACTED_HISTORY_HEADER, activeProblemOf, buildSubagentSteer, danglingQuestionOf, dismissedAnswer, endsInDismissal, newMessageId } = await import("../src/core/index.ts");
-const dismissRoute = await import("../app/api/chats/[id]/dismiss/route.ts");
-const artifactUiRoute = await import("../app/api/chats/[id]/artifact-ui/route.ts");
+const dismissRoute = await import("../src/api/handlers/chats/[id]/dismiss/route.ts");
+const artifactUiRoute = await import("../src/api/handlers/chats/[id]/artifact-ui/route.ts");
 import type { LhMessage } from "../src/core/index.ts";
 const { claimPreparingTurn } = await import("../src/server/turn-preparation.ts");
 const { beginTurn, endTurn } = await import("../src/server/turn-liveness.ts");

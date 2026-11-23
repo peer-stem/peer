@@ -11,7 +11,7 @@ import { folderDeletionScope, type GraphNode } from "../src/core/index.ts";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "lh-folder-deletion-"));
 process.env.LH_DATA_DIR = root; process.env.LH_AUTH_FILE = path.join(root, "auth.json");
 fs.writeFileSync(process.env.LH_AUTH_FILE, "{}\n");
-const { DELETE } = await import("../app/api/graph/sources/folders/[id]/route.ts");
+const { DELETE } = await import("../src/api/handlers/graph/sources/folders/[id]/route.ts");
 const { stores } = await import("../src/server/stores.ts");
 const { sourceDirectory } = await import("../src/server/source-organization.ts");
 const { deleteFolderWithSessions } = await import("../src/server/source-deletion.ts");

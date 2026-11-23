@@ -44,7 +44,7 @@ MUTABLE_ENV.OPENROUTER_API_KEY = "test-key";
 const { createTeacherAgent } = await import("../src/agent/teacher-agent.ts");
 const { handleChatInput } = await import("../src/server/chat-handler.ts");
 const { runningTurn } = await import("../src/server/turn-runs.ts");
-const { chatStore } = await import("../src/store/chats.ts");
+const { chatStore } = await import("../src/server/stores.ts");
 
 function restoreEnvKey(key: keyof typeof SAVED_ENV): void {
 	const prior = SAVED_ENV[key];

@@ -21,7 +21,7 @@
  */
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { absorbed, pendingCallTool, SessionModel } from "../components/session-core.ts";
+import { absorbed, pendingCallTool, SessionModel } from "../src/client/engine/index.ts";
 import type { ChatInput } from "../src/core/input-events.ts";
 import type { LhMessage } from "../src/core/native-messages.ts";
 import { newUserMessage, newAnswerResult, newThinkingMessage, needsContinuation, endsInDismissal, pendingQuestionOf } from "../src/core/native-messages.ts";

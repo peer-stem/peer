@@ -1,12 +1,13 @@
-import { createMathPlugin } from "@streamdown/math";
 import type { Element, Root } from "hast";
+import rehypeKatex from "rehype-katex";
+import remarkMath from "remark-math";
 import type { Plugin, Transformer } from "unified";
 
-const math = createMathPlugin({ singleDollarTextMath: true });
 type KatexOptions = { output?: "html"; errorColor?: string };
 type File = Parameters<Transformer<Root>>[1];
 type RenderKatex = (this: ThisParameterType<Plugin>, options: KatexOptions) => (tree: Root, file: File) => void;
-const [renderKatex, options] = math.rehypePlugin as [RenderKatex, KatexOptions];
+const DEFAULT_KATEX_OPTIONS: KatexOptions = { errorColor: "var(--color-muted-foreground)" };
+const renderKatex = rehypeKatex as unknown as RenderKatex;
 
 function hasClass(node: Element, name: string): boolean {
 	const classes = node.properties.className;
@@ -46,7 +47,7 @@ function stampFormulaTex(sources: readonly MathSourceEntry[]): void {
 }
 
 const htmlWithSource: Plugin<[], Root> = function () {
-	const render = renderKatex.call(this, { ...options, output: "html" });
+	const render = renderKatex.call(this, { ...DEFAULT_KATEX_OPTIONS, output: "html" });
 	return (tree, file) => {
 		const sources: MathSourceEntry[] = [];
 		collectMathSources(tree, sources);
@@ -55,4 +56,10 @@ const htmlWithSource: Plugin<[], Root> = function () {
 	};
 };
 
-export const transcriptMath = { ...math, rehypePlugin: htmlWithSource };
+export const transcriptMath = {
+	name: "katex" as const,
+	type: "math" as const,
+	remarkPlugin: [remarkMath, { singleDollarTextMath: true }] as const,
+	rehypePlugin: htmlWithSource,
+	getStyles: () => "katex/dist/katex.min.css",
+};

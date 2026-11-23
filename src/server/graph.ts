@@ -14,7 +14,7 @@ import {
 	pollLumberJackMutations,
 	type LumberJackForest,
 } from "../store/lumberjack/index.ts";
-import { getActiveLumberJackBundle, stores, type LumberJackStoreBundle } from "./stores.ts";
+import { peekOpenLumberJackBundle, stores, type LumberJackStoreBundle } from "./stores.ts";
 import { callCost } from "./pricing.ts";
 
 const forestAnchors = new WeakMap<LumberJackForest, number>();
@@ -83,7 +83,7 @@ function readSourcePlacementNames(): Record<string, string> {
  */
 export function graphView(): GraphSnapshot {
 	const snap = graphSnapshot(stores, readSourcePlacementNames());
-	const bundle = getActiveLumberJackBundle();
+	const bundle = peekOpenLumberJackBundle();
 	if (!bundle) return snap;
 	const learnerProgress = collectLearnerProgress(bundle, snap.nodes);
 	return Object.keys(learnerProgress).length > 0 ? { ...snap, learnerProgress } : snap;
@@ -122,7 +122,7 @@ export function graphRevision(): number {
 			/* absent — nothing has ever written it */
 		}
 	}
-	const bundle = getActiveLumberJackBundle();
+	const bundle = peekOpenLumberJackBundle();
 	if (bundle) revision = Math.max(revision, forestRevision(bundle.forest));
 	return revision;
 }

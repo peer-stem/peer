@@ -6,12 +6,12 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { parseHTML } from "linkedom";
 import * as engine from "../src/client/engine/index.ts";
-import * as legacyDockSwitch from "../components/dock-switch.ts";
-import * as legacyGraphCanvas from "../components/graph-canvas.ts";
-import * as legacyPlanLayout from "../components/plan-layout.ts";
-import * as legacyPluginManager from "../components/plugin-manager.ts";
-import * as legacyQuestionLayout from "../components/question-layout.ts";
-import * as legacySessionCore from "../components/session-core.ts";
+import * as legacyDockSwitch from "../src/client/engine/index.ts";
+import * as legacyGraphCanvas from "../src/client/engine/index.ts";
+import * as legacyPlanLayout from "../src/client/engine/index.ts";
+import * as legacyPluginManager from "../src/client/engine/index.ts";
+import * as legacyQuestionLayout from "../src/client/engine/index.ts";
+import * as legacySessionCore from "../src/client/engine/index.ts";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ENGINE_DIR = path.join(REPO_ROOT, "src/client/engine");

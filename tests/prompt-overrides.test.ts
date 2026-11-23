@@ -39,12 +39,12 @@ const { PROMPTS_OVERRIDE_DIR } = await import("../config.ts");
 const teacherAgent = await import("../src/agent/teacher-agent.ts");
 const { allSegmentPaths, effectivePromptSegments } = await import("../src/agent/prompt-segments.ts");
 const { isValidSegmentPath } = await import("../src/core/prompt-segments.ts");
-const { promptOverrides } = await import("../src/store/prompt-overrides.ts");
+const { promptOverrides } = await import("../src/server/stores.ts");
 // Route-level pins drive the actual app/api handlers (framework-free
 // Request/Response), isolated under the same temp LH_DATA_DIR.
-const { PUT: putSettingsSection } = await import("../app/api/settings/[section]/route.ts");
-const { PUT: putPromptText, DELETE: deletePromptText } = await import("../app/api/settings/prompts/[...segment]/route.ts");
-const { GET: getPromptSegments } = await import("../app/api/settings/prompts/route.ts");
+const { PUT: putSettingsSection } = await import("../src/api/handlers/settings/[section]/route.ts");
+const { PUT: putPromptText, DELETE: deletePromptText } = await import("../src/api/handlers/settings/prompts/[...segment]/route.ts");
+const { GET: getPromptSegments } = await import("../src/api/handlers/settings/prompts/route.ts");
 const { readSettingsRecord } = await import("../src/server/index.ts");
 
 /** The REAL repo prompts dir this suite must never touch (read-only). */
@@ -130,8 +130,8 @@ describe("isValidSegmentPath (the mirror-layout discipline)", () => {
 });
 
 describe("the override store", () => {
-	it("listOverrides is empty with no dir, then lists written mirrors sorted", () => {
-		fs.rmSync(PROMPTS_OVERRIDE_DIR, { recursive: true, force: true });
+	it("listOverrides is empty initially, then lists written mirrors sorted", () => {
+		for (const existing of promptOverrides.listOverrides()) promptOverrides.deleteOverride(existing);
 		assert.deepEqual(promptOverrides.listOverrides(), []);
 		promptOverrides.writeOverride("teacher/20-teaching.md", "custom teaching");
 		promptOverrides.writeOverride("system-prompt.md", "custom base");
@@ -369,9 +369,8 @@ describe("an orphaned ON heals to OFF on write — never a 400 (the invariant: a
 		const on = await putSection("agent", { prompts: { [SEGMENT]: true } });
 		assert.equal(on.status, 200);
 
-		// The disk-level wipe — OUTSIDE the app (the delete route now clears
-		// the switch, so this is the only way an orphan still arises).
-		fs.rmSync(path.join(PROMPTS_OVERRIDE_DIR, "teacher", "20-teaching.md"));
+		// Out-of-band removal directly from the override store without clearing the switch:
+		promptOverrides.deleteOverride(SEGMENT);
 
 		// The exact trap shape: the client mirrors the record's orphaned ON
 		// while writing an unrelated tool toggle. Today (pre-fix) → 400 forever.
@@ -490,12 +489,11 @@ describe("test isolation (the suite must never touch real user data)", () => {
 			REPO_PROMPTS,
 			"the seam must NOT resolve to the repo's real data/prompts",
 		);
-		// The suite proves it writes here:
 		promptOverrides.writeOverride("system-prompt.md", "isolation probe");
 		assert.equal(
-			fs.existsSync(path.join(TMP_DATA, "prompts", "system-prompt.md")),
+			fs.existsSync(path.join(TMP_DATA, "lumberjack")),
 			true,
-			"the write landed under the temp dir",
+			"the LumberJack forest landed under the temp dir",
 		);
 		promptOverrides.deleteOverride("system-prompt.md");
 	});

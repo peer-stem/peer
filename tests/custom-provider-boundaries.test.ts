@@ -8,17 +8,19 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "lh-custom-boundaries-"));
 const originalEnv = process.env;
 const originalFetch = globalThis.fetch;
 process.env = { ...(originalEnv.NODE_TEST_CONTEXT ? { NODE_TEST_CONTEXT: originalEnv.NODE_TEST_CONTEXT } : {}), ...(originalEnv.NODE_OPTIONS ? { NODE_OPTIONS: originalEnv.NODE_OPTIONS } : {}), NODE_ENV: "test", HOME: scratch, LH_DATA_DIR: scratch, LH_AUTH_FILE: path.join(scratch, "auth.json"), LH_IGNORE_ENV_KEYS: "1" };
-const route = await import("../app/api/custom-provider/route.ts");
+const route = await import("../src/api/handlers/custom-provider/route.ts");
 const keys = await import("../src/server/keys.ts");
 const { authEnvRecord } = await import("../src/core/auth-env.ts");
 const { CUSTOM_PROVIDER } = await import("../src/core/auth-keys.ts");
 const { authorizeFixture } = await import("./helpers/custom-provider-auth.ts");
 const { readCustomAuth } = await import("../src/store/auth.ts");
 const { persistCustomAuth } = await import("../src/server/custom-provider-auth.ts");
-const settingsFile = path.join(scratch, "settings.json");
-const seed = (cp: import("../src/core/settings.ts").CustomProviderSettings = { baseUrl: "http://old/v1", authMode: "keyless", models: [{ id: "m" }] }, key?: string) => fs.writeFileSync(settingsFile, JSON.stringify({ version: 1, customProvider: authorizeFixture(cp, key) }));
+const { ensureActiveLumberJackBundle, readSettingsRecord, writeSettingsRecord } = await import("../src/server/stores.ts");
+const seed = (cp: import("../src/core/settings.ts").CustomProviderSettings = { baseUrl: "http://old/v1", authMode: "keyless", models: [{ id: "m" }] }, key?: string) => {
+	writeSettingsRecord({ version: 1, customProvider: authorizeFixture(cp, key) });
+};
 const setFileKey = (key: string) => { const auth = readCustomAuth(); persistCustomAuth({ ...auth.binding!, fileKeyBaseUrl: auth.binding!.baseUrl }, key); };
-const current = () => JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+const current = () => readSettingsRecord() as Record<string, any>;
 const get = (inspect = false) => route.GET(new Request(`http://localhost/api/custom-provider${inspect ? "?authMode=apiKey" : ""}`));
 function mutate(body: unknown, method = "POST", headers: Record<string, string> = {}) {
 	return route.POST(new Request("http://localhost/api/custom-provider", { method, headers: { origin: "http://localhost", "content-type": "application/json", "if-match": get().headers.get("etag")!, ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }));
@@ -53,7 +55,7 @@ test("new keys have no arbitrary minimum; the exact probed key is stored", async
 	const body = await get().text(); assert.ok(!body.includes("Bearer"));
 });
 test("actual GET /api/keys fully redacts every custom key length and preserves other providers", async () => {
-	const inventory = await import("../app/api/keys/route.ts");
+	const inventory = await import("../src/api/handlers/keys/route.ts");
 	const rows = async () => (await (await inventory.GET()).json()).keys as import("../src/core/auth-keys.ts").AuthKeyStatus[];
 	assert.equal(keys.saveKey("OPENAI_API_KEY", "ordinary-provider-key-abcd").ok, true);
 	const ordinary = (await rows()).find(row => row.id === "OPENAI_API_KEY")!;
@@ -95,7 +97,7 @@ test("same-URL unbound development key needs existing explicit reuse consent", a
 	assert.equal(requests[0]?.authorization, "Bearer legacy-key"); assert.equal((await get().json()).keyReuseRequired, false);
 });
 test("generic custom/reserved key writes cannot bypass the atomic binding seam", async () => {
-	const ordinary = await import("../app/api/keys/[id]/route.ts");
+	const ordinary = await import("../src/api/handlers/keys/[id]/route.ts");
 	const { CUSTOM_AUTH_BINDING } = await import("../src/core/custom-provider-auth.ts");
 	const { authStore } = await import("../src/store/auth.ts");
 	const before = fs.readFileSync(path.join(scratch, "auth.json"), "utf8");
@@ -188,7 +190,7 @@ test("stale save, pin edit and disconnect all return reload guidance without wri
 	assert.equal(requests.length, 0); assert.deepEqual(current(), before);
 });
 test("after discovery preserves unrelated edits and rejects intervening custom edits", async () => {
-	globalThis.fetch = async () => { fs.writeFileSync(settingsFile, JSON.stringify({ ...current(), appearance: { theme: "catppuccin-mocha" }, claudeCode: { enabled: true } })); return Response.json({ data: [{ id: "m" }] }); };
+	globalThis.fetch = async () => { writeSettingsRecord({ ...current(), appearance: { theme: "catppuccin-mocha" }, claudeCode: { enabled: true } }); return Response.json({ data: [{ id: "m" }] }); };
 	assert.equal((await mutate({ baseUrl: "http://h", authMode: "keyless" })).status, 200);
 	assert.deepEqual(current().appearance, { theme: "catppuccin-mocha" }); assert.equal(current().claudeCode.enabled, true);
 	globalThis.fetch = async () => { seed({ baseUrl: "http://changed", authMode: "keyless", models: [] }); return Response.json({ data: [{ id: "m" }] }); };
@@ -209,8 +211,8 @@ test("offline pins accept 512/1, retain support declaration, and do not probe", 
 test("settings-write failure restores previous key/config and reports failure", async () => {
 	setFileKey("old-key");
 	const before = current();
-	const rename = fs.renameSync;
-	mock.method(fs, "renameSync", (...args: Parameters<typeof rename>) => { if (args[1] === settingsFile) throw new Error("private-io-details"); return rename(...args); });
+	const settingsStore = ensureActiveLumberJackBundle().settingsStore;
+	mock.method(settingsStore, "writeSettings", () => { throw new Error("private-io-details"); });
 	const res = await mutate({ baseUrl: "http://new", authMode: "apiKey", key: "new-key" });
 	assert.equal(res.status, 500); assert.ok(!(await res.text()).includes("private-io-details"));
 	assert.equal(keys.keyValue(CUSTOM_PROVIDER.envVar), "old-key"); assert.deepEqual(current(), before);

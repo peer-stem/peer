@@ -26,8 +26,8 @@ after(() => {
 	globalThis.fetch = originalFetch;
 	fs.rmSync(root, { recursive: true, force: true });
 });
-const { POST } = await import("../app/api/chats/[id]/dismiss/route.ts");
-const { chatStore } = await import("../src/store/chats.ts");
+const { POST } = await import("../src/api/handlers/chats/[id]/dismiss/route.ts");
+const { chatStore } = await import("../src/server/stores.ts");
 const { claimPreparingTurn } = await import("../src/server/turn-preparation.ts");
 const { isTurnRunning } = await import("../src/server/turn-liveness.ts");
 const { runningTurn, abortTurn } = await import("../src/server/turn-runs.ts");

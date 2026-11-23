@@ -20,7 +20,8 @@ async function objectBody(request: Request): Promise<Record<string, unknown>> {
 	if (!body || typeof body !== "object" || Array.isArray(body)) throw new InputError("Expected a JSON object");
 	return body as Record<string, unknown>;
 }
-export function createPluginTransport(deps: { getHost(): Promise<PluginTransportHost>; directory: string }) {
+export function createPluginTransport(deps: { getHost(): Promise<PluginTransportHost>; directory: string | (() => string) }) {
+	const resolveDir = () => (typeof deps.directory === "function" ? deps.directory() : deps.directory);
 	const guarded = async (handle: () => Promise<Response>) => {
 		try { return await handle(); }
 		catch (error) {
@@ -28,7 +29,7 @@ export function createPluginTransport(deps: { getHost(): Promise<PluginTransport
 			return json({ error: error instanceof Error || isPluginHostError(error) ? error.message : "Plugin request failed" }, status);
 		}
 	};
-	const catalog = (host: PluginTransportHost) => ({ plugins: host.list(), directory: deps.directory, conflicts: host.conflicts() });
+	const catalog = (host: PluginTransportHost) => ({ plugins: host.list(), directory: resolveDir(), conflicts: host.conflicts() });
 	return {
 		list: () => guarded(async () => json(catalog(await deps.getHost()))),
 		refresh: (request: Request) => guarded(async () => {

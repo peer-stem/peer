@@ -103,10 +103,15 @@ async function runCloseSequence(
 		await closeHttpServer();
 	} finally {
 		try {
-			if (closeSubstrate) await closeSubstrate();
+			const { disposePluginsForShutdown } = await import("@/src/server/plugins.ts");
+			await disposePluginsForShutdown().catch(() => {});
 		} finally {
-			detachProcessReporters();
-			await logger.flush();
+			try {
+				if (closeSubstrate) await closeSubstrate();
+			} finally {
+				detachProcessReporters();
+				await logger.flush();
+			}
 		}
 	}
 }
@@ -150,27 +155,37 @@ function parseOptionalPositiveInt(raw: string | undefined, label: string, max?: 
 
 function buildSubstrateOptions(
 	env: Record<string, string | undefined>,
+	resolveForestDir: (
+		e?: Record<string, string | undefined>,
+		root?: string,
+	) => { forestDir: string; stateRoot: string },
 	options?: StartApiServerOptions,
-): Omit<ActivateLumberJackOptions, "onChange"> | null {
-	const forestDir = env.PEER_FOREST_DIR?.trim();
-	if (!forestDir) return null;
+): Omit<ActivateLumberJackOptions, "onChange"> {
+	const { forestDir, stateRoot } = resolveForestDir(env, options?.repoRoot);
 	const mfnPort = parseOptionalPositiveInt(env.PEER_MFN_PORT, "PEER_MFN_PORT", 65535);
 	const streamIntervalMs = options?.streamIntervalMs ?? parseOptionalPositiveInt(env.PEER_STREAM_POLL_MS, "PEER_STREAM_POLL_MS");
 	const autoFlushMs = options?.mfnAutoFlushMs ?? parseOptionalPositiveInt(env.PEER_MFN_AUTO_FLUSH_MS, "PEER_MFN_AUTO_FLUSH_MS");
 	const mfnStateRoot = env.PEER_MFN_STATE_ROOT?.trim() || undefined;
+	const mfnEndpoint = env.PEER_MFN_ENDPOINT?.trim() || undefined;
+	const mfnToken = env.PEER_MFN_TOKEN?.trim() || undefined;
+	const mfnEnabled =
+		env.PEER_MFN_ENABLED === "1" ||
+		Boolean(options?.mfnClient || (mfnEndpoint && mfnToken) || (mfnStateRoot && mfnPort !== undefined));
 	return {
 		forestDir,
+		stateRoot,
+		legacyDataDir: env.LH_DATA_DIR?.trim() || undefined,
 		streamIntervalMs,
 		repoRoot: options?.repoRoot,
-		mfnClient: options?.mfnClient,
-		mfnEndpoint: env.PEER_MFN_ENDPOINT?.trim() || undefined,
-		mfnToken: env.PEER_MFN_TOKEN?.trim() || undefined,
-		mfnStateRoot,
-		mfnBinDir: env.PEER_MFN_BIN_DIR?.trim() || undefined,
-		mfnPort: mfnStateRoot ? mfnPort : undefined,
-		mfnBackend: env.PEER_COMPUTE_BACKEND?.trim() ? resolveComputeBackend(env.PEER_COMPUTE_BACKEND) : undefined,
-		mfnEmbeddersFile: env.PEER_MFN_EMBEDDERS_FILE?.trim() || undefined,
-		mfnAlmConfigFile: env.PEER_MFN_ALM_CONFIG_FILE?.trim() || undefined,
+		mfnClient: mfnEnabled ? options?.mfnClient : undefined,
+		mfnEndpoint: mfnEnabled ? mfnEndpoint : undefined,
+		mfnToken: mfnEnabled ? mfnToken : undefined,
+		mfnStateRoot: mfnEnabled ? mfnStateRoot : undefined,
+		mfnBinDir: mfnEnabled ? (env.PEER_MFN_BIN_DIR?.trim() || undefined) : undefined,
+		mfnPort: mfnEnabled && mfnStateRoot ? mfnPort : undefined,
+		mfnBackend: mfnEnabled && env.PEER_COMPUTE_BACKEND?.trim() ? resolveComputeBackend(env.PEER_COMPUTE_BACKEND) : undefined,
+		mfnEmbeddersFile: mfnEnabled ? (env.PEER_MFN_EMBEDDERS_FILE?.trim() || undefined) : undefined,
+		mfnAlmConfigFile: mfnEnabled ? (env.PEER_MFN_ALM_CONFIG_FILE?.trim() || undefined) : undefined,
 		mfnEnv: env as NodeJS.ProcessEnv,
 		mainPoolId: env.PEER_MFN_MAIN_POOL_ID?.trim() || undefined,
 		lexicalPoolId: env.PEER_MFN_LEXICAL_POOL_ID?.trim() || undefined,
@@ -183,16 +198,15 @@ export async function startApiServer(
 	options?: StartApiServerOptions,
 ): Promise<RunningApiServer> {
 	const config = readApiConfig(env);
-	const substrateOpts = buildSubstrateOptions(env, options);
+	const mergedEnv = env === process.env ? env : { ...process.env, ...env };
+	const { activateLumberJackSubstrate, resolveDefaultForestDir } = await import("@/src/server/stores.ts");
+	const substrateOpts = buildSubstrateOptions(mergedEnv, resolveDefaultForestDir, options);
 	const logger = options?.logger ?? createLogger({ level: config.logLevel });
 	const detachProcessReporters = attachProcessErrorReporters(logger);
 	let closeSubstrate: (() => Promise<void>) | undefined;
 	try {
-		if (substrateOpts) {
-			const { activateLumberJackSubstrate } = await import("@/src/server/stores.ts");
-			const active = await activateLumberJackSubstrate(substrateOpts);
-			closeSubstrate = active.close;
-		}
+		const active = await activateLumberJackSubstrate(substrateOpts);
+		closeSubstrate = active.close;
 		const { routes } = await import("./routes.ts");
 		await initPluginsSafely(logger);
 		const [{ createRouter, bodyLimit }, { createStaticHandler }, { createApiHttpServer }] = await Promise.all([
@@ -264,7 +278,7 @@ async function exitGracefully(running: RunningApiServer | null): Promise<never> 
 	process.exit(0);
 }
 
-async function runCli(): Promise<void> {
+export async function runCli(): Promise<void> {
 	let running: RunningApiServer | null = null;
 	let shuttingDown = false;
 	const onSignal = () => {

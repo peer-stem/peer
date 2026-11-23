@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isSubagentSteer, newestLearnerTurnFrom } from "../components/transcript-rows.ts";
+import { isSubagentSteer, newestLearnerTurnFrom } from "../src/client/engine/index.ts";
 import { newGraphContextMessage, newUserMessage, type LhMarkerMessage } from "../src/core/native-messages.ts";
 import { projectView, type LhViewMessage } from "../src/core/view.ts";
 

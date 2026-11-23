@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import { PluginFrontendManager, type PluginHost } from "../components/plugin-manager.ts";
+import { PluginFrontendManager, type PluginHost } from "../src/client/engine/index.ts";
 import type { PluginFrontendContext, PluginInfo } from "../src/core/plugins.ts";
 
 const info: PluginInfo = { id: "document-fixture", origin: "community", enabled: true, status: "active", revision: "1", manifest: {

@@ -27,13 +27,13 @@ process.env.LH_AUTH_FILE = path.join(scratch, "auth.json");
 process.env.OPENROUTER_API_KEY = "test-key-presence-gate";
 fs.writeFileSync(process.env.LH_AUTH_FILE, "{}");
 
-const { SessionModel } = await import("../components/session-core.ts");
+const { SessionModel } = await import("../src/client/engine/index.ts");
 const { createPracticeAgent, createProberAgent, createTeacherAgent } = await import("../src/agent/teacher-agent.ts");
 const { handleChatRequest } = await import("../src/server/chat-handler.ts");
 const { clearTurnFailure, rememberTurnFailure, runningTurn, turnFailure } = await import("../src/server/turn-runs.ts");
 const { isTurnRunning } = await import("../src/server/turn-liveness.ts");
-const { chatStore } = await import("../src/store/chats.ts");
-const { jobStore } = await import("../src/store/jobs.ts");
+const { chatStore } = await import("../src/server/stores.ts");
+const { jobStore } = await import("../src/server/stores.ts");
 const { subscribe } = await import("../src/core/events.ts");
 const { buildAnswer, normalizeOptions, resolveCorrect } = await import("../src/core/question-core.ts");
 const { ChatInputError, endsInFailedTurn, failedResponseAtEnd, inputAppends, parseChatInput, retryDrops } = await import("../src/core/input-events.ts");

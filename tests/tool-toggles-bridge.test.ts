@@ -17,9 +17,9 @@ import { Type } from "typebox";
 import { questionResult } from "../src/agent/tool-execute.ts";
 import { createProberAgent, createTeacherAgent } from "../src/agent/teacher-agent.ts";
 import type { ProberToolContext } from "../src/agent/tools.ts";
-import { jobStore } from "../src/store/jobs.ts";
+import { jobStore } from "../src/server/stores.ts";
 import { parseAgentSettingsBody } from "../src/server/settings-body.ts";
-import { chatStore } from "../src/store/chats.ts";
+import { chatStore } from "../src/server/stores.ts";
 import { createFauxCore } from "@earendil-works/pi-ai";
 import type { PiEngine } from "../src/agent/models.ts";
 

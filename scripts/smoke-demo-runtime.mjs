@@ -15,17 +15,33 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+const FORBIDDEN_GPU_ENV_RE = /^(?:CUDA_|ROCR_|HIP_|HSA_|ROCM_|NVCC_|CUBLAS_|CUDNN_|NCCL_)/i;
+
+export function resolveSmokeScratchBase() {
+	const dir = process.env.PEER_SCRATCH_DIR || process.env.TMPDIR || path.join(path.resolve(import.meta.dirname, ".."), ".test-scratch");
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+export function resolveStandaloneRoot(dir) {
+	const resolved = path.resolve(dir);
+	const nested = path.join(resolved, "standalone");
+	return fs.existsSync(path.join(nested, "server.js")) ? nested : resolved;
+}
+
 /** @param {Record<string, string | undefined>} env @param {string} home @returns {Record<string, string | undefined>} */
 export function probeEnv(env, home) {
 	const clean = Object.fromEntries(Object.entries(env).filter(([key]) =>
 		!/KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i.test(key) &&
+		!FORBIDDEN_GPU_ENV_RE.test(key) &&
 		!/^(AWS_|GOOGLE_|GCLOUD_|CLOUDSDK_|AZURE_|ANTHROPIC_|OPENAI_|OPENROUTER_|GEMINI_)/.test(key) &&
-		!["NODE_OPTIONS", "NODE_PATH", "LH_DEV_URL", "ELECTRON_RUN_AS_NODE"].includes(key)));
+		!["NODE_OPTIONS", "NODE_PATH", "LH_DEV_URL", "PEER_DEV_URL", "ELECTRON_RUN_AS_NODE"].includes(key)));
 	return {
 		...clean,
 		HOME: home, USERPROFILE: home,
 		APPDATA: path.join(home, "config"), LOCALAPPDATA: path.join(home, "local"),
 		XDG_CONFIG_HOME: path.join(home, "config"), XDG_CACHE_HOME: path.join(home, "cache"),
+		PEER_STATE_ROOT: home, PEER_FOREST_DIR: path.join(home, "lumberjack"),
 		LH_DATA_DIR: path.join(home, "data"), LH_AUTH_FILE: path.join(home, "auth.json"),
 		LH_IGNORE_ENV_KEYS: "1", NODE_ENV: "production",
 	};
@@ -48,10 +64,11 @@ export function formatProbeError(error, depth = 0) {
 }
 
 export function verifyDemoRuntime(standalone, runtime = process.execPath, browser = false) {
-	const home = fs.mkdtempSync(path.join(os.tmpdir(), "lh-demo-runtime-"));
+	const resolvedStandalone = resolveStandaloneRoot(standalone);
+	const home = fs.mkdtempSync(path.join(resolveSmokeScratchBase(), "peer-demo-runtime-"));
 	try {
 		fs.writeFileSync(path.join(home, "auth.json"), "{}\n", { mode: 0o600 });
-		const result = spawnSync(runtime, [fileURLToPath(import.meta.url), "--probe", path.resolve(standalone), ...(browser ? ["--browser"] : [])], {
+		const result = spawnSync(runtime, [fileURLToPath(import.meta.url), "--probe", resolvedStandalone, ...(browser ? ["--browser"] : [])], {
 			cwd: home,
 			env: { ...probeEnv(process.env, home), ELECTRON_RUN_AS_NODE: "1" },
 			encoding: "utf8", timeout: 60_000, maxBuffer: 128 * 1024,
@@ -261,7 +278,7 @@ async function main() {
 		assert.ok(args[index + 1] && !args[index + 1].startsWith("--"), `${name} requires a path`);
 		return path.resolve(args[index + 1]);
 	};
-	verifyDemoRuntime(value("--standalone", path.resolve(import.meta.dirname, "../.next/standalone")), value("--runtime", process.execPath), args.includes("--browser"));
+	verifyDemoRuntime(value("--standalone", path.resolve(import.meta.dirname, "../dist/server-payload/standalone")), value("--runtime", process.execPath), args.includes("--browser"));
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -28,12 +28,11 @@ const { newGraphContextMessage } = await import("../src/core/native-messages.ts"
 const { toLlmMessages } = await import("../src/core/native-messages.ts");
 import type { LhMessage } from "../src/core/native-messages.ts";
 const { projectView } = await import("../src/core/view.ts");
-const { POST } = await import("../app/api/chats/route.ts");
-const { initialPromptOwed } = await import("../components/chat.tsx");
-const { chatStore } = await import("../src/store/chats.ts");
-const { graphStore } = await import("../src/store/graph.ts");
+const { POST } = await import("../src/api/handlers/chats/route.ts");
+const { chatStore, graphStore, resetActiveLumberJackForTests } = await import("../src/server/stores.ts");
 
-after(() => {
+after(async () => {
+	await resetActiveLumberJackForTests();
 	fs.rmSync(TMP_DATA, { recursive: true, force: true });
 });
 
@@ -80,26 +79,6 @@ describe("newGraphContextMessage", () => {
 		const part = view[0]!.parts[0] as { type: string; data: unknown };
 		assert.equal(part.type, "data-graph-context");
 		assert.deepEqual(part.data, m.details);
-	});
-});
-
-// ── the first-send gate (the dead first turn, owner report 2026-10-04) ──────
-
-describe("initialPromptOwed", () => {
-	it("a marker-only record still owes the prompt — scaffolding is not conversation", () => {
-		const marker = newGraphContextMessage(PICKS, []);
-		assert.equal(initialPromptOwed([marker as never], "drill me on logic"), true);
-	});
-
-	it("once a user or assistant message exists, the prompt is spent", () => {
-		const marker = newGraphContextMessage(PICKS, []);
-		const user = { role: "user" } as never;
-		assert.equal(initialPromptOwed([marker as never, user], "drill me"), false);
-		assert.equal(initialPromptOwed([{ role: "assistant" } as never], "drill me"), false);
-	});
-
-	it("no prompt → nothing owed (the empty-draft case)", () => {
-		assert.equal(initialPromptOwed([], undefined), false);
 	});
 });
 

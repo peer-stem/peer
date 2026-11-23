@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { createDockMorph, naturalDockHeight } from "../components/dock-morph.ts";
+import { createDockMorph, naturalDockHeight } from "../src/client/engine/index.ts";
 
 // Deterministic CSS/WAAPI geometry seam; browser frame verification is separate.
 function fixture() {

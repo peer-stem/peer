@@ -77,5 +77,5 @@ test("malformed/unreadable private snapshots are never rewritten or used, unrela
 test("missing auth file initializes normally with explicit new key, preserving other settings", () => {
 	const home = profile(); fs.unlinkSync(path.join(home, "auth.json")); closed(home);
 	assert.equal(child(home, "mutate").data.status, 200); const live = child(home, "inspect").data; assert.equal(live.enabled, true); assert.equal(live.requests[0].authorization, "Bearer fixture-new-key");
-	assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, "settings.json"), "utf8")).appearance, { theme: "catppuccin-mocha" });
+	assert.deepEqual(live.appearance, { theme: "catppuccin-mocha" });
 });

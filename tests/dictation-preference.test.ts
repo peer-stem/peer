@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createDictationLanguageStore } from "../components/dictation-preference.ts";
+import { createDictationLanguageStore } from "../src/client/engine/index.ts";
 
 test("all readers immediately receive the confirmed write without another GET", async () => {
 	let reads = 0;

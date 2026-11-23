@@ -12,7 +12,7 @@ const root = fs.mkdtempSync("/tmp/peer/external-cli-sync-");
 process.env.LH_DATA_DIR = path.join(root, "data");
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 
-const { settingsStore } = await import("../src/store/settings.ts");
+const { settingsStore } = await import("../src/server/stores.ts");
 const { piModels } = await import("../src/agent/models.ts");
 const { externalCliStatus, installExternalCliSource } = await import("../src/server/external-cli.ts");
 const { discoveredCliModels, refreshAgyModels } = await import("../src/server/external-cli-models.ts");

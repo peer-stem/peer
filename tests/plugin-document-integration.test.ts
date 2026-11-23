@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { it, type TestContext } from "node:test";
-import { PluginFrontendManager } from "../components/plugin-manager.ts";
+import { PluginFrontendManager } from "../src/client/engine/index.ts";
 import type { PluginFrontendContext } from "../src/core/plugins.ts";
 import { createPluginHost } from "../src/server/plugin-host.ts";
 import { createPluginDocumentRoute, createPluginTransport } from "../src/server/plugin-transport.ts";

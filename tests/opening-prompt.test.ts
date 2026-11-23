@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { clearOpeningPrompt, readOpeningPrompt, readOpeningPromptEntry, stashOpeningPrompt } from "../components/opening-prompt.ts";
-import { SessionStarter } from "../components/start-session.ts";
+import { clearOpeningPrompt, readOpeningPrompt, readOpeningPromptEntry, stashOpeningPrompt } from "../src/client/engine/index.ts";
+import { SessionStarter } from "../src/client/engine/index.ts";
 
 const original = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
 let data: Map<string, string>;

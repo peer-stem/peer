@@ -24,7 +24,9 @@ export const isSafeEntityId = (v: unknown): v is string =>
 	!v.includes("\0");
 
 const isProvenancePoint = (v: unknown): v is ProvenancePoint =>
-	isPlainRecord(v) && isSafeEntityId(v.chatId) && isSafeEntityId(v.messageId);
+	isPlainRecord(v) &&
+	isSafeEntityId(v.chatId) &&
+	(v.messageId === "" || isSafeEntityId(v.messageId));
 
 export const isGraphNode = (v: unknown): v is GraphNode =>
 	isPlainRecord(v) &&

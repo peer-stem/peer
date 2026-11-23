@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { citationPulseSteps, citationSourceHref, revealPlan } from "../components/citation-source.ts";
+import { citationPulseSteps, citationSourceHref, revealPlan } from "../src/client/engine/index.ts";
 
 describe("revealPlan", () => {
 	it("navigates to a citation from another chat", () => {

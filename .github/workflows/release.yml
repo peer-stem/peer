@@ -15,9 +15,6 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  NEXT_TELEMETRY_DISABLED: "1"
-
 jobs:
   quality:
     name: Release gates
@@ -177,17 +174,17 @@ jobs:
         run: |
           case "$RUNNER_OS" in
             macOS)
-              app="dist/mac-arm64/LearnHarness.app/Contents"
+              app="dist/mac-arm64/peer.app/Contents"
               payload="$app/Resources/server/standalone"
-              runtime="$app/MacOS/LearnHarness"
+              runtime="$app/MacOS/peer"
               ;;
             Windows)
               payload="dist/win-unpacked/resources/server/standalone"
-              runtime="dist/win-unpacked/LearnHarness.exe"
+              runtime="dist/win-unpacked/peer.exe"
               ;;
             Linux)
               payload="dist/linux-unpacked/resources/server/standalone"
-              runtime="dist/linux-unpacked/learnharness"
+              runtime="dist/linux-unpacked/peer"
               ;;
           esac
           node scripts/smoke-provider-runtime.mjs --standalone "$payload"
@@ -196,20 +193,20 @@ jobs:
         run: |
           case "$RUNNER_OS" in
             macOS)
-              app="dist/mac-arm64/LearnHarness.app/Contents"
-              node scripts/smoke-demo-runtime.mjs --standalone "$app/Resources/server/standalone" --runtime "$app/MacOS/LearnHarness" --browser
+              app="dist/mac-arm64/peer.app/Contents"
+              node scripts/smoke-demo-runtime.mjs --standalone "$app/Resources/server/standalone" --runtime "$app/MacOS/peer" --browser
               ;;
             Windows)
-              node scripts/smoke-demo-runtime.mjs --standalone dist/win-unpacked/resources/server/standalone --runtime dist/win-unpacked/LearnHarness.exe --browser
+              node scripts/smoke-demo-runtime.mjs --standalone dist/win-unpacked/resources/server/standalone --runtime dist/win-unpacked/peer.exe --browser
               ;;
             Linux)
-              xvfb-run -a node scripts/smoke-demo-runtime.mjs --standalone dist/linux-unpacked/resources/server/standalone --runtime dist/linux-unpacked/learnharness --browser
+              xvfb-run -a node scripts/smoke-demo-runtime.mjs --standalone dist/linux-unpacked/resources/server/standalone --runtime dist/linux-unpacked/peer --browser
               ;;
           esac
       - name: Save installers and update metadata
         uses: actions/upload-artifact@v7
         with:
-          name: learnharness-${{ matrix.platform }}
+          name: peer-${{ matrix.platform }}
           retention-days: 7
           if-no-files-found: error
           path: |

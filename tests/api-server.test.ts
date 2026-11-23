@@ -3,7 +3,7 @@ import { PassThrough } from "node:stream";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import net, { type AddressInfo } from "node:net";
 import { test, type TestContext } from "node:test";
-import { MAX_IMPORT_BODY_BYTES } from "../lib/notes-import-limits.ts";
+import { MAX_IMPORT_BODY_BYTES } from "../src/core/notes-import-limits.ts";
 import { createApiHttpServer, serveHttp, type ApiHttpServer, type CreateApiHttpServerOptions } from "../src/api/server.ts";
 import type { Dispatch } from "../src/api/types.ts";
 

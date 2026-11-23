@@ -66,15 +66,28 @@ describe("writeFileAtomicSync", () => {
 		assert.deepEqual(temps(file), []);
 	});
 
-	it("crashes right before the rename keep the chat (the #403 repro)", () => {
-		const env = { ...process.env, NODE_ENV: "test" as const, LH_DATA_DIR: fs.mkdtempSync(path.join(root, "data-")) };
-		const run = (...args: string[]) => spawnSync(process.execPath, ["--import", "tsx", "tests/helpers/chat-save-crash.ts", ...args], { env, encoding: "utf8", timeout: 30000 });
-		const id = run("create").stdout.trim();
-		assert.equal(run("crash", id).status, 77);
-		const seen = JSON.parse(run("read", id).stdout);
-		assert.equal(seen.chat?.messages[0].content, "first", "the old record still reads");
-		assert.deepEqual(seen.listed, [id], "the sidebar still lists it and skips the leftover");
-		assert.equal(seen.files.filter((f: string) => f.includes(".tmp-")).length, 1, "the crash left its temp file");
+	it("crashes right before the rename keep the previous auth file intact", () => {
+		const dir = fs.mkdtempSync(path.join(root, "auth-crash-"));
+		const authPath = path.join(dir, "auth.json");
+		writeFileAtomicSync(authPath, JSON.stringify({ OPENAI_API_KEY: "first" }), { mode: 0o600 });
+		const crashScript = `
+			import fs from "node:fs";
+			import { writeFileAtomicSync } from ${JSON.stringify(path.resolve("src/store/atomic-write.ts"))};
+			const target = process.argv[1];
+			const orig = fs.renameSync;
+			fs.renameSync = (...args) => {
+				if (args[1] === target) process.exit(77);
+				return orig(...args);
+			};
+			writeFileAtomicSync(target, JSON.stringify({ OPENAI_API_KEY: "second" }), { mode: 0o600 });
+		`;
+		const crash = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", crashScript, authPath], {
+			encoding: "utf8",
+			timeout: 15000,
+		});
+		assert.equal(crash.status, 77);
+		assert.deepEqual(JSON.parse(fs.readFileSync(authPath, "utf8")), { OPENAI_API_KEY: "first" });
+		assert.equal(temps(authPath).length, 1, "the crash left its temp file");
 	});
 
 	it("modeled Windows: briefly held files are renamed once released", (t) => {

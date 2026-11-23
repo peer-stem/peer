@@ -11,7 +11,7 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "lh-custom-lifecycle-"));
 const originalEnv = process.env;
 const originalFetch = globalThis.fetch;
 process.env = { ...(originalEnv.NODE_TEST_CONTEXT ? { NODE_TEST_CONTEXT: originalEnv.NODE_TEST_CONTEXT } : {}), ...(originalEnv.NODE_OPTIONS ? { NODE_OPTIONS: originalEnv.NODE_OPTIONS } : {}), NODE_ENV: "test", HOME: scratch, LH_DATA_DIR: scratch, LH_AUTH_FILE: path.join(scratch, "auth.json"), LH_IGNORE_ENV_KEYS: "1" };
-const { writeSettings, readSettings } = await import("../src/store/settings.ts");
+const { writeSettings, readSettings } = await import("../src/server/stores.ts");
 const { piEngineForSpec, piModels } = await import("../src/agent/models.ts");
 await import("../src/server/keys.ts");
 const { readCustomAuth } = await import("../src/store/auth.ts");

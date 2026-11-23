@@ -23,11 +23,11 @@ after(() => { globalThis.fetch = originalFetch; fs.rmSync(root, { recursive: tru
 const { createPluginHost } = await import("../src/server/plugin-host.ts");
 const { createPluginInference } = await import("../src/server/plugin-inference.ts");
 const { createPluginWorkerService } = await import("../src/agent/plugin-workers.ts");
-const { createPluginTaskRecordStore } = await import("../src/store/plugin-task-records.ts");
+const { createPluginTaskRecordStore } = await import("../src/server/stores.ts");
 const { createPluginBackgroundTool } = await import("../src/server/plugin-background-tools.ts");
 const { createTeacherAgent } = await import("../src/agent/teacher-agent.ts");
-const { chatStore } = await import("../src/store/chats.ts");
-const { jobStore } = await import("../src/store/jobs.ts");
+const { chatStore } = await import("../src/server/stores.ts");
+const { jobStore } = await import("../src/server/stores.ts");
 const { registerJobAbort, unregisterJobAbort, isJobLive } = await import("../src/agent/subagents/aborts.ts");
 const { projectView } = await import("../src/core/view.ts");
 

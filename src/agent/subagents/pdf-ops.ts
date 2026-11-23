@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { ROOT } from "@/config.ts";
 import { documentToMarkdown, type PdfPage } from "./pdf-markdown.ts";
 
 /**
@@ -52,7 +52,7 @@ async function loadPdfjs() {
  *  pdfjs checks endsWith("/") even on Windows: use a literal trailing slash,
  *  NOT path.sep ("\\" on Windows). Node fs accepts this path on every OS. */
 export function standardFontsDir(): string {
-	return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "node_modules", "pdfjs-dist", "standard_fonts") + "/";
+	return path.join(ROOT, "node_modules", "pdfjs-dist", "standard_fonts") + "/";
 }
 
 async function openDocument(filePath: string) {

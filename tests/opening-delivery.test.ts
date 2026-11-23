@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { SessionModel } from "../components/session-core.ts";
+import { SessionModel } from "../src/client/engine/index.ts";
 import { newUserMessage } from "../src/core/native-messages.ts";
 
 function deferred<T>() {
